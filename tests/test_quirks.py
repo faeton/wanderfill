@@ -453,3 +453,42 @@ def test_resolver_rejects_ids_absent_from_the_catalogue():
     assert r.from_geocoder({"region": 1387}) is None   # stale: Switzerland, since split
     assert r.from_geocoder({"region": -1}) is None     # open water
     assert r.from_geocoder({"result": "OK"}) is None
+
+
+# --------------------------------------------------------------------------
+# a visit can have no dates at all
+# --------------------------------------------------------------------------
+
+def test_visit_survives_null_dates():
+    """Every date field comes back null for a region that was merely clicked.
+
+    That is how most long-standing profiles are populated — one real profile
+    had 118 of them — and ``int(None)`` raises ``TypeError``. The failure is
+    invisible until something reads *every* region's visits rather than the
+    handful it just wrote, at which point a whole run dies on region 4.
+    """
+    v = Visit.from_api(
+        {
+            "id": 13132630, "quality": 3, "trip_id": None,
+            "year_from": None, "month_from": None, "day_from": None,
+            "year_to": None, "month_to": None, "day_to": None,
+        },
+        region=4,
+    )
+    assert v.date_from is None and v.date_to is None
+    assert v.id == 13132630          # it is still a visit
+    assert v.quality == 3            # and it still counts toward the region
+
+
+def test_visit_still_reads_a_dated_row():
+    v = Visit.from_api(
+        {
+            "id": 1, "quality": 4, "trip_id": 77,
+            "year_from": 2024, "month_from": 1, "day_from": 3,
+            "year_to": 2024, "month_to": 1, "day_to": 4,
+        },
+        region=3,
+    )
+    assert v.date_from == dt.date(2024, 1, 3)
+    assert v.date_to == dt.date(2024, 1, 4)
+    assert v.trip_id == 77

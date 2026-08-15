@@ -36,24 +36,52 @@ QUALITY = {
 }
 
 
+def _iso(day: dt.date | None) -> str | None:
+    """Dates are optional on a visit, so every serialiser has to cope."""
+    return day.isoformat() if day else None
+
+
+def _date_parts(raw: dict, side: str) -> dt.date | None:
+    """``year_from``/``month_from``/``day_from`` -> a date, or None if any is null."""
+    parts = [raw.get(f"{unit}_{side}") for unit in ("year", "month", "day")]
+    if any(p is None or p == "" for p in parts):
+        return None
+    try:
+        return dt.date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class Visit:
     """One visit record. Counts toward the region total whether or not it has a trip."""
 
     id: int
     region: int
-    date_from: dt.date
-    date_to: dt.date
+    date_from: dt.date | None
+    date_to: dt.date | None
     quality: int
     trip_id: int | None
 
     @classmethod
     def from_api(cls, raw: dict, region: int) -> Visit:
+        """Build a visit from one API row, including the undated kind.
+
+        **A visit can have no dates at all.** Every date component comes back
+        ``null`` for a region that was simply clicked as visited, which is how
+        most long-standing profiles are populated — one profile here had 118 of
+        them. Parsing those with ``int()`` raises ``TypeError`` on the first
+        one, which is invisible until something reads *every* region's visits
+        rather than the handful it just wrote.
+
+        An undated visit still counts toward the region total. It is only the
+        dates that are absent, and absent is not the same as wrong.
+        """
         return cls(
             id=int(raw["id"]),
             region=region,
-            date_from=dt.date(int(raw["year_from"]), int(raw["month_from"]), int(raw["day_from"])),
-            date_to=dt.date(int(raw["year_to"]), int(raw["month_to"]), int(raw["day_to"])),
+            date_from=_date_parts(raw, "from"),
+            date_to=_date_parts(raw, "to"),
             quality=int(raw.get("quality", 3)),
             trip_id=int(raw["trip_id"]) if raw.get("trip_id") else None,
         )
@@ -284,8 +312,8 @@ class NomadMania:
             "visited_regions": sorted(ids),
             "visited_dare": sorted(self.visited_dare_ids()),
             "visits": {
-                str(r): [v.__dict__ | {"date_from": v.date_from.isoformat(),
-                                       "date_to": v.date_to.isoformat()}
+                str(r): [v.__dict__ | {"date_from": _iso(v.date_from),
+                                       "date_to": _iso(v.date_to)}
                          for v in self.visits_for_region(r)]
                 for r in targets
             },
