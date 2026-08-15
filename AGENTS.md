@@ -38,8 +38,14 @@ localStorage.getItem('token')
 ```
 
 That is a UUID-shaped bearer valid for a year. Put it in the environment as
-`NM_TOKEN` and never anywhere else. Do not offer to log in for them — that means
-handling a password, which you must not do.
+`NM_TOKEN`, or in a `chmod 600` `.env` beside the repo — `wanderfill` reads the
+environment first, then `.env`, and stops at the repository root. Nowhere else.
+Do not offer to log in for them — that means handling a password, which you must
+not do.
+
+If a user pastes a token into the conversation, say so plainly and tell them to
+rotate it by logging out and back in. It is in the transcript now; nothing you
+do afterwards takes it back.
 
 If the browser shows them logged out, the site can be re-authenticated by writing
 the token back into `localStorage` and into a `token` cookie, then reloading.

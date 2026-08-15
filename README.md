@@ -222,10 +222,30 @@ Open nomadmania.com while logged in, and run this in the browser console:
 localStorage.getItem('token')
 ```
 
+Then put it somewhere the tool can find it. It looks in the environment first,
+then in a `.env` beside the repo — and stops at the repository root rather than
+climbing your home directory hunting for secrets:
+
 ```bash
-export NM_TOKEN='...'
-wanderfill whoami
+export NM_TOKEN='...'                              # this shell only
+
+printf "NM_TOKEN='...'\n" > .env && chmod 600 .env  # or persist it; .env is gitignored
 ```
+
+On macOS, Keychain keeps it out of a plaintext file that backups will sweep up:
+
+```bash
+security add-generic-password -s wanderfill -a nomadmania -w '...'
+export NM_TOKEN=$(security find-generic-password -s wanderfill -a nomadmania -w)
+```
+
+```bash
+wanderfill whoami        # says which account, and where the token came from
+```
+
+`whoami` prints the uid on purpose. Once a token can come from a file, "the
+token works" stops being the same question as "this is the account I meant" —
+and every plan is bound to an account id.
 
 The password is never needed and this tool will never ask for it.
 

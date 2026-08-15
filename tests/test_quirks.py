@@ -492,3 +492,69 @@ def test_visit_still_reads_a_dated_row():
     assert v.date_from == dt.date(2024, 1, 3)
     assert v.date_to == dt.date(2024, 1, 4)
     assert v.trip_id == 77
+
+
+# --------------------------------------------------------------------------
+# the token comes from somewhere, and which somewhere matters
+# --------------------------------------------------------------------------
+
+def test_dotenv_reads_both_shapes_people_write(tmp_path):
+    from wanderfill.cli.main import read_dotenv
+
+    f = tmp_path / ".env"
+    f.write_text(
+        "# a comment\n"
+        "\n"
+        "export NM_TOKEN='abc-123'\n"
+        "OTHER=plain\n"
+        'QUOTED="with spaces"\n'
+        "not a variable\n"
+    )
+    env = read_dotenv(f)
+    assert env["NM_TOKEN"] == "abc-123"     # export stripped, quotes stripped
+    assert env["OTHER"] == "plain"
+    assert env["QUOTED"] == "with spaces"
+    assert "not a variable" not in env
+
+
+def test_dotenv_never_raises_on_a_file_it_cannot_read(tmp_path):
+    """Failing to start because of a stray character is a bad half-hour."""
+    from wanderfill.cli.main import read_dotenv
+
+    assert read_dotenv(tmp_path / "absent") == {}
+    weird = tmp_path / ".env"
+    weird.write_bytes(b"\xff\xfe not utf-8 at all")
+    assert read_dotenv(weird) == {}
+
+
+def test_the_environment_beats_a_file(tmp_path, monkeypatch):
+    """An exported variable is somebody saying 'this one, now'.
+
+    A file on disk is not, and a token the user forgot they wrote is how the
+    wrong account gets written to.
+    """
+    from wanderfill.cli.main import find_token
+
+    (tmp_path / ".env").write_text("NM_TOKEN=from-file\n")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("NM_TOKEN", "from-environment")
+    assert find_token()[0] == "from-environment"
+
+    monkeypatch.delenv("NM_TOKEN")
+    token, source = find_token()
+    assert token == "from-file"
+    assert source.endswith(".env")      # and it says where it came from
+
+
+def test_the_search_stops_at_the_repository_root(tmp_path, monkeypatch):
+    """Never climb out of the project hunting for somebody else's secrets."""
+    from wanderfill.cli.main import find_token
+
+    (tmp_path / ".env").write_text("NM_TOKEN=outside-the-repo\n")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("NM_TOKEN", raising=False)
+    assert find_token() == ("", "")

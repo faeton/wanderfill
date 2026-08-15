@@ -43,15 +43,82 @@ from ..evidence import (
 DEFAULT_WORKDIR = Path.home() / ".local" / "share" / "wanderfill"
 
 
+def read_dotenv(path: Path) -> dict[str, str]:
+    """Parse a ``.env`` file. Deliberately tiny, deliberately not a dependency.
+
+    Handles the two shapes people actually write — ``NM_TOKEN=x`` and
+    ``export NM_TOKEN='x'`` — plus comments and blank lines. It does not do
+    interpolation, multi-line values or ``${OTHER}`` expansion: this file holds
+    one secret, and a parser with features is a parser with surprises.
+
+    Never raises. A malformed line is skipped, because failing to start over a
+    stray character in a file the user cannot see the contents of is a bad
+    half-hour.
+    """
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # Unreadable, or saved in some other encoding by an editor that meant
+        # well. Either way it is not a token, and it is not worth dying over.
+        return out
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].lstrip()
+        key, sep, value = s.partition("=")
+        if not sep:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def find_token() -> tuple[str, str]:
+    """The token and where it came from, searched in order of explicitness.
+
+    The environment wins, because an explicitly exported variable is somebody
+    saying "this one, now" and a file on disk is not. After that: ``.env`` in
+    the working directory, then in the repository root, so running from a
+    subdirectory still works.
+
+    The source is returned so the CLI can *say* which one it used. A token
+    coming from a file the user forgot they wrote is exactly how the wrong
+    account gets written to, and the plan protocol's account check is the last
+    line of defence, not the first.
+    """
+    env = os.environ.get("NM_TOKEN")
+    if env:
+        return env, "NM_TOKEN in the environment"
+    here = Path.cwd()
+    for folder in (here, *here.parents):
+        candidate = folder / ".env"
+        if candidate.exists():
+            token = read_dotenv(candidate).get("NM_TOKEN", "")
+            if token:
+                return token, str(candidate)
+        if (folder / ".git").exists():
+            break  # do not climb out of the repository looking for secrets
+    return "", ""
+
+
 def _client(args) -> NomadMania:
-    token = os.environ.get("NM_TOKEN") or ""
+    token, source = find_token()
     if not token:
         sys.exit(
             "No token. Open nomadmania.com while logged in, run\n"
             "    localStorage.getItem('token')\n"
-            "in the browser console, and put the value in NM_TOKEN.\n"
+            "in the browser console, and put the value in NM_TOKEN — either\n"
+            "exported in your shell, or in a .env file next to this repo:\n"
+            "    printf \"NM_TOKEN='...'\\n\" > .env && chmod 600 .env\n"
             "Never paste it into an issue, a gist, or a chat with a model."
         )
+    if source != "NM_TOKEN in the environment" and not getattr(args, "quiet", False):
+        print(f"token from {source}", file=sys.stderr)
     return NomadMania(token)
 
 
@@ -59,8 +126,15 @@ def _client(args) -> NomadMania:
 
 
 def cmd_whoami(args) -> int:
+    """Which account does this token belong to?
+
+    Answered with ``status-quick`` rather than ``status``, because ``status``
+    replies ``{result, status, admin}`` and no account id at all. The id is the
+    whole question: now that a token can come from a file, "the token works" is
+    not the same as "the token is the account you think it is".
+    """
     c = _client(args)
-    print(json.dumps(c.status(), indent=1, ensure_ascii=False)[:2000])
+    print(json.dumps(c.status_quick(), indent=1, ensure_ascii=False)[:2000])
     return 0
 
 
