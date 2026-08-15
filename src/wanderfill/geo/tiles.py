@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import gzip
 import math
+import os
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -82,13 +84,16 @@ class SeriesPoint:
 class TileReader:
     """Fetches and decodes tiles, with an on-disk cache."""
 
-    def __init__(self, cache_dir=None, timeout: float = 30.0):
+    def __init__(self, cache_dir=None, timeout: float = 30.0, memo: int = 256):
+        from collections import OrderedDict
         from pathlib import Path
 
         default = Path.home() / ".cache" / "wanderfill" / "tiles"
         self.cache = Path(cache_dir) if cache_dir else default
         self.cache.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self._memo: OrderedDict[tuple, list] = OrderedDict()
+        self._memo_size = memo
 
     def raw(self, layer: str, z: int, x: int, y: int) -> bytes:
         path = self.cache / layer / str(z) / str(x) / f"{y}.pbf"
@@ -99,12 +104,22 @@ class TileReader:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 data = r.read()
-        except Exception:
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (204, 404, 410):
+                return b""  # a 500 or a rate limit is temporary; do not enshrine it
             data = b""  # an absent tile is ordinary: most of the planet is empty
+        except Exception:
+            # Timeouts and DNS failures are about the network, not the map. A run
+            # started on a bad connection would otherwise poison the cache with
+            # empty tiles that never expire, and every later run would silently
+            # resolve half a continent to nothing.
+            return b""
         if data[:2] == b"\x1f\x8b":
             data = gzip.decompress(data)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
+        tmp.write_bytes(data)
+        tmp.replace(path)  # atomic: a half-written tile is a decode error later
         return data
 
     def decode(self, layer: str, z: int, x: int, y: int) -> dict:
@@ -137,6 +152,28 @@ class TileReader:
             for f in lyr.get("features", []):
                 geom = shape(f["geometry"])
                 yield f.get("properties", {}), affine_transform(geom, matrix)
+
+    def shapes(self, layer: str, z: int, x: int, y: int) -> list[tuple[dict, object]]:
+        """``polygons`` with the decode kept in memory for the next caller.
+
+        Resolving a photo library means asking about tens of thousands of
+        coordinates that cluster into a couple of thousand tiles. The bytes are
+        already cached on disk; what costs the time is decoding the tile and
+        rebuilding its shapely geometries, once per coordinate. Memoising a few
+        hundred tiles turns that back into once per tile — an hour into a
+        minute — as long as callers ask in tile order, which
+        :meth:`RegionResolver.resolve_many` does.
+        """
+        key = (layer, z, x, y)
+        hit = self._memo.get(key)
+        if hit is None:
+            hit = list(self.polygons(layer, z, x, y))
+            self._memo[key] = hit
+            while len(self._memo) > self._memo_size:
+                self._memo.popitem(last=False)
+        else:
+            self._memo.move_to_end(key)
+        return hit
 
     def series_points(self, z: int, x: int, y: int) -> Iterator[SeriesPoint]:
         """Yield every series object in one tile.

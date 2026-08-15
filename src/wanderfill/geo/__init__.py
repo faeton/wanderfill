@@ -1,4 +1,4 @@
-from .resolve import RegionResolver, Resolution
+from .resolve import RegionResolver, Resolution, load_coord_map, save_coord_map
 from .tiles import SeriesPoint, TileReader, deg2tile, haversine_km, tile_bounds
 
 __all__ = [
@@ -8,5 +8,7 @@ __all__ = [
     "TileReader",
     "deg2tile",
     "haversine_km",
+    "load_coord_map",
+    "save_coord_map",
     "tile_bounds",
 ]
