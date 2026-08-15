@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wanderfill"
+version = "0.1.0"
+description = "Import your location history into NomadMania — an unofficial client for its private API, with a plan-then-apply importer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "wanderfill contributors" }]
+keywords = [
+    "nomadmania", "travel", "location-history", "immich", "gpx",
+    "geotag", "unesco", "world-heritage", "dare", "un-masters",
+    "travel-tracking", "reverse-geocoding", "vector-tiles", "exif",
+    "google-timeline", "country-counter", "region-visits",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The tile resolver needs real geospatial libraries. The bare client does not,
+# so it stays installable in places where shapely is a nuisance.
+geo = ["mapbox-vector-tile>=2.0", "shapely>=2.0"]
+cli = ["rich>=13.0"]
+all = ["wanderfill[geo,cli]"]
+dev = ["wanderfill[geo,cli]", "pytest>=8.0", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/faeton/wanderfill"
+Issues = "https://github.com/faeton/wanderfill/issues"
+"API notes" = "https://github.com/faeton/wanderfill/blob/main/docs/nomadmania-api.md"
+
+[project.scripts]
+wanderfill = "wanderfill.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wanderfill"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+ignore = [
+    # Dates in location exports are genuinely naive — a photo taken at 14:00
+    # was taken at 14:00 wherever the camera was, and this package works in
+    # whole days. Forcing a timezone here would invent precision.
+    "DTZ007",
+    # Tile fetches and MVT decoding catch broadly on purpose: an absent or
+    # malformed tile is ordinary (most of the planet is empty) and must not
+    # abort a resolve run over thousands of coordinates.
+    "BLE001",
+    # This package is about places, and places are spelled how they are spelled.
+    # Nukuʻalofa keeps its ʻokina; en dashes stay en dashes in prose.
+    "RUF001", "RUF002", "RUF003",
+]

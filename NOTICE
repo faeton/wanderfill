@@ -1,0 +1,25 @@
+wanderfill
+Copyright 2026 wanderfill contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+This project is NOT affiliated with, endorsed by, or supported by NomadMania OU.
+"NomadMania" is a trademark of its respective owner and is used here only to
+describe what this software interoperates with (nominative use).
+
+This project distributes NO NomadMania data. The region catalogue, the DARE and
+series catalogues, and all map polygons remain the property of NomadMania OU and
+are fetched at runtime by the end user, using the end user's own credentials,
+and cached only in the end user's own data directory.

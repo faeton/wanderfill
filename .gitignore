@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# never commit any of this
+*.token
+.env
+plan*.json
+journal-*.ndjson
+snapshot-*.json
+profile.json
+track.csv
+tiles/
+.cache/
