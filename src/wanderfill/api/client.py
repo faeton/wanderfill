@@ -88,13 +88,7 @@ class NomadMania:
         return self.t.webapi("user/status-quick")
 
     def settings(self) -> dict:
-        """Account settings, including the user's declared home regions.
-
-        Worth knowing about: ``homebase`` and ``homebase2`` are the regions the
-        user has *told* NomadMania they live in. Trip segmentation normally has
-        to infer home from whichever region dominates a year; when these are
-        set, they are better evidence than the inference.
-        """
+        """Account settings, including the user's declared home regions."""
         return self.t.webapi("user/get-settings")
 
     def account_id(self) -> int:
@@ -106,7 +100,14 @@ class NomadMania:
         raise ApiError("user/status-quick", "no account id in response", s)
 
     def home_regions(self) -> list[int]:
-        """The user's declared home region ids, if they set any."""
+        """The user's declared home region ids, if they set any.
+
+        A hint, not a fact. Profile settings go stale — somebody who set a home
+        years ago and has been nomadic since still has it sitting in their
+        account, and feeding that to :func:`wanderfill.plan.segment.segment`
+        would quietly delete their most-visited region from their own trips.
+        Confirm with the person before using it.
+        """
         s = self.settings()
         return [int(s[k]) for k in ("homebase", "homebase2") if s.get(k)]
 

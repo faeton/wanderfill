@@ -13,10 +13,27 @@ and approve first.
 
 ---
 
-## What it did on the run it was built from
+## What it does
 
-A day-level photo track — 4,868 days, 2009 to 2026, out of a self-hosted
-[Immich](https://immich.app) library — became:
+1. Reads a location history you already have — a photo library, a GPX folder, a
+   CSV, a Timeline export.
+2. Turns every coordinate into a NomadMania region, repairing the ids their
+   reverse geocoder gets wrong.
+3. Cuts the track into trips, showing you the options rather than picking one.
+4. Writes a **plan file** — every intended change, with the evidence behind it.
+5. You read the plan. Then, and only then, `apply` executes it.
+
+The parts that are hard to get right — a geocoder that returns dead ids, an API
+that double-counts, an endpoint that silently downgrades your data — are handled
+in the library so you do not have to discover them the way they were discovered
+here. [`docs/nomadmania-api.md`](docs/nomadmania-api.md) documents all of it.
+
+### A worked example
+
+The package was built while doing this once, properly, against one real archive
+— a day-level photo track of 4,868 days, 2009 to 2026, from a self-hosted
+[Immich](https://immich.app) library. That run is the example the docs refer to,
+and it went:
 
 | | before | after |
 |---|---:|---:|
@@ -28,6 +45,9 @@ A day-level photo track — 4,868 days, 2009 to 2026, out of a self-hosted
 
 Four days out of 4,868 stayed unresolved. They are over open ocean, and the tool
 left them alone rather than snapping them to the nearest land.
+
+Your numbers will look nothing like these, and that is the point: the shape of
+the work is the same whether you have seventeen years of photos or one holiday.
 
 ---
 
@@ -127,6 +147,25 @@ visits    = nm.visits_for_region(292)        # ALL of them — see below
 # reverse geocode; share=0 is enforced, never optional
 hit = nm.region_at(41.8902, 12.4922)
 ```
+
+## Do you have a home?
+
+The single question that changes the output most, and the one every other trip
+importer answers for you without asking.
+
+```python
+segment(days, home="infer")      # home = the region you spent most of that year in
+segment(days, home=[292])        # home = these regions, stated
+segment(days, home=None)         # no home. Every day is travel.
+```
+
+`home=None` is not an edge case. If you are genuinely nomadic, any other setting
+silently removes the region you spent the most time in from your own trips.
+
+`client.home_regions()` reads what you told NomadMania in your profile — but
+that is a hint, not a fact. Settings go stale: a home set five years ago sits
+there long after somebody stopped having one. The library will not use it unless
+you pass it.
 
 ---
 

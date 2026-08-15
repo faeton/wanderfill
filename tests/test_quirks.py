@@ -258,3 +258,37 @@ def test_transport_repr_hides_token():
     t = Transport(token="00000000-DEAD-BEEF-0000-NOTAREALTOKEN")
     assert "DEAD" not in repr(t)
     assert "token" in repr(t) and "redacted" in repr(t)
+
+
+def test_no_home_counts_every_day_as_travel():
+    """A traveller with no home must not have a region silently treated as one.
+
+    With home="infer" the modal region of the year is excluded from trips. For
+    somebody genuinely nomadic that quietly deletes the place they spent most of
+    the year in from their own record, which is the opposite of what they want.
+    """
+    start = dt.date(2022, 1, 1)
+    day_regions = {start + dt.timedelta(days=i): {1} for i in range(200)}
+    day_regions |= {start + dt.timedelta(days=200 + i): {2} for i in range(160)}
+
+    inferred = segment(day_regions, gap_days=2, cap_days=9999, home="infer")
+    nomadic = segment(day_regions, gap_days=2, cap_days=9999, home=None)
+
+    assert {r for j in inferred for r in j.regions} == {2}, "region 1 was treated as home"
+    assert {r for j in nomadic for r in j.regions} == {1, 2}, "no home means everything counts"
+
+
+def test_stated_home_is_used_verbatim():
+    start = dt.date(2022, 1, 1)
+    day_regions = {start + dt.timedelta(days=i): {1} for i in range(200)}
+    day_regions |= {start + dt.timedelta(days=200 + i): {2} for i in range(160)}
+
+    js = segment(day_regions, gap_days=2, cap_days=9999, home=[2])
+    assert {r for j in js for r in j.regions} == {1}, "region 2 was stated as home"
+
+
+def test_empty_home_list_is_rejected_rather_than_guessed():
+    """home=[] could mean 'no home' or 'I forgot to fill this in'. Refuse it."""
+    day_regions = {dt.date(2022, 1, 1): {1}}
+    with pytest.raises(ValueError, match="home=None"):
+        segment(day_regions, home=[])

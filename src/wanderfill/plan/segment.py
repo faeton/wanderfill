@@ -3,22 +3,33 @@
 This problem has no correct answer and the module says so rather than pretending
 otherwise.
 
-Trip detection normally assumes a home to leave and return to. For a
-continuously nomadic traveller there are years with no home at all, and naive
-segmentation produces a single "trip" of 465 days covering 101 regions — which
-is a period of someone's life, not a journey.
+Trip detection normally assumes a home to leave and return to. That assumption
+is doing a lot of unexamined work, and for a lot of the people this tool is for
+it is simply false.
 
-What works in practice is three deliberate, arbitrary choices, each of which the
-user should see and be able to change:
+There are three real cases, and :func:`segment` takes ``home`` to name which one
+applies rather than guessing:
 
-  * home is whichever region dominates that calendar year
-  * a silence longer than ``gap_days`` ends a trip
-  * no trip may run longer than ``cap_days``
+``home="infer"``
+    Home is whichever region dominates each calendar year. A guess, but usually
+    a decent one, and it adapts when somebody moves.
 
-The cap is the honest part. Without it the runs are unbounded; with it, trips
-are cut at a length that has no meaning beyond "a person would call this a
-trip". :func:`sweep` exists so the numbers for several settings can be put in
-front of somebody before one is chosen.
+``home=[region_id, ...]``
+    Home is stated. ``client.home_regions()`` reads what the user told
+    NomadMania — but treat that as a *hint*, not as truth. Profile settings go
+    stale: somebody who set a home five years ago and has not had one since will
+    still have it sitting in their account. Ask before trusting it.
+
+``home=None``
+    No home at all. Every day is travel. This is the correct setting for a
+    genuinely nomadic person, and getting it wrong is not cosmetic: any other
+    setting silently deletes their most-visited region from their own trips.
+
+The other two knobs are a silence longer than ``gap_days`` ending a trip, and a
+hard ``cap_days`` ceiling. The cap is the honest part — without it the runs are
+unbounded, and with it trips are cut at a length that means nothing beyond "a
+person would call this a trip". :func:`sweep` exists so the numbers for several
+settings can be put in front of somebody before one is chosen.
 """
 
 from __future__ import annotations
@@ -59,24 +70,35 @@ def segment(
     *,
     gap_days: int = 2,
     cap_days: int = 30,
-    declared_home: Iterable[int] | None = None,
+    home: str | Iterable[int] | None = "infer",
 ) -> list[Journey]:
     """Cut away-days into journeys.
 
-    ``declared_home`` comes from ``client.home_regions()`` — the regions the
-    user has actually told NomadMania they live in. When it is available it
-    beats the modal-region inference outright, because it is a statement rather
-    than a guess. The inference stays as the fallback for years the declared
-    home does not cover.
+    ``home`` picks the model rather than assuming one — see the module
+    docstring. ``"infer"`` uses the modal region per year, an iterable of ids
+    uses those, and ``None`` means the traveller has no home and every day
+    counts as travel.
     """
     if not day_regions:
         return []
-    inferred = home_by_year(day_regions)
-    fixed = set(declared_home or ())
 
-    def is_away(day: dt.date, regions: set[int]) -> bool:
-        home_today = fixed | {inferred.get(day.year)}
-        return bool(regions - home_today)
+    if home is None:
+        def is_away(day: dt.date, regions: set[int]) -> bool:
+            return bool(regions)
+    elif home == "infer":
+        inferred = home_by_year(day_regions)
+
+        def is_away(day: dt.date, regions: set[int]) -> bool:
+            return bool(regions - {inferred.get(day.year)})
+    else:
+        fixed = set(home)
+        if not fixed:
+            raise ValueError(
+                "home=[] is ambiguous; pass home=None for a traveller with no home"
+            )
+
+        def is_away(day: dt.date, regions: set[int]) -> bool:
+            return bool(regions - fixed)
 
     away = sorted(d for d, rs in day_regions.items() if is_away(d, rs))
 
@@ -106,6 +128,7 @@ def sweep(
     day_regions: dict[dt.date, set[int]],
     gaps=(1, 2, 3, 5),
     caps=(14, 30, 60, 9999),
+    home: str | Iterable[int] | None = "infer",
 ) -> list[dict]:
     """Show what each parameter pair produces, so a human can choose.
 
@@ -116,7 +139,7 @@ def sweep(
     rows = []
     for gap in gaps:
         for cap in caps:
-            js = segment(day_regions, gap_days=gap, cap_days=cap)
+            js = segment(day_regions, gap_days=gap, cap_days=cap, home=home)
             rows.append(
                 {
                     "gap_days": gap,
