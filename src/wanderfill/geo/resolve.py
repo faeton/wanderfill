@@ -75,12 +75,33 @@ class RegionResolver:
     # ------------------------------------------------------------------
 
     def from_geocoder(self, raw: dict) -> int | None:
-        """Pull a region id out of a ``location/get-region`` reply, if it is real."""
-        nm = raw.get("nm") or {}
-        rid = nm.get("id") if isinstance(nm, dict) else None
+        """Pull a region id out of a ``location/get-region`` reply, if it is real.
+
+        The reply shape depends on the ``share`` parameter, which is a nasty
+        little trap. Called with ``share=0`` — the only way this package ever
+        calls it — the server answers::
+
+            {"result": "OK", "region": 181}
+
+        Called without it, as a browser session does, it answers::
+
+            {"result": "OK", "nm": {"id": 181}, "dare": false, "country": "IS"}
+
+        Reading only the second shape silently resolves *nothing*: every
+        coordinate comes back unplaced, which looks like a data problem rather
+        than a parsing one. Both shapes are handled here.
+
+        Note that ``share=0`` also costs you the ``dare`` and ``country``
+        fields. DARE membership has to come from the tiles instead.
+        """
+        rid = raw.get("region")
+        if rid is None:
+            nm = raw.get("nm") or {}
+            rid = nm.get("id") if isinstance(nm, dict) else None
         if rid is None:
             return None
         rid = int(rid)
+        # -1 is the server's way of saying "open water"
         return rid if rid in self.catalogue else None
 
     def from_tiles(self, lat: float, lon: float) -> Resolution:

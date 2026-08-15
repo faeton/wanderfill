@@ -107,6 +107,17 @@ minimum. Photo libraries, GPX, Google Timeline, a CSV the user typed by hand.
 Deduplicate to distinct coordinates before geocoding — a 4,868-day track is
 usually only ~2,000 distinct points.
 
+**Check the freshest source before you trust the tidy one.** A person who is
+travelling right now has a phone that has not synced, so the server-side library
+stops weeks ago and the newest trip — the one they are asking about — is missing
+entirely. On macOS the local Photos library has it; use
+`wanderfill.sources.load_photos`.
+
+**On the road, resolve per photo, not per day.** One point per day is fine for a
+stay and wrong for a drive: a day crossing three countries averages into one
+region and the other two vanish. Never interpolate between points either — what
+was crossed unphotographed stays unclaimed.
+
 ### Geocoding
 
 ```
@@ -116,6 +127,11 @@ location/get-region  {lat, lng, share:0}
 **`share=0` is mandatory.** Without it this endpoint publishes the coordinate as
 the user's live location. Geocoding an archive without it writes a nonsense
 travel diary in public.
+
+**`share` also changes the response shape.** With `share=0` the answer is
+`{"result":"OK","region":181}`; without it, `{"nm":{"id":181},"dare":…}`. If
+every coordinate comes back unresolved, you are parsing the wrong shape — do not
+go looking for a data problem. And `-1` means open water, not a stale id.
 
 ### Repairing what comes back
 

@@ -18,3 +18,7 @@ profile.json
 track.csv
 tiles/
 .cache/
+
+# Your own account's work: tracks, caches, plans, logs, applied records.
+# Never goes to GitHub. See workspace/WORKSPACE.md.
+workspace/

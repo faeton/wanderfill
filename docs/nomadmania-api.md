@@ -108,6 +108,17 @@ beacon; called without it, it publishes the coordinate you asked about as your
 current position. Geocoding an archive without `share=0` writes a fictional
 travel diary in public.
 
+**And `share` silently changes the response shape.** With `share=0` you get
+
+```json
+{"result": "OK", "region": 181}
+```
+
+without it you get the `nm`/`dare`/`country` form above. Parse only the second
+and every coordinate comes back unplaced — which reads like a data problem, not
+a parsing one. It also means `share=0` costs you the `dare` and `country`
+fields; DARE membership has to come from the tiles instead.
+
 ---
 
 ## Legacy AJAX — the series
@@ -235,8 +246,15 @@ zero. Use `maps/get-visited-dare-ids-simple`.
 
 Roughly **14%** of the ids `location/get-region` returns no longer exist in
 `regions/get-regions-list-2`. Observed: 463 Cyprus → 1592/1593, 49 Portugal →
-1312, 208 Hungary → 1376, 87 Austria → 1378, 12 Greece → 1594. Validate every
-id, and repair the failures with point-in-polygon against the region tiles.
+1312, 208 Hungary → 1376, 87 Austria → 1378/1379, 12 Greece → 1594, 1387
+Switzerland → 1494/1508. Validate every id, and repair the failures with
+point-in-polygon against the region tiles.
+
+Note that one dead id can map to *several* live ones — Austria and Switzerland
+were both split — so the repair has to be per-coordinate, not a lookup table.
+
+`-1` is not a stale id; it is the server saying the point is over open water.
+Leave those unresolved rather than snapping them to the nearest land.
 
 ### Series proximity is weak evidence
 

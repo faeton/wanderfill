@@ -148,6 +148,21 @@ visits    = nm.visits_for_region(292)        # ALL of them — see below
 hit = nm.region_at(41.8902, 12.4922)
 ```
 
+The most recent trip is usually the one no server has seen yet — the phone has
+not synced and the self-hosted library stops weeks ago. The local Photos library
+does have it:
+
+```python
+import datetime as dt
+from wanderfill.sources import load_photos
+
+track = load_photos(since=dt.date(2026, 8, 1))   # per-photo points, not per-day
+```
+
+Per-photo resolution matters on the road: a day driving from Czechia through
+Austria into South Tyrol averages to one coordinate in one region, and the other
+two are simply lost.
+
 ## Do you have a home?
 
 The single question that changes the output most, and the one every other trip
@@ -230,6 +245,7 @@ on its own.
 | CSV (date, lat, lon, optional place) | supported — also the escape hatch for hand-fixing |
 | GPX / XML | supported — covers Garmin, OsmAnd, Komoot, Gaia, and Strava *exports* |
 | GeoJSON | supported |
+| **macOS Photos.app** | supported — reads the local library, including a trip your phone has not synced yet |
 | EXIF photo folders | planned |
 | Immich API | planned |
 | Google Timeline | planned, isolated, expect yearly breakage |

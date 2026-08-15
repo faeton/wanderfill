@@ -292,3 +292,31 @@ def test_empty_home_list_is_rejected_rather_than_guessed():
     day_regions = {dt.date(2022, 1, 1): {1}}
     with pytest.raises(ValueError, match="home=None"):
         segment(day_regions, home=[])
+
+
+# --------------------------------------------------------------------------
+# the geocoder's response shape depends on a request parameter
+# --------------------------------------------------------------------------
+
+def test_resolver_reads_both_geocoder_shapes():
+    """share=0 answers {"region": N}; without it, {"nm": {"id": N}}.
+
+    Parsing only the second silently resolves nothing at all — every coordinate
+    comes back unplaced, which reads like a data problem rather than a parsing
+    one. That cost a full re-run of a 513-point trip.
+    """
+    from wanderfill.geo.resolve import RegionResolver
+
+    r = RegionResolver(catalogue={181: {"name": "Iceland"}}, reader=object())
+    assert r.from_geocoder({"result": "OK", "region": 181}) == 181
+    assert r.from_geocoder({"result": "OK", "nm": {"id": 181}}) == 181
+
+
+def test_resolver_rejects_ids_absent_from_the_catalogue():
+    """Stale ids and the -1 open-water sentinel must both come back as None."""
+    from wanderfill.geo.resolve import RegionResolver
+
+    r = RegionResolver(catalogue={181: {"name": "Iceland"}}, reader=object())
+    assert r.from_geocoder({"region": 1387}) is None   # stale: Switzerland, since split
+    assert r.from_geocoder({"region": -1}) is None     # open water
+    assert r.from_geocoder({"result": "OK"}) is None
