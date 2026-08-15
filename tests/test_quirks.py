@@ -14,7 +14,15 @@ import pytest
 from wanderfill.api.client import NomadMania, Visit
 from wanderfill.api.errors import ApiError
 from wanderfill.plan.model import Op, Plan
-from wanderfill.plan.segment import Journey, segment, split_first_and_repeat
+from wanderfill.plan.segment import (
+    MULTI_REGION_FLOOR,
+    HomeWindow,
+    Journey,
+    compare_homes,
+    multi_region_share,
+    segment,
+    split_first_and_repeat,
+)
 from wanderfill.sources.base import DayPoint, Track
 from wanderfill.sources.normalize import components, fold
 
@@ -170,6 +178,131 @@ def test_cap_breaks_unbounded_runs():
     assert uncapped[0].days == 165
     assert len(capped) > len(uncapped)
     assert max(j.days for j in capped) <= 31
+
+
+def test_jump_cuts_a_dense_track_the_cap_would_glue():
+    """The incident: one month came out as a single trip.
+
+    Photographs on every single day, three unrelated places in a row. Nothing
+    ever breaks on a gap, so gap+cap alone returns one 30-day "trip" spanning
+    all three. Cutting on jumps returns the three journeys a person would name.
+    """
+    start = dt.date(2026, 7, 16)
+    day_regions = {}
+    for i in range(14):                      # a fortnight in region 1
+        day_regions[start + dt.timedelta(days=i)] = {1}
+    for i in range(9):                       # a drive: each day overlaps the last
+        day_regions[start + dt.timedelta(days=14 + i)] = {10 + i, 11 + i}
+    for i in range(7):                       # then a flight somewhere unrelated
+        day_regions[start + dt.timedelta(days=23 + i)] = {99}
+
+    glued = segment(day_regions, gap_days=2, cap_days=30, home=None,
+                    split_on_jump=False)
+    cut = segment(day_regions, gap_days=2, cap_days=30, home=None)
+
+    assert len(glued) == 1, "gap+cap cannot see a boundary here — that is the bug"
+    assert len(cut) == 3, "stay, drive, flight"
+    # The drive must survive as ONE journey: consecutive days share a region.
+    drive = cut[1]
+    assert drive.days == 9 and len(drive.regions) == 10
+
+
+def test_auto_refuses_to_jump_cut_a_one_region_per_day_track():
+    """The opposite incident: jump-cutting a collapsed track shreds it.
+
+    A track already reduced to one region per day makes every move look like a
+    jump. On a real 17-year history that turned 326 journeys into 1,155, 38% of
+    them one day long. "auto" has to measure the track and decline.
+    """
+    start = dt.date(2024, 1, 1)
+    # Ten days, moving every other day, one region per day and never overlapping.
+    day_regions = {start + dt.timedelta(days=i): {i // 2} for i in range(10)}
+    assert multi_region_share(day_regions) == 0.0
+
+    auto = segment(day_regions, gap_days=2, cap_days=30, home=None)
+    forced = segment(day_regions, gap_days=2, cap_days=30, home=None, split_on_jump=True)
+
+    assert len(auto) == 1, "auto must leave a collapsed track alone"
+    assert len(forced) == 5, "forced jump-cutting shreds it, which is the point"
+
+
+def test_auto_enables_jump_cutting_on_a_detailed_track():
+    """And it has to say yes when the track does carry both ends of a day."""
+    start = dt.date(2024, 1, 1)
+    day_regions = {start + dt.timedelta(days=i): {i, i + 1} for i in range(6)}
+    day_regions[start + dt.timedelta(days=6)] = {99}      # an unrelated flight
+    assert multi_region_share(day_regions) > MULTI_REGION_FLOOR
+    assert len(segment(day_regions, gap_days=2, cap_days=30, home=None)) == 2
+
+
+def test_split_on_jump_rejects_nonsense():
+    """A typo'd string must not be read as truthy and silently enable cutting."""
+    day_regions = {dt.date(2024, 1, 1): {1}}
+    with pytest.raises(ValueError, match="split_on_jump"):
+        segment(day_regions, home=None, split_on_jump="yes")
+
+
+def test_home_windows_describe_a_home_that_started_and_stopped():
+    """Neither a bare region list nor "infer" can express a home with dates.
+
+    Region 1 was home for the first year and nothing afterwards. A bare
+    ``home=[1]`` discards the later stay too; ``home=None`` keeps the earlier
+    one. Only a window gets both halves right.
+    """
+    day_regions = {}
+    for i in range(300):                                  # year one: living in 1
+        day_regions[dt.date(2021, 1, 1) + dt.timedelta(days=i)] = {1}
+    for i in range(60):                                   # year three: passing through 1
+        day_regions[dt.date(2023, 6, 1) + dt.timedelta(days=i)] = {1}
+
+    windowed = segment(
+        day_regions,
+        gap_days=2,
+        cap_days=9999,
+        home=[HomeWindow(dt.date(2021, 1, 1), dt.date(2021, 12, 31), {1})],
+    )
+    days_kept = sum(j.days for j in windowed)
+    assert days_kept == 60, "the 2023 stay is travel, the 2021 one is not"
+
+    always_home = segment(day_regions, gap_days=2, cap_days=9999, home=[1])
+    assert always_home == [], "a bare id wrongly discards the later stay"
+
+
+def test_open_ended_home_window():
+    """``start=None`` means 'and we are not saying when it began'."""
+    day_regions = {dt.date(2020, 1, 1) + dt.timedelta(days=i): {1} for i in range(10)}
+    w = HomeWindow(None, dt.date(2020, 1, 5), {1})
+    assert w.covers(dt.date(1999, 1, 1)) and not w.covers(dt.date(2020, 1, 6))
+    js = segment(day_regions, gap_days=2, cap_days=9999, home=[w])
+    assert sum(j.days for j in js) == 5
+
+
+def test_empty_home_window_is_rejected():
+    """A window with no regions is the 'no home then' case written wrongly."""
+    with pytest.raises(ValueError, match="uncovered"):
+        HomeWindow(dt.date(2021, 1, 1), dt.date(2021, 12, 31), [])
+
+
+def test_windows_and_bare_ids_cannot_be_mixed():
+    """A bare id alongside a dated window silently means 'home forever'."""
+    day_regions = {dt.date(2021, 1, 1): {1}}
+    with pytest.raises(TypeError, match="mixes"):
+        segment(day_regions, home=[HomeWindow(None, None, {1}), 2])
+
+
+def test_compare_homes_reports_days_not_just_trips():
+    """Choosing a home model is a choice about which days get discarded.
+
+    Trip counts hide that. The number somebody needs to see before approving a
+    model is how much of their life it has decided was not travel.
+    """
+    day_regions = {dt.date(2024, 1, 1) + dt.timedelta(days=i): {1 if i < 200 else 2}
+                   for i in range(300)}
+    rows = {r["model"]: r for r in compare_homes(
+        day_regions, {"inferred": "infer", "nomadic": None}, cap_days=9999)}
+    assert rows["nomadic"]["days_home"] == 0
+    assert rows["inferred"]["days_home"] == 200, "region 1 is the modal region"
+    assert rows["nomadic"]["days_travel"] > rows["inferred"]["days_travel"]
 
 
 def test_split_first_and_repeat_avoids_double_counting():
