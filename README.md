@@ -22,6 +22,8 @@ and approve first.
 3. Cuts the track into trips, showing you the options rather than picking one.
 4. Writes a **plan file** — every intended change, with the evidence behind it.
 5. You read the plan. Then, and only then, `apply` executes it.
+6. Separately, and read-only: indexes the same library into a **proof dossier**,
+   so that when NomadMania asks you to verify sixty regions you can answer.
 
 The parts that are hard to get right — a geocoder that returns dead ids, an API
 that double-counts, an endpoint that silently downgrades your data — are handled
@@ -48,6 +50,119 @@ left them alone rather than snapping them to the nearest land.
 
 Your numbers will look nothing like these, and that is the point: the shape of
 the work is the same whether you have seventeen years of photos or one holiday.
+
+---
+
+## Proving it — the other half of the problem
+
+Getting the regions onto the profile is the easy half. NomadMania does not run
+on trust: its highly ranked travellers are **verified**, and verification is a
+human committee asking you to prove a random sample of what you claim.
+
+| | when it happens | the sample | the bar |
+|---|---|---|---|
+| UN countries | mandatory in the top 100, or claiming all 193 | ~40 countries, weighted to the hard ones | all of them, within 3 months |
+| NM regions | mandatory in the top 50, usually asked around 600 regions | 60 regions | **45 must be Class 1**, within 6 months |
+| Supreme | optional, 600+ regions, a year after the first | 25 countries + 40 regions, aimed at the difficult ones | 95%, renewed every 11 months |
+
+Failing is not just a missing badge: they reserve the right to freeze the
+profile, delete as many regions as they see fit, or mark the account a **Ghost
+User**, excluded from every ranking. Re-verification is forced after five years,
+or immediately if a region count jumps.
+
+Their **Class 1** list reads like a description of a geotagged photo library —
+selfies with a prominent landmark, *serial photos within the region*, dated
+diary entries, hotel bills in your name, ATM withdrawals with a location and a
+date. **Class 2** — ordinary photos, a friend vouching, a map of the route — is
+filler for the remaining fifteen.
+
+So a traveller with fifteen years of photos, footage and paperwork already holds
+the evidence. What they do not hold is an **index**. When sixty region names
+arrive with a six-month clock, the work is finding five defensible photos for
+each one across a hundred thousand assets, by hand, region by region. That is
+what `wanderfill evidence` is for:
+
+```bash
+wanderfill evidence --check-dates --out evidence
+wanderfill evidence --out evidence --copy --documents ./paperwork
+```
+
+It reads your claimed regions from NomadMania, reads the photo library locally,
+attributes every photo to a region against the **live polygons**, and writes:
+
+- **`index.md`** — every claimed region graded `strong` / `serial` / `thin` /
+  `none`, the regions with nothing to show listed first, and per region a
+  shortlist of exhibits chosen for *spread* — different days, different places
+  inside the region — because that is what "serial photos" means. Search it by
+  region name on the day the sample arrives.
+- **`evidence.json`** — the same, with asset uuids, coordinates and file paths.
+- **`export-from-photos.applescript`** — because most of a modern library is a
+  thumbnail with the original in iCloud. This pulls the shortlisted originals
+  down and lays them out one folder per region, ready to attach.
+- with `--check-dates`, a table of **regions whose photos fall outside the visit
+  dates on your profile** — a claim dated wrong reads as guessing, and that is
+  exactly what a committee looking for records that "don't correspond to the
+  reality on the ground" is looking for.
+- with `--documents`, your own paperwork indexed alongside — drop the hotel bill
+  into `paperwork/0292-iceland-south/` and it appears in that region's section.
+  Filed documents are **listed, never graded**: a file called `hotel.pdf` could
+  be anything, and a tool that scored it would be inventing proof.
+
+It also runs the audit backwards, listing regions that have photos in them and
+**no visit on your profile** — which is the importer's to-do list, not something
+this command acts on.
+
+### What it will not do
+
+- **It writes nothing to NomadMania.** No plan, no `--apply`; there is nothing
+  to apply. It is the one command whose output is aimed at you.
+- **It does not decide anything is proven.** A photo proves a *camera* was
+  somewhere. It can read Apple's front-camera flag, so it knows a selfie from an
+  ordinary photo; it cannot see whether a landmark is in the frame.
+- **A region graded `none` is not a region you did not visit.** Batteries die
+  and film has no EXIF. It is a region whose proof is somewhere other than this
+  library — and knowing which ones those are, before anyone asks, is the point.
+- **Photos somebody sent you are excluded at the source**, along with
+  screenshots. A friend's geotagged photo is evidence about their travel.
+
+### What "serial photos" is taken to mean
+
+A region earns `serial` on one of three routes, and every threshold is a flag
+you can change — they are guesses about how *you* travel, and the dossier prints
+the ones it used:
+
+| route | test | flags |
+|---|---|---|
+| a stay | ≥3 photos inside the polygon, ≥1 km between the furthest two, over ≥2 days | `--min-shots` `--min-spread-km` `--min-days` |
+| a day trip | the same, in one day, across ≥3 separate spots **spanning ≥2 hours** | `--min-spots` `--min-hours` |
+| too small to cross | ≥2 spots on ≥2 days, for a region that measures under 8 km | `--min-small-spots` `--small-region-km` |
+
+The hours matter more than they look. Eight photos across 34 km sounds like
+serial coverage of a region until you read the timestamps and find they span two
+and a half minutes — that is a plane window, and a verifier reading the same
+timestamps will say so. On the run this was built against, the hours rule
+reclassified fourteen regions, every one of them a drive-through or a flight.
+
+The small-region route is granted by **measuring the polygon**, never by
+noticing that the photos are clustered. Two days in one hotel in Nairobi looks
+identical in the data to two days in Vatican City, and only one of them is a
+visit.
+
+### Two numbers, and deliberately no verdict
+
+The command projects a 60-region draw twice: once assuming every claimed region
+is equally likely, and once drawn from the least-photographed half of your
+profile — because NomadMania say their sample "always includes some of the most
+difficult countries on the planet", and difficult places are where photo
+libraries are thinnest. The gap between those two numbers is the size of your
+exposure.
+
+There is no ready/not-ready flag, on purpose. A serial photo set is evidence you
+can hand over; whether it *passes* turns on landmarks and faces and is the
+committee's call. A tool that printed "ready" would be making a promise on their
+behalf, and somebody would stop collecting evidence on the strength of it.
+Regions whose photos contradict the dates on your own profile count toward
+neither number.
 
 ---
 
@@ -120,6 +235,9 @@ The password is never needed and this tool will never ask for it.
 # read-only: dump the whole profile. Also your rollback reference.
 wanderfill export --full --out profile.json
 
+# read-only: which of your claimed regions could you actually prove?
+wanderfill evidence --check-dates --out evidence
+
 # see what each trip-segmentation setting produces before choosing one
 wanderfill sweep track.csv regions.json
 
@@ -162,6 +280,16 @@ track = load_photos(since=dt.date(2026, 8, 1))   # per-photo points, not per-day
 Per-photo resolution matters on the road: a day driving from Czechia through
 Austria into South Tyrol averages to one coordinate in one region, and the other
 two are simply lost.
+
+The same library read the other way — one record per photo, identity intact —
+is what the dossier is built from:
+
+```python
+from wanderfill.evidence import build, render_markdown
+from wanderfill.sources.photos_app import load_photo_assets
+
+assets = load_photo_assets()          # uuid, timestamp, coordinate, selfie flag
+```
 
 ## Do you have a home?
 

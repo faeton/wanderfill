@@ -287,6 +287,29 @@ evidence.
 
 ---
 
+## Verification has no endpoint — do not go looking for one
+
+Worth stating because an hour was spent looking. Badges are visible on a
+profile, but **verification itself is out of band**: a committee picks a random
+sample of what you claim — 60 regions, ~40 countries — and you answer by email
+with documents, inside three months for countries and six for regions. Regional
+verification wants at least 45 of the 60 answers to be *Class 1* evidence
+(selfies with a landmark, serial photos within the region, dated diary entries,
+hotel bills in your name, ATM slips with a place and a date); Class 2 — ordinary
+photos, a friend vouching, a described route — covers the rest.
+
+There is no `verification/*` module, nothing to upload, and nothing to poll. The
+only thing a client can usefully do is what `wanderfill evidence` does: index
+the user's own evidence against the regions they claim, locally, so the answer
+exists before the question does.
+
+The one API-adjacent consequence: verification is a *reason to be careful about
+what gets written*, not merely to be careful about writing. A region added
+without evidence is a region that has to be defended later by the account
+holder, in person, to people who do this professionally.
+
+---
+
 ## robots.txt
 
 `Disallow: /webapi/`. That is a crawler directive; it does not bind an

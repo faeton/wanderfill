@@ -244,6 +244,69 @@ the user is surprised.)
 
 ---
 
+## 6a. Evidence — the half of the job that is not a write
+
+The user is not only building a score, they are building something they may
+have to **defend**. NomadMania verifies its highly ranked travellers by hand: a
+committee names a random sample — 60 regions, or ~40 countries — and asks for
+proof. At least 45 of the 60 have to be *Class 1*, and the clock is six months.
+Refusing, or failing, can freeze the profile, delete regions wholesale, or turn
+the account into a "Ghost User" outside every ranking. Mandatory in the top 50
+for regions and the top 100 for countries; re-run after five years, or sooner if
+a region count jumps.
+
+Class 1, in their words: selfies with a prominent landmark, serial photos within
+the region, dated diary entries, hotel bills in the traveller's name, ATM
+withdrawals with a location and date. Class 2 — ordinary photos, a friend
+vouching, a described route — covers the remaining fifteen at most.
+
+This changes what a good run looks like. **Every region you help somebody claim
+is a region they may be asked to prove.** So:
+
+- Run `wanderfill evidence` *before* proposing writes, not after. If a region
+  has no evidence in the library, say so at plan time rather than letting the
+  user find out from a committee.
+- The dossier is **read-only on both sides** and needs no approval to produce.
+  It reads the profile, reads the library, writes local files. There is no
+  `--apply` because there is nothing to apply.
+- `--check-dates` compares photo dates against the visit dates on the profile.
+  A disagreement is a *report*, never an edit: correcting a visit is a write,
+  and writes go through a plan like everything else.
+- Never grade a document you have not opened, and never open one you were not
+  asked to. Filed paperwork is indexed by filename and left alone.
+- **Do not tell somebody they are ready.** Report the projection as a range —
+  an even draw and a draw leaning to their thinnest regions — and say plainly
+  that acceptance is the committee's decision. The failure mode is not a wrong
+  number, it is a traveller who stops gathering evidence because a tool said a
+  word it had no standing to say.
+- Read the timestamps, not only the coordinates. Eight photos across 34 km look
+  like coverage of a region until they turn out to span two and a half minutes,
+  which is a plane window. Thresholds are guesses about how a specific person
+  travels: expose them as flags, print the ones used, and let the user move
+  them rather than arguing that a region they remember is thin.
+- Exemptions get **measured, not inferred**. "This region is too small to walk
+  a kilometre across" must come from the polygon; deducing it from clustered
+  photos hands the same exemption to two days in one hotel.
+- A region with no photographic evidence is **not** a region to remove. Say what
+  is missing and let the user decide; deleting is theirs, and rule 2 stands.
+
+The technical parts that are easy to get wrong:
+
+- The local Photos library is mostly **not on the disk**. With iCloud
+  optimisation a large share of assets are thumbnails, and the original is on
+  Apple's servers. Export through Photos itself — the AppleScript id format is
+  `<UUID>/L0/001`, and a bare UUID fails with `-1728`.
+- `ZSAVEDASSETTYPE = 12` is a photo somebody **sent** the user, carrying *their*
+  coordinates. Screenshots are `ZKIND = 0, ZKINDSUBTYPE = 10`. Both are excluded
+  at the query, and both would otherwise manufacture evidence for travel that
+  did not happen.
+- Attribute exhibits against the **live tiles**, and carry the
+  nearest-polygon flag through to the output. Offering a photo taken across a
+  border as proof of the region on this side of it is precisely the accusation
+  the whole protocol exists to avoid.
+
+---
+
 ## 7. The plan-then-apply protocol
 
 Produce a plan file. Show a summary table. Wait for a yes. Then apply.

@@ -19,6 +19,11 @@ track.csv
 tiles/
 .cache/
 
+# A dossier is a map of where somebody lives and sleeps: coordinates, dates,
+# filenames, and copies of the originals. `evidence` writes here by default.
+evidence/
+coords.json
+
 # Your own account's work: tracks, caches, plans, logs, applied records.
 # Never goes to GitHub. See workspace/WORKSPACE.md.
 workspace/
