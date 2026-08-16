@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from wanderfill.api.client import NomadMania, Visit
-from wanderfill.api.errors import ApiError
+from wanderfill.api.client import NomadMania, Visit, YearOnly
+from wanderfill.api.errors import ApiError, DriftError, PrecisionLoss
 from wanderfill.plan.model import Op, Plan
 from wanderfill.plan.segment import (
     MULTI_REGION_FLOOR,
@@ -84,11 +84,82 @@ def test_update_visit_requires_quality():
         c.update_visit(1, 2, dt.date(2024, 1, 1), dt.date(2024, 1, 2))  # no quality
 
 
+def _one_visit(visit_id=11, **over):
+    """The reply shape ``update_visit`` reads back before it agrees to write."""
+    row = {"id": visit_id, "quality": 5, "trip_id": None,
+           "year_from": 2024, "month_from": 1, "day_from": 1,
+           "year_to": 2024, "month_to": 1, "day_to": 2}
+    row.update(over)
+    return {"quickEnter/get-visits-to-region": {"result": "OK", "data": [row]}}
+
+
 def test_update_visit_passes_quality_through():
-    c, t = client()
+    c, t = client(_one_visit())
     c.update_visit(11, 22, dt.date(2024, 1, 1), dt.date(2024, 1, 2), quality=5)
-    _, fields = t.sent[0]
+    _, fields = t.sent[-1]
     assert fields["quality"] == 5
+
+
+# --------------------------------------------------------------------------
+# a visit can be precise, year-only, or undated — and a replacement can
+# quietly destroy the difference
+# --------------------------------------------------------------------------
+
+def test_year_only_visit_is_not_read_as_undated():
+    """The 13-in-892 shape. Reading it as ``None`` erases a year on write-back."""
+    v = Visit.from_api(
+        {"id": 1, "quality": 3, "trip_id": None,
+         "year_from": 2013, "month_from": None, "day_from": None,
+         "year_to": 2013, "month_to": None, "day_to": None},
+        region=658,
+    )
+    assert v.date_from == YearOnly(2013)
+    assert v.date_to == YearOnly(2013)
+
+
+def test_year_only_sends_empty_month_and_day():
+    """Empty, not omitted: an absent key is not 'unchanged' on a full replacement."""
+    c, t = client(_one_visit(year_from=None, month_from=None, day_from=None,
+                             year_to=None, month_to=None, day_to=None))
+    c.update_visit(11, 22, YearOnly(2013), YearOnly(2013), quality=3)
+    _, fields = t.sent[-1]
+    assert fields["year_from"] == 2013
+    assert fields["month_from"] == "" and fields["day_from"] == ""
+
+
+def test_update_visit_refuses_to_blur_a_precise_date():
+    """Writing a bare year over a full date deletes the month and day."""
+    c, _ = client(_one_visit())
+    with pytest.raises(PrecisionLoss, match="losing precision"):
+        c.update_visit(11, 22, YearOnly(2024), YearOnly(2024), quality=5)
+
+
+def test_update_visit_refuses_to_erase_dates_entirely():
+    c, _ = client(_one_visit())
+    with pytest.raises(PrecisionLoss):
+        c.update_visit(11, 22, None, None, quality=5)
+
+
+def test_update_visit_allows_deliberate_blurring():
+    c, t = client(_one_visit())
+    c.update_visit(11, 22, YearOnly(2024), YearOnly(2024), quality=5, allow_vaguer=True)
+    _, fields = t.sent[-1]
+    assert fields["month_from"] == ""
+
+
+def test_update_visit_allows_sharpening_a_year_into_a_date():
+    """The whole point of filling a profile in. Never blocked."""
+    c, t = client(_one_visit(month_from=None, day_from=None, month_to=None, day_to=None))
+    c.update_visit(11, 22, dt.date(2024, 3, 4), dt.date(2024, 3, 5), quality=3)
+    _, fields = t.sent[-1]
+    assert fields["month_from"] == 3 and fields["day_from"] == 4
+
+
+def test_update_visit_refuses_to_write_to_a_visit_that_is_not_there():
+    """A wrong region id would otherwise replace some other region's record."""
+    c, _ = client(_one_visit(visit_id=999))
+    with pytest.raises(PrecisionLoss, match="refusing to write blind"):
+        c.update_visit(11, 22, dt.date(2024, 1, 1), dt.date(2024, 1, 2), quality=3)
 
 
 # --------------------------------------------------------------------------
@@ -558,3 +629,136 @@ def test_the_search_stops_at_the_repository_root(tmp_path, monkeypatch):
     monkeypatch.chdir(repo)
     monkeypatch.delenv("NM_TOKEN", raising=False)
     assert find_token() == ("", "")
+
+
+# --------------------------------------------------------------------------
+# quality can never go down — incident #1, structurally
+# --------------------------------------------------------------------------
+
+def test_update_visit_takes_max_against_the_live_record():
+    """A caller passing 3 over a live 'lived here' must not downgrade it."""
+    c, t = client(_one_visit(quality=5))
+    c.update_visit(11, 22, dt.date(2024, 1, 1), dt.date(2024, 1, 2), quality=3)
+    _, fields = t.sent[-1]
+    assert fields["quality"] == 5, "the live 5 must win over the caller's 3"
+
+
+def test_update_visit_still_raises_quality_upwards():
+    c, t = client(_one_visit(quality=3))
+    c.update_visit(11, 22, dt.date(2024, 1, 1), dt.date(2024, 1, 2), quality=5)
+    _, fields = t.sent[-1]
+    assert fields["quality"] == 5
+
+
+def test_apply_refuses_an_op_with_no_quality():
+    """`op.quality or 3` turned a missing field into a silent downgrade."""
+    from wanderfill.plan.apply import _execute
+    c, _ = client(_one_visit())
+    op = Op(kind="update_visit", region=22, visit_id=11,
+            date_from="2024-01-01", date_to="2024-01-02", quality=None)
+    with pytest.raises(ValueError, match="no quality"):
+        _execute(c, op)
+
+
+def test_apply_does_not_promote_quality_zero_to_three():
+    """0 is falsey; `or 3` silently rewrote 'no visit' as 'good visit'."""
+    from wanderfill.plan.apply import _execute
+    c, t = client(_one_visit(quality=0))
+    op = Op(kind="update_visit", region=22, visit_id=11,
+            date_from="2024-01-01", date_to="2024-01-02", quality=0)
+    _execute(c, op)
+    _, fields = t.sent[-1]
+    assert fields["quality"] == 0
+
+
+def test_plan_year_only_round_trips_through_execute():
+    """A bare "2013" must reach the wire as a year, not as 1 January."""
+    from wanderfill.plan.apply import _execute
+    c, t = client(_one_visit(year_from=None, month_from=None, day_from=None,
+                             year_to=None, month_to=None, day_to=None, quality=3))
+    _execute(c, Op(kind="update_visit", region=22, visit_id=11,
+                   date_from="2013", date_to="2013", quality=3))
+    _, fields = t.sent[-1]
+    assert fields["year_from"] == 2013 and fields["month_from"] == ""
+
+
+# --------------------------------------------------------------------------
+# the plan/apply safety boundary
+# --------------------------------------------------------------------------
+
+def test_op_key_distinguishes_different_visits_and_qualities():
+    """Colliding keys let a journal mark a *different* write as already done."""
+    base = dict(kind="update_visit", region=5, date_from="2024-01-01", date_to="2024-01-02")
+    assert Op(**base, visit_id=1, quality=3).key != Op(**base, visit_id=2, quality=3).key
+    assert Op(**base, visit_id=1, quality=3).key != Op(**base, visit_id=1, quality=5).key
+    # provenance still must not affect it
+    assert (Op(**base, visit_id=1, quality=3, label="a", confidence=0.1).key
+            == Op(**base, visit_id=1, quality=3, label="b", confidence=0.9).key)
+
+
+def test_basis_covers_visit_dates_not_just_region_ids():
+    """Re-dating a visit changes no region id, so ids alone cannot detect drift."""
+    from wanderfill.plan.model import basis_of
+    def snap(d):
+        return {"visited_regions": [5], "visited_dare": [],
+                "visits": {"5": [{"id": 1, "date_from": d, "date_to": d, "quality": 3}]}}
+
+    assert basis_of(snap("2024-01-01"), [5]) != basis_of(snap("2024-06-01"), [5])
+
+
+def test_apply_refuses_a_plan_with_no_basis():
+    """Failing open made the drift check decorative."""
+    import pathlib
+    import tempfile
+
+    from wanderfill.plan.apply import apply_plan
+    c, _ = client({"user/status-quick": {"result": "OK", "uid": 7},
+                   "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
+                   "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}})
+    plan = Plan(account=7, ops=[Op(kind="mark_dare", bucket="apply", region=1)])
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises(DriftError, match="no basis fingerprint"):
+            apply_plan(c, plan, workdir=pathlib.Path(td), confirm=True)
+
+
+def test_journal_is_write_ahead_and_survives_a_crash():
+    """An op that opened and never closed must block a blind retry."""
+    import pathlib
+    import tempfile
+
+    from wanderfill.plan.apply import Journal
+    op = Op(kind="mark_dare", region=1)
+    with tempfile.TemporaryDirectory() as td:
+        j = Journal(pathlib.Path(td) / "j.ndjson")
+        j.opening(op)                      # crash right here
+        assert j.unresolved() == {op.key}
+        assert op.key not in j.done_keys()
+        j.note(op, "OK")
+        assert j.unresolved() == set()
+        assert op.key in j.done_keys()
+
+
+def test_countries_does_not_hand_out_a_bare_yes_field():
+    """`row["yes"]` reads as the YES score and is not one."""
+    c, _ = client({"slow/get-slow-app": {"result": "OK", "slow": [
+        {"country_id": 1, "country": "X", "flag": "/f/1.png", "visited": 1, "yes": 8}]}})
+    row = c.countries()[0]
+    assert "yes" not in row
+    assert row["yes_stored"] == 8
+
+
+def test_kye_quadrant_id_is_not_a_region_id():
+    """qids and NM region ids overlap numerically; conflating them is silent."""
+    from wanderfill.plan.apply import _execute
+    c, t = client()
+    _execute(c, Op(kind="mark_kye", item=570, region=None))
+    action, fields = t.sent[-1]
+    assert action == "kye/set-kye"
+    assert fields == {"qid": 570, "visited": 1}
+
+
+def test_mark_kye_never_unticks():
+    c, t = client()
+    c.mark_kye(38)
+    _, fields = t.sent[-1]
+    assert fields["visited"] == 1

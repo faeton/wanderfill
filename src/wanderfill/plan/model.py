@@ -23,13 +23,15 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA = 1
 
-OpKind = Literal["add_visit", "update_visit", "create_trip", "mark_dare", "tick_series"]
+OpKind = Literal["add_visit", "update_visit", "create_trip", "mark_dare",
+                 "mark_kye", "tick_series"]
 Bucket = Literal["apply", "review", "reject"]
 
 
@@ -47,6 +49,9 @@ class Op:
     date_to: str | None = None
     quality: int | None = None
     regions: list[dict] = field(default_factory=list)
+    # Blurring or clearing a date is refused by the client unless the plan says
+    # so here, in writing, where a human reviewing the file can see it.
+    allow_vaguer: bool = False
     label: str = ""
     confidence: float = 0.0
     method: str = ""
@@ -56,12 +61,23 @@ class Op:
     def key(self) -> str:
         """Content hash used for idempotency.
 
-        Deliberately covers what the op *does*, not how it was derived, so
-        re-running the same intent against a journal is a no-op.
+        Covers everything that changes what reaches the server, and nothing
+        about how the op was derived — so re-running the same intent against a
+        journal is a no-op, while a *different* write is never mistaken for one
+        already done.
+
+        ``visit_id`` and ``quality`` are in here deliberately. Without them, two
+        updates to different visit records in the same region on the same dates
+        hash identically, and a journal entry for the first makes the second
+        look complete; likewise a re-plan that raises a quality would be skipped
+        as already-applied. Provenance fields — label, evidence, confidence,
+        method — stay out, because changing the reasoning does not change the
+        write.
         """
         material = json.dumps(
-            [self.kind, self.region, self.series, self.item,
-             self.date_from, self.date_to, sorted(r.get("id", 0) for r in self.regions)],
+            [self.kind, self.region, self.visit_id, self.series, self.item,
+             self.date_from, self.date_to, self.quality, self.allow_vaguer,
+             sorted((r.get("id", 0), r.get("quality")) for r in self.regions)],
             sort_keys=True,
         )
         return hashlib.sha256(material.encode()).hexdigest()[:16]
@@ -108,3 +124,31 @@ def fingerprint(state: dict) -> str:
     """A stable hash of live server state, for detecting drift between plan and apply."""
     material = json.dumps(state, sort_keys=True, default=str)
     return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
+    """The live state a plan is allowed to assume, reduced to a comparable form.
+
+    Which region ids are visited is not enough. A plan whose whole purpose is to
+    *re-date an existing visit* changes nothing about that set, so a fingerprint
+    over it alone cannot tell "nobody touched this" from "the user corrected
+    these dates by hand an hour ago" — and the apply would then overwrite the
+    correction with the older intent. So the visit records for the regions the
+    plan touches go in too: id, dates and quality, which is everything an update
+    can destroy.
+
+    Regions the plan does not touch are excluded on purpose. Travel recorded
+    elsewhere while a plan sat on disk is not a reason to refuse it.
+    """
+    visits = snapshot.get("visits", {})
+    return {
+        "visited": sorted(snapshot.get("visited_regions", [])),
+        "dare": sorted(snapshot.get("visited_dare", [])),
+        "visits": {
+            str(r): sorted(
+                (v.get("id"), str(v.get("date_from")), str(v.get("date_to")), v.get("quality"))
+                for v in visits.get(str(r), [])
+            )
+            for r in sorted(set(regions))
+        },
+    }

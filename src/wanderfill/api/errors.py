@@ -30,6 +30,16 @@ class TransportError(WanderfillError):
     """The request never got an answer — timeout, DNS, connection reset."""
 
 
+class PrecisionLoss(WanderfillError):
+    """A write would have made an existing date vaguer than it already was.
+
+    ``quickEnter/update-visit`` replaces the whole record, so posting a bare
+    year over a full date deletes the month and day, and posting nothing deletes
+    the year too. Neither is recoverable from the response, and neither looks
+    like an error at the time. Raised before the request, not after.
+    """
+
+
 class DriftError(WanderfillError):
     """Live state changed between planning and applying.
 
