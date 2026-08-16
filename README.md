@@ -354,11 +354,36 @@ cost a wrong write or a wrong number the first time.
 | `add-visit` silently creates a phantom single-region trip | Documented on the method; the journal records the trip id |
 | A visit counts whether standalone **or** trip-owned, so naive trips double-count | `visits_for_region` returns both kinds; `split_first_and_repeat` keeps totals honest |
 | `trips/new-trip` requires a junk `regions` field before it will read `regions_json` | `create_trip` sends both, reproducing the site's own bug deliberately |
-| `update-visit` replaces the whole record and silently downgrades `quality` | `quality` is keyword-only and required |
+| `update-visit` replaces the whole record and silently downgrades `quality` | `quality` is keyword-only, required, and raised to `max()` of the live value |
+| A visit can carry a **year with no month or day**, and reading that as undated erases it on write-back | `YearOnly`; `update_visit` refuses to make a date vaguer without `allow_vaguer` |
+| `slow/get-slow-app`'s `yes` is batch-computed and lags, so one reading looks broken | Renamed `yes_stored`; `yes_scores()` recomputes the published rule |
+| A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |
+| KYE is manual — nothing derives it, and a photo from a plane window sits in a cell like a week on the ground | `mark_kye` only ever sends `1`; candidates graded by implied speed, not point count |
 | `get-regions-mqp` returns `visited` as an id string, not a boolean | Not used; `visited_dare_ids` is the source of truth |
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |
 | `location/get-region` doubles as a live-location beacon | `share=0` is hardcoded, not a parameter |
+
+## KYE: the one list with no judgement call in the geometry
+
+Know Your Earth cuts the globe into 10°×10° boxes — 648, of which 179 are open
+ocean and excluded, 469 markable, and 434 the scoring maximum once the deep-south
+boxes collapse into one tick. Membership is arithmetic on a coordinate, so unlike
+regions there are no stale ids and unlike series there is no radius to choose.
+
+The judgement moves entirely to *whether a coordinate is a visit*. Grading one
+real profile's 105 candidate cells:
+
+| test | result |
+|---:|---|
+| coordinates fall inside | 105 cells |
+| ≥2 distinct days, or one day with 10+ points over 2+ hours | **93 marked** |
+| most consecutive legs above 200 km/h, or a lone point | **12 held** |
+
+The twelve held include two mid-Pacific boxes 1,100 km apart 2.5 hours apart, a
+flight over Yemen at 305 km/h, and two airport layovers — every one of which a
+point-count test marks and a speed test refuses. Held is not rejected: the user
+decides, which is the same rule the series thresholds follow.
 
 ## Series: what the measurements actually showed
 

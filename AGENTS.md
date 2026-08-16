@@ -242,11 +242,39 @@ area, not of having seen the thing. Grade candidates by distance, show the user
 the counts at several radii, validate recall against what they have already
 ticked by hand, and let them choose the threshold. Do not pick it for them.
 
+**KYE is not derived and not a series.** "Know Your Earth" has its own module
+and is **marked by hand** — the page says "mark quadrants as visited by clicking
+the map", and nothing fills it in from regions or trips. A profile with hundreds
+of regions can sit at zero, and this one did. Read `kye/get-kye`, write
+`kye/set-kye {qid, visited:1}`, and never send `0` — un-ticking is a deletion.
+
+A quadrant is a 10°×10° box, so membership is *arithmetic on a coordinate*: no
+polygons, no stale ids, no tolerance to choose. That makes it the cleanest list
+on the site, and it removes every excuse for guessing. It does **not** answer
+whether a coordinate is a visit, and that is where the whole difficulty moves.
+
+**Grade by speed, not only by count.** A photo from seat 27A sits in a cell as
+convincingly as a week on the ground. Compute the implied speed between
+consecutive timestamped points and treat a cell whose legs mostly exceed ~200
+km/h as an aircraft. On the first run this caught two mid-Pacific boxes 1,100 km
+apart 2.5 hours apart, a flight over Yemen at 305 km/h, and two airport layovers
+that a point-count test would have waved through. Hold those for the user; do
+not reject them, and do not mark them.
+
 **Countries are derived, not stored.** Marking regions updates the country
 counts, UN, UN+, SLOW and YES automatically. There is nothing to write.
-(YES = "Years Elapsed Since", the sum of years since the last visit to each
-country — lower is better, so filling in old dates makes it worse. Say so before
-the user is surprised.)
+
+**YES = "Years Elapsed Since"**, summed over 196 countries, lower better. Read
+`docs/nomadmania-api.md` before quoting a number, because two things about it are
+counterintuitive and both were got wrong the first time:
+
+- It is **batch-computed and lags**. Read it once and a flat value across every
+  visited country will look like a broken field; it is the batch not having run.
+  Read, write, wait, read again — never conclude from one reading.
+- A country marked visited with **no year scores 8**, not the age. So dating an
+  old visit makes YES *worse*: break-even is eight years back. Check before
+  proposing any backfill, and say plainly that dating is a hedge rather than a
+  gain.
 
 ---
 
