@@ -762,3 +762,173 @@ def test_mark_kye_never_unticks():
     c.mark_kye(38)
     _, fields = t.sent[-1]
     assert fields["visited"] == 1
+
+
+# --------------------------------------------------------------------------
+# YES: undated is 8, not the age — and the rule of thumb is not a rule
+# --------------------------------------------------------------------------
+
+def test_undated_country_scores_eight_not_the_age():
+    """Scoring undated as the age made a recompute disagree with the server by 33."""
+    from wanderfill.api.client import UNDATED_YES
+    assert UNDATED_YES == 8
+    c, _ = client({
+        "user/get-settings": {"result": "OK", "date_of_birth": "1985-01-03"},
+        "slow/get-slow-app": {"result": "OK", "slow": [
+            {"country_id": 1, "country": "Seen", "flag": "/f/1.png", "visited": 1, "yes": 8},
+            {"country_id": 2, "country": "Never", "flag": "/f/2.png", "visited": 0, "yes": 41}]},
+        "quickEnter/get-regions": {"result": "OK", "data": {"regions": []}},
+    })
+    y = c.yes_scores(today=dt.date(2026, 8, 16))
+    assert y[1]["yes"] == 8 and y[1]["undated"] is True
+    assert y[2]["yes"] == 41, "never visited still scores the age"
+
+
+def test_yes_delta_is_a_gain_for_recent_years_and_a_loss_for_old_ones():
+    """"Dating an old visit makes YES worse" is false for a recent visit."""
+    from wanderfill.api.client import yes_delta
+    today = dt.date(2026, 8, 16)
+    assert yes_delta(8, 2026, today=today) == -8   # this year: full gain
+    assert yes_delta(8, 2025, today=today) == -8   # the "gift" year
+    assert yes_delta(8, 2019, today=today) == -1   # still a gain
+    assert yes_delta(8, 2018, today=today) == 0    # break-even, exactly
+    assert yes_delta(8, 2013, today=today) == 5    # Myanmar: a real loss
+
+
+# --------------------------------------------------------------------------
+# grading a coordinate: the speed rule is code, not prose
+# --------------------------------------------------------------------------
+
+def _fix(lat, lon, day, hh=None, mm=0, ss=0):
+    from wanderfill.grade import Fix
+    at = dt.datetime(day.year, day.month, day.day, hh, mm, ss) if hh is not None else None
+    return Fix(lat, lon, day, at)
+
+
+def test_grade_rejects_a_flight():
+    """Two mid-Pacific points 1,100 km and 2.5 hours apart were one flight."""
+    from wanderfill.grade import grade
+    d = dt.date(2025, 10, 22)
+    v = grade([_fix(-18.265, -173.905, d, 12, 59), _fix(-18.318, -163.413, d, 15, 28)])
+    assert not v.ok and "km/h" in v.reason
+
+
+def test_grade_rejects_an_airport_layover_on_time_not_speed():
+    """Sitting in Terminal E is slow; it is the span that catches it."""
+    from wanderfill.grade import grade
+    d = dt.date(2023, 4, 27)
+    v = grade([_fix(29.984, -95.333, d, 17, m) for m in (27, 39, 53)])
+    assert not v.ok and "min" in v.reason
+
+
+def test_grade_accepts_two_distinct_days():
+    from wanderfill.grade import grade
+    v = grade([_fix(48.85, 2.35, dt.date(2024, 5, 1)), _fix(48.86, 2.34, dt.date(2024, 5, 2))])
+    assert v.ok and "2 distinct days" in v.reason
+
+
+def test_grade_accepts_one_dense_day_at_ground_speed():
+    from wanderfill.grade import grade
+    d = dt.date(2024, 3, 3)
+    v = grade([_fix(-33.4 + i * 0.001, -70.79, d, 3 + i // 4, (i * 13) % 60) for i in range(12)])
+    assert v.ok and "one day" in v.reason
+
+
+def test_grade_never_infers_speed_between_untimed_rows():
+    """Day-level rows have no intra-day clock; pairing them invents a speed."""
+    from wanderfill.grade import looks_airborne
+    d = dt.date(2013, 7, 1)
+    fast, legs = looks_airborne([_fix(50.4, 30.5, d), _fix(16.8, 96.1, d)])
+    assert (fast, legs) == (0, 0)
+
+
+def test_grade_holds_rather_than_rejects():
+    """St Petersburg was in the held pile and was real. Held is not rejected."""
+    from wanderfill.grade import grade
+    v = grade([_fix(60.002, 30.299, dt.date(2014, 6, 17))])
+    assert not v.ok and "single day" in v.reason
+
+
+# --------------------------------------------------------------------------
+# writes are never retried, and a lost answer is not a failure
+# --------------------------------------------------------------------------
+
+def test_writes_are_not_retried():
+    """A retried write is how duplicate visits are made."""
+    from wanderfill.api.transport import Transport
+    assert Transport._is_write("quickEnter/add-visit")
+    assert Transport._is_write("quickEnter/update-visit")
+    assert Transport._is_write("trips/new-trip")
+    assert Transport._is_write("kye/set-kye")
+    assert not Transport._is_write("quickEnter/get-visits-to-region")
+    assert not Transport._is_write("slow/get-slow-app")
+    assert not Transport._is_write("regions/get-regions-list-2")
+
+
+def test_apply_refuses_a_plan_containing_the_same_write_twice():
+    """`already` is read once, so both copies would otherwise execute."""
+    import pathlib
+    import tempfile
+
+    from wanderfill.plan.apply import apply_plan
+    twice = [Op(kind="mark_dare", bucket="apply", region=7),
+             Op(kind="mark_dare", bucket="apply", region=7)]
+    plan = Plan(account=7, ops=twice, basis={"fingerprint": "x"})
+    c, _ = client({"user/status-quick": {"result": "OK", "uid": 7},
+                   "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
+                   "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}})
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises((ValueError, DriftError)) as e:
+            apply_plan(c, plan, workdir=pathlib.Path(td), confirm=True)
+        assert "twice" in str(e.value) or "drift" in str(e.value).lower()
+
+
+def test_regions_touched_includes_trip_members():
+    """create_trip names its regions in `regions`, not `region`."""
+    from wanderfill.plan.model import regions_touched
+    ops = [Op(kind="create_trip", regions=[{"id": 11, "quality": 3}, {"id": 12, "quality": 3}]),
+           Op(kind="update_visit", region=5, visit_id=1),
+           Op(kind="mark_kye", item=570)]
+    assert regions_touched(ops) == {5, 11, 12}, "a qid must not be read as a region"
+
+
+def test_year_only_visit_widens_to_a_whole_year_for_date_checks():
+    """Comparing a YearOnly to a date raised TypeError and broke `evidence`."""
+    from wanderfill.cli.main import _visit_window
+
+    class V:
+        def __init__(self, a, b): self.date_from, self.date_to = a, b
+
+    assert _visit_window(V(YearOnly(2013), YearOnly(2013))) == (
+        dt.date(2013, 1, 1), dt.date(2013, 12, 31))
+    assert _visit_window(V(dt.date(2024, 1, 2), dt.date(2024, 1, 3))) == (
+        dt.date(2024, 1, 2), dt.date(2024, 1, 3))
+    assert _visit_window(V(None, None)) is None
+
+
+def test_apply_verifies_writes_against_the_server():
+    """"OK" is not evidence. Both historical incidents returned OK at the time."""
+    from wanderfill.plan.apply import verify
+    c, _ = client(_one_visit(quality=3, year_from=2024, month_from=1, day_from=1,
+                             year_to=2024, month_to=1, day_to=2))
+    good = verify(c, [Op(kind="update_visit", region=22, visit_id=11,
+                         date_from="2024-01-01", date_to="2024-01-02", quality=3)])
+    assert good["checked"] == 1 and good["mismatches"] == []
+
+    bad = verify(c, [Op(kind="update_visit", region=22, visit_id=11,
+                        date_from="2024-06-01", date_to="2024-06-02", quality=3)])
+    assert bad["mismatches"], "a date the server did not store must be reported"
+
+
+def test_verify_reports_a_duplicate_rather_than_passing():
+    """Fifty duplicate visits were made once; this is the check that would see it."""
+    from wanderfill.plan.apply import verify
+    row = {"id": 1, "quality": 3, "trip_id": 99,
+           "year_from": 2024, "month_from": 1, "day_from": 1,
+           "year_to": 2024, "month_to": 1, "day_to": 1}
+    c, _ = client({"quickEnter/get-visits-to-region":
+                   {"result": "OK", "data": [row, {**row, "id": 2}]}})
+    out = verify(c, [Op(kind="add_visit", region=5,
+                        date_from="2024-01-01", date_to="2024-01-01", quality=3)])
+    assert any("duplicate" in m for m in out["mismatches"])
+    assert out["phantom_trips"], "the auto-created trip id must be recorded"

@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..api.client import NomadMania, YearOnly
-from ..api.errors import AccountMismatch, DriftError
-from .model import Op, Plan, basis_of, fingerprint
+from ..api.errors import AccountMismatch, DriftError, UnknownWriteOutcome
+from .model import Op, Plan, basis_of, fingerprint, regions_touched
 
 
 @dataclass
@@ -100,6 +101,8 @@ class ApplyReport:
     failed: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    # Filled by `verify()` after the writes: what the server actually says now.
+    verified: dict = field(default_factory=dict)
 
 
 def apply_plan(
@@ -129,6 +132,20 @@ def apply_plan(
     report = ApplyReport()
     ops = plan.to_apply()
 
+    # Structural validation first: it needs no network, no auth and no snapshot,
+    # so a malformed plan fails before anything touches the profile. Two ops with
+    # the same key would both run — `already` is read once, so the first success
+    # cannot suppress the second — and a plan containing the same write twice is
+    # a plan whose author is confused.
+    seen: dict[str, Op] = {}
+    for op in ops:
+        if op.key in seen:
+            raise ValueError(
+                f"plan contains the same write twice: {op.kind} {op.label!r} and "
+                f"{seen[op.key].label!r} share key {op.key}. Remove one and re-plan."
+            )
+        seen[op.key] = op
+
     if not confirm:
         report.skipped = len(ops)
         return report
@@ -141,12 +158,11 @@ def apply_plan(
 
     workdir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # Only kinds that actually touch visit records contribute to the snapshot.
-    # `region` on a mark_kye op is a 10x10 quadrant id, not an NM region id, and
-    # snapshotting it would fetch some unrelated region's visits and then fail
-    # the drift check for a reason that has nothing to do with the plan.
-    VISIT_KINDS = {"add_visit", "update_visit", "create_trip"}
-    regions = sorted({o.region for o in ops if o.region and o.kind in VISIT_KINDS})
+    # `regions_touched` knows which kinds carry a NomadMania region id and which
+    # carry something else: a mark_kye op's id is a 10x10 quadrant, a different
+    # namespace that merely overlaps numerically. Snapshotting one as a region
+    # fetches an unrelated region's visits and fails drift for the wrong reason.
+    regions = sorted(regions_touched(ops))
     snapshot = client.snapshot(regions or None)
     (workdir / f"snapshot-{stamp}.json").write_text(
         json.dumps(snapshot, indent=1, default=str), encoding="utf-8"
@@ -198,15 +214,111 @@ def apply_plan(
             result = _execute(client, op)
             ok = True
             journal.note(op, result)
+            already.add(op.key)
             report.succeeded += 1
+        except UnknownWriteOutcome as exc:
+            # Deliberately NOT journalled as done. The entry stays open, which is
+            # what blocks the next run from retrying a write that may have landed.
+            report.failed += 1
+            report.errors.append(f"{op.kind} {op.label}: {exc}")
+            if on_progress:
+                on_progress(i, len(ops), op, False)
+            raise
         except Exception as exc:
             journal.note(op, None, error=str(exc))
             report.failed += 1
             report.errors.append(f"{op.kind} {op.label}: {exc}")
+            # Stop on the first definite failure. Continuing runs later ops
+            # against a profile that is no longer in the state the plan assumed,
+            # and the ops after a failure are the least reviewed of the batch.
+            if on_progress:
+                on_progress(i, len(ops), op, False)
+            raise
         if on_progress:
             on_progress(i, len(ops), op, ok)
 
+    report.verified = verify(client, ops)
+    (workdir / f"verify-{stamp}.json").write_text(
+        json.dumps(report.verified, indent=1, default=str), encoding="utf-8"
+    )
     return report
+
+
+def verify(client: NomadMania, ops: Sequence[Op]) -> dict:
+    """Re-read what the plan touched and compare it with what the plan intended.
+
+    A response saying ``OK`` is not evidence that the profile changed the way you
+    meant. Both historical incidents here — a downgraded quality and fifty
+    duplicate visits — produced nothing but ``OK`` at the time, and were found by
+    reading the server back afterwards. Every apply in this session was verified
+    by hand for that reason; doing it by hand is not a safeguard, it is a habit
+    that will lapse.
+
+    Returns a report rather than raising: by the time this runs the writes have
+    already happened, so the useful thing is an accurate account of what is now
+    true, including the parts that came out wrong.
+    """
+    out: dict[str, Any] = {"checked": 0, "mismatches": [], "phantom_trips": []}
+
+    for op in ops:
+        if op.kind == "update_visit":
+            out["checked"] += 1
+            live = next(
+                (v for v in client.visits_for_region(op.region) if v.id == op.visit_id), None
+            )
+            if live is None:
+                out["mismatches"].append(f"visit {op.visit_id} is gone from region {op.region}")
+                continue
+            if _iso_of(live.date_from) != op.date_from or _iso_of(live.date_to) != op.date_to:
+                out["mismatches"].append(
+                    f"visit {op.visit_id}: wanted {op.date_from}..{op.date_to}, "
+                    f"server has {_iso_of(live.date_from)}..{_iso_of(live.date_to)}"
+                )
+            if op.quality is not None and live.quality < op.quality:
+                out["mismatches"].append(
+                    f"visit {op.visit_id}: quality {live.quality} "
+                    f"is below the intended {op.quality}"
+                )
+
+        elif op.kind == "add_visit":
+            out["checked"] += 1
+            live = [v for v in client.visits_for_region(op.region)
+                    if _iso_of(v.date_from) == op.date_from and _iso_of(v.date_to) == op.date_to]
+            if not live:
+                out["mismatches"].append(
+                    f"region {op.region}: no visit found for {op.date_from}..{op.date_to}"
+                )
+            elif len(live) > 1:
+                out["mismatches"].append(
+                    f"region {op.region}: {len(live)} visits now match {op.date_from}..{op.date_to}"
+                    " — a duplicate, which is the incident this package exists for"
+                )
+            # add-visit wraps the new visit in a trip nobody asked for. Record it
+            # so the debris is reconcilable rather than merely known about.
+            for v in live:
+                if v.trip_id:
+                    out["phantom_trips"].append({"region": op.region, "trip_id": v.trip_id})
+
+        elif op.kind == "mark_kye":
+            out["checked"] += 1
+            if op.item not in set(client.kye().get("visited", [])):
+                out["mismatches"].append(f"KYE quadrant {op.item} did not stick")
+
+        elif op.kind == "mark_dare":
+            out["checked"] += 1
+            if op.region not in client.visited_dare_ids():
+                out["mismatches"].append(f"DARE area {op.region} did not stick")
+
+        elif op.kind == "tick_series":
+            out["checked"] += 1
+            if op.item not in set(client.series(op.series).get("visited", [])):
+                out["mismatches"].append(f"series {op.series} item {op.item} did not stick")
+
+    return out
+
+
+def _iso_of(day) -> str | None:
+    return day.isoformat() if day else None
 
 
 def _when(text: str | None):

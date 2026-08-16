@@ -254,7 +254,14 @@ class PhotosAppSource:
         ) in rows:
             yield PhotoAsset(
                 uuid=str(uuid),
-                taken=dt.datetime.fromtimestamp(float(ts)),
+                # `ts` is ALREADY wall-clock where the photo was taken: the query
+                # adds ZTIMEZONEOFFSET to make it so. Plain fromtimestamp() would
+                # then apply *this machine's* offset on top, shifting every photo
+                # by the local UTC offset and moving near-midnight ones to the
+                # wrong day. `points()` gets this right via SQLite's UTC-based
+                # date(), so the bug also made the two readings of one library
+                # disagree about which day a photo belongs to.
+                taken=dt.datetime.fromtimestamp(float(ts), dt.timezone.utc).replace(tzinfo=None),
                 lat=float(lat),
                 lon=float(lon),
                 directory=str(directory or ""),

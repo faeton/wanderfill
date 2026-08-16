@@ -25,6 +25,30 @@ from typing import Any
 from .errors import ApiError, PrecisionLoss
 from .transport import Transport
 
+# What the server scores a country that is marked visited but carries no year.
+# The published rule only covers "never visited" (your age); this value was
+# measured on one profile across a batch run. It is a constant here so that the
+# next person who learns better changes one line rather than hunting prose.
+UNDATED_YES = 8
+
+def yes_delta(current: int, year: int, *, today: dt.date | None = None) -> int:
+    """Points YES would move if a country currently scoring ``current`` were dated to ``year``.
+
+    Negative is a gain. **Compute this; do not apply a rule of thumb.** "Dating
+    an old visit makes YES worse" is true for a 2013 visit and false for a 2025
+    one, and the break-even moves every January. With an undated country at 8,
+    today, a visit in the current or previous calendar year is worth −8, and
+    every year further back is worth one point more until it turns positive.
+
+    It is also worth nothing at all if some other region of that country already
+    carries a later year — YES reads the country's most recent visit, not this
+    one. Check ``yes_scores()[cid]["last_year"]`` before proposing a date.
+    """
+    today = today or dt.date.today()
+    would = 0 if year >= today.year - 1 else today.year - year
+    return would - current
+
+
 QUALITY = {
     0: "no visit",
     1: "transit",
@@ -240,21 +264,35 @@ class NomadMania:
                 r["yes_stored"] = r.pop("yes")
         return rows
 
-    def yes_scores(self, *, today: dt.date | None = None) -> dict[int, dict]:
+    def yes_scores(
+        self, *, today: dt.date | None = None, undated: int = UNDATED_YES
+    ) -> dict[int, dict]:
         """YES per country, computed from live region years. Country id -> detail.
 
         NomadMania's published rule: 0 if the country was visited this calendar
         year, 0 if the previous one (an explicit "gift"), otherwise the years
-        since; and **the traveller's age for a country never visited**. A country
-        marked visited but carrying no year anywhere scores the age too — it is
-        worth exactly as much as never having gone, which is the single largest
-        and least visible drag on most profiles.
+        since; and the traveller's age for a country **never visited**.
+
+        The published rule is silent on the case that matters most in practice —
+        a country marked visited whose year is unknown. Observation on one
+        profile, before and after a batch run, is that the server scores those
+        **8**, not the age, and that is what ``undated`` defaults to. Treat it as
+        measured on one account rather than as a documented rule, and pass a
+        different value if a second profile ever says otherwise.
+
+        That 8 is why this method exists in its current form. Scoring undated
+        countries as the age instead — which this did until it was checked
+        against a batch run — makes a recomputation disagree with the server by
+        33 points per country, and the disagreement looks like a server bug.
 
         Regions map to countries by flag: ``flag1`` first, then ``flag2``, because
-        a territory carries its own flag first and its sovereign's second.
+        a territory carries its own flag first and its sovereign's second. That
+        mapping is the weak part: it misses territories filed under a different
+        flag from their sovereign (Greenland under Denmark, Åland under Finland),
+        so where this disagrees with ``yes_stored`` the server is usually right.
 
-        This is the honest number and it is *not* the one on the ranking board —
-        see :meth:`countries`. Say which you are quoting.
+        This is a cross-check, **not** the number on the ranking board — see
+        :meth:`countries`. Say which you are quoting.
         """
         today = today or dt.date.today()
         born = self.settings().get("date_of_birth")
@@ -277,14 +315,17 @@ class NomadMania:
         for r in rows:
             cid = r["country_id"]
             year = last.get(cid)
-            score = age if not year else (0 if year >= today.year - 1 else today.year - year)
+            seen = bool(r.get("visited"))
+            if year:
+                score = 0 if year >= today.year - 1 else today.year - year
+            else:
+                score = undated if seen else age
             out[cid] = {
                 "country": r["country"],
                 "last_year": year,
                 "yes": score,
-                "visited": bool(r.get("visited")),
-                # the expensive case: claimed, but scoring as if it never happened
-                "undated": bool(r.get("visited")) and not year,
+                "visited": seen,
+                "undated": seen and not year,
             }
         return out
 
@@ -311,7 +352,8 @@ class NomadMania:
         Both year fields are ``None`` for a region whose visits carry no dates —
         the legacy "clicked visited" records. That is not the same as unvisited:
         ``no_of_visits`` is still set. A country in that state scores the full
-        never-visited age under the YES rule, so these are worth surfacing.
+        ``UNDATED_YES`` under the YES rule, so these are worth surfacing — but
+        dating one only helps if the real year is recent. See :meth:`yes_scores`.
 
         The payload nests one level deeper than the sibling endpoints
         (``data.regions``, alongside ``data.dare`` and ``data.tcc``).

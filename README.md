@@ -358,7 +358,9 @@ cost a wrong write or a wrong number the first time.
 | A visit can carry a **year with no month or day**, and reading that as undated erases it on write-back | `YearOnly`; `update_visit` refuses to make a date vaguer without `allow_vaguer` |
 | `slow/get-slow-app`'s `yes` is batch-computed and lags, so one reading looks broken | Renamed `yes_stored`; `yes_scores()` recomputes the published rule |
 | A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |
-| KYE is manual — nothing derives it, and a photo from a plane window sits in a cell like a week on the ground | `mark_kye` only ever sends `1`; candidates graded by implied speed, not point count |
+| Nothing fills KYE in from your visits, and a photo from a plane window sits in a cell like a week on the ground | `mark_kye` only ever sends `1`; `grade.py` scores candidates by implied speed, not point count |
+| A write retried after a lost response duplicates it | Reads retry, writes do not; an unanswered write raises `UnknownWriteOutcome` and leaves the journal open |
+| `OK` is not evidence that the profile changed as intended | `apply` re-reads every touched object and writes a `verify-*.json` |
 | `get-regions-mqp` returns `visited` as an id string, not a boolean | Not used; `visited_dare_ids` is the source of truth |
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |

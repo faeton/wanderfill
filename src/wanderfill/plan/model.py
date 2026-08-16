@@ -126,6 +126,28 @@ def fingerprint(state: dict) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:32]
 
 
+def regions_touched(ops: Iterable[Op]) -> set[int]:
+    """Every NomadMania region an op can change, including trip members.
+
+    A ``create_trip`` names its regions in ``Op.regions``, not in ``Op.region``,
+    so deriving targets from ``o.region`` alone leaves a whole trip's worth of
+    regions outside the drift check — the exact regions the trip is about to
+    write visits into.
+
+    ``mark_kye`` and ``tick_series`` contribute nothing: their ids live in
+    ``item`` and are a different namespace that merely overlaps numerically.
+    """
+    out: set[int] = set()
+    for op in ops:
+        if op.kind in ("add_visit", "update_visit") and op.region:
+            out.add(int(op.region))
+        elif op.kind == "create_trip":
+            for r in op.regions:
+                if r.get("id"):
+                    out.add(int(r["id"]))
+    return out
+
+
 def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
     """The live state a plan is allowed to assume, reduced to a comparable form.
 

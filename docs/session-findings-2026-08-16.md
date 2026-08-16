@@ -33,9 +33,15 @@ visited country scores but not a visited-undated one:
 | never visited | your age |
 
 **The consequence inverts the obvious advice.** An undated country costs 8, not
-your age, so backfilling is worth little — and **dating a country to an old year
-is worse than leaving it undated**. Break-even is eight years back. On this
-profile Myanmar went 8 → 13 by being dated to 2013.
+your age, so backfilling is worth far less than it looks. Whether it gains or
+loses depends entirely on the year: with an undated country at 8 in 2026, a 2026
+or 2025 visit gains 8, a 2019 visit gains 1, 2018 breaks even, and anything
+earlier is a loss — Myanmar went 8 → 13 by being dated to 2013.
+
+**"Eight years" is a table, not a law**, and the break-even moves every January.
+Use `yes_delta()`; do not carry the slogan around. It can also be worth exactly
+nothing: YES reads a country's *most recent* visit, so dating one region of a
+country that already has a later year elsewhere changes the score by zero.
 
 **Rule for next time:** read, write, wait for the batch, read again. Never
 conclude from one reading. Where a local recomputation and the server disagree,
@@ -113,11 +119,14 @@ without claiming a day.
 
 ---
 
-## 6. KYE is manual, unclaimed, and the cleanest list on the site
+## 6. KYE was unclaimed, and its geometry is the cleanest on the site
 
 See the KYE section in `nomadmania-api.md` for the endpoints and the grid. On
 this profile it read **0 of 434** while the user's own coordinates fell inside
-**105** cells, because nothing derives it and nobody had ever clicked the map.
+**105** cells — nothing had filled it in, and nobody had ever clicked the map.
+
+**It was later called "manual" here, and that claim did not survive the day** —
+see §8. Something added seven quadrants nobody in this session ticked.
 
 **Outcome: 93 marked, 12 held.** The rule applied, and it is the transferable
 part:
@@ -194,3 +203,85 @@ An independent code review found four real ones that the tests did not cover:
 The general lesson: every one of these was a *documented* caution that had not
 been turned into behaviour. A comment telling the caller to be careful is not a
 safeguard.
+
+---
+
+## 8. A second review round, and the defect the first round created
+
+Two independent reviews were run against the state produced by the first round.
+Both found real problems, and the most serious was introduced *by* the earlier
+fixes rather than surviving them.
+
+### The write path retried writes
+
+`Transport._post` retried every request three times on a connection failure.
+That is right for a read and catastrophic for a write: if NomadMania accepted an
+`add-visit` and the response was lost on the way back, it was sent again, and
+again — duplicate visits and phantom trips, with one `open` line in the journal.
+**This defeated the write-ahead journal added the same morning**, because the
+retries happen *below* it.
+
+Reads retry now; writes get one attempt. A write that gets no answer raises
+`UnknownWriteOutcome`, distinct from `TransportError`:
+
+- `TransportError` — the server answered and refused. Definitely did not happen.
+- `UnknownWriteOutcome` — no answer came back. **We do not know.**
+
+Only the second leaves its journal entry open, which blocks the next run until a
+human reconciles. "It failed" and "we never found out" needed different types.
+
+### Three more from the same review
+
+- **Duplicate ops in one plan both executed.** `already` was read once, so the
+  first success could not suppress the second. Now a structural check runs
+  before any network call at all.
+- **Apply continued after a failure**, running later ops against a profile no
+  longer in the state the plan assumed. Now fail-stop.
+- **Drift ignored `create_trip` regions**, which live in `Op.regions`, not
+  `Op.region` — a whole trip's worth of regions sat outside the check.
+
+### And two the docs had been lying about
+
+**`yes_scores()` still implemented the disproven rule** — undated countries
+scored as the traveller's age, not 8. The library the docs told you to trust
+would have reported an undated country as costing 41, and after the next batch
+`yes_stored=8` against a recomputed `41` would have looked like a server bug.
+That is exactly how the first round's wrong conclusion started. Fixed, and the
+recomputed total now matches the server exactly: 4036 against 4036, where before
+it was 4206.
+
+**`evidence --check-dates` crashed on year-only visits** — `TypeError: '<=' not
+supported between YearOnly and date` — a regression introduced by the same
+morning's `YearOnly` work. A bare year now widens to 1 January–31 December.
+
+### Photo timestamps were shifted by the machine's timezone
+
+`assets()` called `datetime.fromtimestamp()` on a value the SQL had *already*
+converted to local wall-clock, re-applying the local offset. On the machine this
+was found on that is two hours, enough to move a near-midnight photo to the wrong
+day — and it made `assets()` and `points()` disagree about which day a photo
+belongs to, since `points()` goes through SQLite's UTC-based `date()`.
+
+Spans and speeds were unaffected (both endpoints shift together), so the grading
+conclusions stand, but every clock time reported from a dossier before this fix
+was off by the local offset.
+
+### KYE may not be purely manual after all
+
+Hours after 93 quadrants were ticked deliberately, the count read **100**. Six of
+the seven additions are boxes this account has *no coordinate inside*, in
+countries it has visited. Either the user ticked them by hand, or something
+server-side derives quadrants from region visits on a delay, as YES does.
+
+Nobody has distinguished the two, and the docs no longer claim it is manual. This
+is the second time in one day that a confident claim about a NomadMania field
+came from a single reading.
+
+### What the reviews say about this repo's habit
+
+The first round's lesson was *documented cautions that were never turned into
+behaviour*. The second round's is narrower and worse: **a fix can create the
+defect it was written to prevent.** The retry bug and the `yes_scores()` staleness
+were both produced by the same morning that added the journal and the YES
+correction. The counter-move is not more care; it is that every claim now has a
+test, and the speed rule that lived in prose is `grade.py`.

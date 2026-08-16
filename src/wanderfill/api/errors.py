@@ -30,6 +30,17 @@ class TransportError(WanderfillError):
     """The request never got an answer — timeout, DNS, connection reset."""
 
 
+class UnknownWriteOutcome(WanderfillError):
+    """A write was sent and no answer came back.
+
+    Distinct from :class:`TransportError`, which means the server answered and
+    refused. Here we do not know whether the profile changed, and the difference
+    matters: retrying a refused write is safe, retrying an unanswered one is how
+    duplicate visits and phantom trips are made. The only correct response is to
+    stop and read the affected record back.
+    """
+
+
 class PrecisionLoss(WanderfillError):
     """A write would have made an existing date vaguer than it already was.
 

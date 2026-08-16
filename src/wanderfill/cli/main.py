@@ -22,13 +22,14 @@ it if they asked".
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
 from pathlib import Path
 
 from .. import __version__
-from ..api.client import NomadMania
+from ..api.client import NomadMania, YearOnly
 from ..api.errors import WanderfillError
 from ..evidence import (
     MIN_SERIAL_DAYS,
@@ -204,6 +205,24 @@ def cmd_sweep(args) -> int:
     return 0
 
 
+def _visit_window(v) -> tuple[dt.date, dt.date] | None:
+    """A visit's date range as real dates, widening a bare year to the whole year.
+
+    An undated visit says nothing about when, so it cannot disagree with a photo
+    and returns None. A year-only visit says a great deal — it is just imprecise,
+    and the honest window is 1 January to 31 December.
+    """
+    def lo(d):
+        return dt.date(d.year, 1, 1) if isinstance(d, YearOnly) else d
+
+    def hi(d):
+        return dt.date(d.year, 12, 31) if isinstance(d, YearOnly) else d
+
+    if not v.date_from or not v.date_to:
+        return None
+    return (lo(v.date_from), hi(v.date_to))
+
+
 def cmd_evidence(args) -> int:
     """Index the photo library against the profile, for verification day.
 
@@ -318,10 +337,12 @@ def cmd_evidence(args) -> int:
         for rid in targets:
             # An undated visit says nothing about when, so it cannot disagree
             # with a photo. It is still a visit, and still counts.
+            # A year-only visit says "some time in 2013", which as a window is
+            # the whole year. Comparing a YearOnly to a date raises TypeError,
+            # and dropping it instead would silently report a date conflict for
+            # every photo in a year the profile does record.
             visits[rid] = [
-                (v.date_from, v.date_to)
-                for v in c.visits_for_region(rid)
-                if v.date_from and v.date_to
+                w for w in (_visit_window(v) for v in c.visits_for_region(rid)) if w
             ]
 
     # Which regions are too small to walk a kilometre across? Only regions whose
@@ -457,8 +478,129 @@ def cmd_show(args) -> int:
         print(f"  {k:28} {v:>5}")
     print(f"\n{len(plan.to_apply())} op(s) are in the apply bucket and would execute.")
     if args.verbose:
+        # Everything a human needs to approve the write, not just its label.
+        # Reviewing a plan from a summary that hides the dates, the visit id and
+        # the quality is not review; it is assent.
         for op in plan.ops[: args.limit]:
-            print(f"  [{op.bucket:6}] {op.kind:13} {op.label[:60]:62} {op.method}")
+            print(f"\n  [{op.bucket}] {op.kind}  {op.label}")
+            bits = []
+            if op.region is not None:
+                bits.append(f"region={op.region}")
+            if op.visit_id is not None:
+                bits.append(f"visit={op.visit_id}")
+            if op.series is not None:
+                bits.append(f"series={op.series}")
+            if op.item is not None:
+                bits.append(f"item={op.item}")
+            if op.date_from or op.date_to:
+                bits.append(f"dates={op.date_from}..{op.date_to}")
+            if op.quality is not None:
+                bits.append(f"quality={op.quality}")
+            if op.allow_vaguer:
+                bits.append("ALLOW_VAGUER — this may erase precision")
+            if op.regions:
+                bits.append(f"{len(op.regions)} trip region(s): "
+                            + ",".join(str(r.get('id')) for r in op.regions))
+            print(f"      {'  '.join(bits)}")
+            print(f"      confidence {op.confidence}  |  {op.method}")
+            for e in op.evidence:
+                print(f"        - {e}")
+    elif plan.ops:
+        print("Run with -v to see dates, ids, quality and the evidence behind each op.")
+    return 0
+
+
+def cmd_check(args) -> int:
+    """Read-only: does this plan still match the profile it was built against?"""
+    from ..plan.apply import Journal
+    from ..plan.model import Plan, basis_of, fingerprint, regions_touched
+
+    c = _client(args)
+    plan = Plan.load(args.plan)
+    ops = plan.to_apply()
+    problems = []
+
+    live = c.account_id()
+    print(f"account: plan {plan.account}, logged in as {live}"
+          f"{'  ✓' if live == plan.account else '  ✗ MISMATCH'}")
+    if live != plan.account:
+        problems.append("account mismatch")
+
+    keys = [o.key for o in ops]
+    if len(keys) != len(set(keys)):
+        problems.append("the plan contains the same write twice")
+
+    regions = sorted(regions_touched(ops))
+    snap = c.snapshot(regions or None)
+    expected = plan.basis.get("fingerprint")
+    if not expected:
+        problems.append("no basis fingerprint — apply will refuse this plan")
+    else:
+        now = fingerprint(basis_of(snap, regions))
+        same = now == expected
+        print(f"drift:   {'unchanged since planning  ✓' if same else 'STATE HAS MOVED  ✗'}")
+        if not same:
+            problems.append("live state drifted; re-plan")
+
+    workdir = Path(args.workdir)
+    journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
+    done, stuck = journal.done_keys(), journal.unresolved()
+    if done:
+        print(f"journal: {len(done)} op(s) already applied and would be skipped")
+    if stuck:
+        problems.append(f"{len(stuck)} op(s) started and never confirmed — reconcile by hand")
+
+    print(f"\n{len(ops)} op(s) would execute across {len(regions)} region(s).")
+    if problems:
+        print("\nBLOCKERS:")
+        for p in problems:
+            print(f"  ✗ {p}")
+        return 1
+    print("No blockers. This wrote nothing.")
+    return 0
+
+
+def cmd_state(args) -> int:
+    """Read-only view of the hand-ticked lists, which nothing derives for you.
+
+    These exist because two of them were found sitting at or near zero on a
+    profile with 391 regions: nothing fills KYE or a series in from your visits,
+    so an unread list looks identical to a list you have nothing for.
+    """
+    c = _client(args)
+
+    kye = c.kye()
+    ticked, total = len(kye.get("visited", [])), kye.get("max", 0)
+    if total:
+        print(f"KYE           {ticked:>4} / {total}   ({100 * ticked / total:.0f}%)")
+    else:
+        print("KYE           unavailable")
+
+    if args.series:
+        s = c.series(args.series)
+        print(f"series {args.series:<6} {s.get('score'):>4} / {s.get('max')}   {s.get('title')}")
+    else:
+        print("series: pass --series <id> for one list (1 = World Capitals, 22 = WHS).")
+
+    print("\ncountries, by the server's stored YES and by recomputing the rule:")
+    stored = {r["country_id"]: r for r in c.countries()}
+    mine = c.yes_scores()
+    tot_stored = sum(r.get("yes_stored", 0) for r in stored.values())
+    tot_mine = sum(v["yes"] for v in mine.values())
+    print(f"  stored (this is the ranking) {tot_stored}")
+    print(f"  recomputed here              {tot_mine}")
+    disagree = [v["country"] for cid, v in mine.items()
+                if stored.get(cid, {}).get("yes_stored") != v["yes"]]
+    if disagree:
+        print(f"  {len(disagree)} disagree: {', '.join(sorted(disagree)[:12])}"
+              f"{' …' if len(disagree) > 12 else ''}")
+        print("  The stored field lags a batch job. Where they differ it is usually right.")
+    undated = sorted(v["country"] for v in mine.values() if v["undated"])
+    if undated:
+        print(f"\n  marked visited but carrying no year "
+              f"({len(undated)}): {', '.join(undated)}")
+        print("  Each costs 8. Dating one only gains if the real year is recent —")
+        print("  use yes_delta() rather than assuming.")
     return 0
 
 
@@ -593,6 +735,15 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("-v", "--verbose", action="store_true")
     sh.add_argument("--limit", type=int, default=40)
     sh.set_defaults(func=cmd_show)
+
+    ck = sub.add_parser("check", help="read-only: is this plan still safe to apply?")
+    ck.add_argument("plan")
+    ck.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
+    ck.set_defaults(func=cmd_check)
+
+    st = sub.add_parser("state", help="read-only: KYE, series and YES as the server has them")
+    st.add_argument("--series", type=int, help="one series id, e.g. 1 for World Capitals")
+    st.set_defaults(func=cmd_state)
 
     a = sub.add_parser("apply", help="execute a plan file")
     a.add_argument("plan")

@@ -17,7 +17,7 @@ project's legitimacy sits.
 | Surface | Base | Auth | Carries |
 |---|---|---|---|
 | Modern API | `nomadmania.com/webapi/<module>/<action>` | `NMTOKEN` header | regions, visits, trips, DARE, countries, geocoding |
-| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series — WHS, KYE, TCC, and the rest |
+| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series — WHS, TCC, and the rest. **Not KYE**, which has its own module |
 | Tiles | `maps.nomadmania.travel/tiles/<layer>/{z}/{x}/{y}.pbf` | none | current polygons, and every series object's coordinate |
 
 Every API call is a `POST` with an `application/x-www-form-urlencoded` body.
@@ -182,9 +182,22 @@ its `series_id`:
  "series_name": "Urban Legends", "no_visited": 3884}
 ```
 
-The layer is **not decimated by zoom**: a test box over Rome returned the same
-116 objects at z9 as at z15. Harvest at a coarse zoom and save thousands of
-requests — 4,090 tiles instead of 8,959, for identical results.
+The layer is **not decimated between z9 and z15**: a test box over Rome returned
+the same 116 objects at either. Harvesting at z9 rather than z15 saves thousands
+of requests — 4,090 tiles instead of 8,959, for identical results.
+
+**That does not extend to arbitrarily coarse zooms, and reading it as "use the
+coarsest zoom you like" is wrong.** A global sweep at **z4** returned **31** of
+the 211 World Capitals; the same series harvested at **z6** returned **113**.
+Somewhere below z9 the layer starts dropping points. z7 and z8 were never
+measured, and neither was any series other than World Capitals, so **z9 is the
+only zoom demonstrated to be complete** — treat anything coarser as unproven
+rather than as a saving.
+
+The cheaper trick is not a coarser zoom but **fewer tiles**: harvest at z9 but
+only the tiles the user's own track passes through. For one profile that was 195 tiles at
+z6 instead of 4,096 for the whole globe, and it cannot miss anything, because a
+series object the user was never near is not a candidate anyway.
 
 ---
 
@@ -270,9 +283,21 @@ against what is already ticked before letting it add anything.
 ## KYE — the one list with no inference in it
 
 **Know Your Earth** is not a series and is not on the legacy surface. It has its
-own module, and it is **manual**: the page says so in as many words — *"Mark
-quadrants as visited by clicking the map."* Nothing derives it from your regions,
-so a profile with 391 regions and 103 countries can sit at **0**, and this one did.
+own module, and the page describes it as manual — *"Mark quadrants as visited by
+clicking the map."*
+
+**It may not be entirely manual, and this is unresolved.** Nothing derives it
+promptly: a profile with 391 regions and 103 countries read 0/434. But hours
+after 93 quadrants were ticked deliberately, the count read 100 — and six of the
+seven additions were boxes the account has **no coordinate inside**, in countries
+it has visited (Greenland, Russia, Tajikistan, Brazil, Queensland, the Pacific).
+Either the user ticked them by hand in the browser, or something server-side
+derives quadrants from region visits on a delay, exactly as YES does. Nobody has
+distinguished the two. **Do not tell a user KYE is purely manual**, and re-read
+the count before and after any write rather than assuming your ticks are the only
+ones that moved it. Nothing derives it from your regions,
+so a profile with 391 regions and 103 countries can sit at **0**, as this one
+did until it was filled in deliberately.
 
 ```
 read   POST /webapi/kye/get-kye
@@ -313,8 +338,9 @@ Grep the `.js`, do not guess function names against the API.
 
 ## YES, in full
 
-Worth its own section because it is the one score whose *arithmetic* is public,
-whose *stored value* is wrong, and whose biggest lever is invisible.
+**This is the only YES section. If you find another one anywhere in this repo
+that disagrees with it, this one is right and the other is a leftover** — that
+happened once already, and an agent read the stale copy.
 
 **YES = "Years Elapsed Since".** For each of the 196 countries (193 UN members
 plus Palestine, Taiwan and Kosovo), score it:
@@ -324,36 +350,62 @@ plus Palestine, Taiwan and Kosovo), score it:
 | visited in the current calendar year | 0 |
 | visited in the previous calendar year | 0 — an explicit "gift" |
 | visited before that | current year − year of last visit |
-| **never visited** | **the traveller's age in years** |
+| **marked visited, no year recorded** | **8** (measured, not published — see below) |
+| never visited | the traveller's age in years |
 
 Sum all 196. **Lower is better** — it measures how *recently* you travel, not
 how widely. Nothing is computed for anyone under 20.
 
-Three consequences that surprise people, in the order they bite:
+### The undated row is measured, not documented
 
-1. **A country marked visited but carrying no year scores the full age too.**
-   It is indistinguishable from never having gone. On the profile this repo was
-   built against, 11 of 103 visited countries were in that state — legacy
-   "clicked visited" records with null dates — and were quietly costing 41 points
-   each, 451 in total. Finding those is worth more than any amount of new travel:
+NomadMania publishes the first, second, third and fifth rows. It says nothing
+about a country marked visited whose year is unknown. On one profile, across one
+batch run, those read **8** — before the batch every visited country read 8, and
+afterwards only the genuinely undated ones did. `UNDATED_YES` in `client.py` is
+that number.
 
-   ```python
-   years = nm.region_years()          # live, per region
-   # a country whose every region has last_visited_in_year is None
-   ```
+That is one account on one night. It has not been checked against a second
+profile, a different age, or a different year. **Do not present it as the rule**,
+and if a recomputation ever disagrees with `yes_stored` on undated countries,
+suspect this constant before suspecting the server.
 
-2. **Filling in an old date makes YES worse, not better** — it moves a country
-   from "unknown" to "last seen in 2013", and 13 > 0. It is still the right thing
-   to do, because the alternative is a score built on absent data, but say so
-   before the user is surprised by their own number going up.
+### Consequences, in the order they bite
 
-3. **A remembered year beats an invented day, and costs nothing.** YES reads only
+1. **Undated costs 8, not your age.** The gap between "claimed but undated" and
+   "dated recently" is 8 points; between "never been" and "dated recently" it is
+   your whole age. Backfilling is therefore worth far less than it looks, and
+   travelling somewhere new is worth far more.
+
+2. **Dating a visit can gain or lose, and you must compute which.** Use
+   `yes_delta(current, year)`. With an undated country at 8 in 2026: a 2026 or
+   2025 visit gains 8, a 2019 visit gains 1, **2018 breaks even, and anything
+   earlier is a loss** — Myanmar went 8 → 13 by being dated to 2013. The
+   break-even moves every January, so do not carry "eight years" around as a rule.
+
+3. **It may be worth nothing at all.** YES reads a country's *most recent* visit.
+   Dating one region of a country that already has a later year elsewhere changes
+   the country score by zero. Check `yes_scores()[cid]["last_year"]` first.
+
+4. **A remembered year beats an invented day, and costs nothing.** YES reads only
    the year, so a `YearOnly` visit scores exactly what a precise date would.
    There is never a scoring reason to manufacture a day.
 
-**The stored `yes` field is not this calculation.** See the warning under
-*Derived scores* below: `slow/get-slow-app` returns a stale aggregate. Recompute
-from `region_years()` and report your own number, saying whose arithmetic it is.
+### The stored field lags — read it twice
+
+`slow/get-slow-app`'s `yes` is batch-computed. It is **correct**, but between a
+write and the next batch it reports the old world, and a single reading of it
+misleads badly: at 02:00 it returned a flat 8 for all 100 visited countries; at
+03:00, after a batch, 189 of 196 matched the rule above and the total had fallen
+4736 → 4036. An afternoon went into concluding from the first reading that the
+field was inert.
+
+So: **read, write, wait for the batch, read again.** `region_years()` is the live
+signal in between. `yes_scores()` recomputes the rule as a cross-check, but where
+the two disagree the server is usually right — its territory handling (Greenland
+under Denmark, Åland under Finland) beats matching regions to countries by flag.
+
+Seven countries still disagree on the profile this was measured on, and nobody
+has enumerated them. If you are relying on the recomputation, do that first.
 
 ---
 
@@ -370,50 +422,13 @@ nothing to write.
   carrying no year anywhere scores the full age too, so it costs exactly as much
   as never having gone.
 
-  **`yes` in `slow/get-slow-app` is a batch-computed aggregate. It is correct,
-  but it lags — and the lag is a trap worth understanding, because a whole
-  afternoon was spent concluding the wrong thing about it.**
+  See **YES, in full** above — the whole account lives there, including the
+  fact that the stored field lags and that an undated country scores 8. Nothing
+  about YES is repeated here on purpose.
 
-  What was seen at 02:00: a flat `8` for all 100 visited countries whose real
-  scores spanned 0–15, and `41` — the account's exact age — for the 93 unvisited
-  ones *and* for three visited ones. Region-level years were correct throughout
-  and did not move the field when they changed. The conclusion drawn, and
-  written into this file as fact, was "stale aggregate, nothing can move it".
-
-  What was seen at 03:00, after a batch run: **189 of 196 countries matching the
-  published rule exactly**, and the profile total down 4736 → 4036.
-
-  So: the job runs, it is right, and the same-day writes it had not yet seen are
-  what made it look broken. **`8` is not a stale constant — it is the score for
-  a country that is marked visited but whose year is unknown.** Before the batch
-  ran, every visited country was in that state as far as the aggregate was
-  concerned; afterwards, only the genuinely undated ones are.
-
-  That fills the gap in the published rule, which says what a *never*-visited
-  country scores (your age) but not what a visited-but-undated one scores:
-
-  | state | score |
-  |---|---|
-  | never visited | your age |
-  | **visited, no year recorded** | **8** |
-  | visited, year known | 0 / 0 / years since, per the table above |
-
-  The consequences are the opposite of what "undated costs you your age" implies:
-
-  - **An undated country costs 8, not 41.** The prize for dating the last few is
-    small — 8 points each at most.
-  - **Dating a country to an old year makes YES worse than leaving it undated.**
-    Myanmar went 8 → 13 by being dated to 2013. Only a date in the current or
-    previous calendar year is a gain; anything older than eight years is a loss.
-    Check this before proposing any backfill.
-  - **Do not conclude anything about this field from a single reading.** Read it,
-    write, wait for the batch, read it again. `region_years()` is the live signal
-    in the meantime; `yes_scores()` recomputes the rule for comparison, but where
-    the two disagree the server has usually been right (its territory handling —
-    Greenland under Denmark, Åland under Finland — is better than a flag match).
 - **SLOW** — countries where 11 / 31 / 101 days were spent.
 - **DEEP** — depth of coverage within countries.
-- **KYE** — "Know Your Earth", a 448-item geographic list.
+- **KYE** — "Know Your Earth". 434 scoring quadrants; see its own section above.
 - **DARE** — extreme-travel areas, 1701 in the catalogue, marked binary.
 
 `user/get-settings` also carries `homebase` and `homebase2` — the user's

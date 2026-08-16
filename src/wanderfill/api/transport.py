@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from .errors import ApiError, AuthError, TransportError
+from .errors import ApiError, AuthError, TransportError, UnknownWriteOutcome
 
 WEBAPI = "https://nomadmania.com/webapi/"
 AJAX = "https://nomadmania.com/ajax/"
@@ -68,7 +68,23 @@ class Transport:
 
     # -- low level ---------------------------------------------------------
 
-    def _post(self, url: str, fields: dict[str, Any], headers: dict[str, str]) -> bytes:
+    def _post(
+        self, url: str, fields: dict[str, Any], headers: dict[str, str], *, idempotent: bool
+    ) -> bytes:
+        """One form POST.
+
+        ``idempotent`` decides whether a lost answer may be retried, and it is
+        required rather than defaulted because getting it wrong is the whole
+        problem. **A retried write is how duplicates are made.** If the server
+        accepted an ``add-visit`` and the response was lost on the way back,
+        sending it again produces a second visit and a second phantom trip, and
+        nothing in the journal shows two writes — this package already has an
+        incident where fifty duplicate visits were created a different way.
+
+        So reads retry, and writes get exactly one attempt. A write that fails
+        without an answer from the server raises :class:`UnknownWriteOutcome`,
+        because "it did not happen" is not something we know.
+        """
         body = urllib.parse.urlencode(
             {k: v for k, v in fields.items() if v is not None}
         ).encode()
@@ -82,7 +98,8 @@ class Transport:
             },
         )
         last: Exception | None = None
-        for attempt in range(self.retries + 1):
+        attempts = (self.retries + 1) if idempotent else 1
+        for attempt in range(attempts):
             self.limiter.wait()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -93,11 +110,31 @@ class Transport:
                 last = exc
             except Exception as exc:
                 last = exc
-            if attempt < self.retries:
+            if attempt < attempts - 1:
                 time.sleep(1.5 * (attempt + 1))
-        raise TransportError(f"{url} failed after {self.retries + 1} attempts: {last}")
+        if not idempotent:
+            # An HTTPError means the server answered and refused. Anything else
+            # — timeout, reset, DNS — means we never learned what it did.
+            if isinstance(last, urllib.error.HTTPError):
+                raise TransportError(f"{url} refused: {last}")
+            raise UnknownWriteOutcome(
+                f"{url} sent, no answer received ({last}). "
+                "Whether the server applied it is unknown; do not retry blind. "
+                "Read the affected record back before running anything again."
+            )
+        raise TransportError(f"{url} failed after {attempts} attempts: {last}")
 
     # -- the two surfaces --------------------------------------------------
+
+    # Actions that change server state. Everything else is a read and may be
+    # retried freely. Kept as a suffix match so a new `set-`/`update-` endpoint
+    # is treated as a write by default rather than by omission.
+    WRITE_HINTS = ("add-", "update", "new-", "delete", "set-", "toggle")
+
+    @classmethod
+    def _is_write(cls, action: str) -> bool:
+        tail = action.rsplit("/", 1)[-1]
+        return any(h in tail for h in cls.WRITE_HINTS)
 
     def webapi(self, action: str, **fields: Any) -> dict:
         """Call the modern API and unwrap its in-body error convention."""
@@ -105,6 +142,7 @@ class Transport:
             WEBAPI + action,
             fields,
             {"NMTOKEN": self.token, "LANG": self.lang, "platform": "web"},
+            idempotent=not self._is_write(action),
         )
         data = json.loads(raw)
         if isinstance(data, dict) and data.get("result") == "ERROR":
@@ -112,13 +150,25 @@ class Transport:
         return data
 
     def ajax_json(self, path: str, **fields: Any) -> Any:
-        """Call the legacy surface, where the token travels in the body."""
-        raw = self._post(AJAX + path, {**fields, "token": self.token}, {})
+        """Call the legacy surface, where the token travels in the body.
+
+        The write/read split cannot be read off the path here — this surface
+        puts its verb in an ``action`` field — so the body is consulted too.
+        """
+        write = self._is_write(path) or self._is_write(str(fields.get("action", "")))
+        raw = self._post(
+            AJAX + path, {**fields, "token": self.token}, {}, idempotent=not write
+        )
         return json.loads(raw)
 
     def ajax_text(self, path: str, **fields: Any) -> str:
-        """Same, for the endpoints that answer with a bare string such as "OK"."""
-        raw = self._post(AJAX + path, {**fields, "token": self.token}, {})
+        """Same, for the endpoints that answer with a bare string such as "OK".
+
+        Never retried. The only caller is ``my_series/toggle``, and a toggle
+        replayed against a server that already applied it is the one request on
+        this whole surface that can silently *undo* the write it repeats.
+        """
+        raw = self._post(AJAX + path, {**fields, "token": self.token}, {}, idempotent=False)
         return raw.decode("utf-8", "replace").strip()
 
     # -- keep the token out of tracebacks and logs -------------------------

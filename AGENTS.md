@@ -21,9 +21,24 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
 4. **The token is a year-long full-power credential.** Never print it, never write
    it into a file that gets committed, never paste it into an issue, a gist, or a
    message to another model. Read it from the environment and keep it there.
-5. **Ask before the first write of each kind.** Adding visits, creating trips and
-   ticking series are three different blast radii. Approval for one is not
-   approval for the next.
+5. **Ask before the first write of each kind.** Adding visits, creating trips,
+   ticking series, marking DARE and marking KYE are five different blast radii.
+   Approval for one is not approval for the next. Series are not one kind either:
+   World Capitals and Art Museums are different questions.
+6. **Open every source that covers the year before you write a date.** Not the
+   freshest one, not the tidiest one — *all* of them. A date written from a
+   source that cannot see that year is unverified, whatever it agreed with.
+   User memory is a hypothesis, not a source: of five dates one user supplied
+   from recall, three were contradicted by their own archive.
+7. **Never propose the missing place, date or route.** Do not show the gap and
+   the days either side and ask "so, Luxembourg on the 30th?" Ask what they
+   independently remember, and treat "I don't know" as a final answer. **A yes
+   to a corridor you drew is still your interpolation** — it has a human
+   signature on it, which is worse than none, because now it looks sourced.
+
+Rules 6 and 7 exist because 1–5 were all followed and the writes were still
+wrong. A plan file, a human yes and a no-delete policy do not stop you from
+politely constructing a fabrication.
 
 ---
 
@@ -68,7 +83,7 @@ a plan has to be bound to.
 | Surface | Base | Auth | What lives there |
 |---|---|---|---|
 | Modern API | `nomadmania.com/webapi/<module>/<action>` | `NMTOKEN` header | regions, visits, trips, DARE, countries, geocoding |
-| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series: WHS, KYE, TCC, … |
+| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series: WHS, TCC, … — **not KYE**, which has its own module |
 | Tiles | `maps.nomadmania.travel/tiles/<layer>/{z}/{x}/{y}.pbf` | none | current polygons and every series object's coordinates |
 
 All API calls are `POST` with `application/x-www-form-urlencoded`. Tiles are
@@ -113,11 +128,22 @@ minimum. Photo libraries, GPX, Google Timeline, a CSV the user typed by hand.
 Deduplicate to distinct coordinates before geocoding — a 4,868-day track is
 usually only ~2,000 distinct points.
 
-**Check the freshest source before you trust the tidy one.** A person who is
-travelling right now has a phone that has not synced, so the server-side library
-stops weeks ago and the newest trip — the one they are asking about — is missing
-entirely. On macOS the local Photos library has it; use
-`wanderfill.sources.load_photos`.
+**Sources answer different questions. Open all of them, and know what each
+cannot say.**
+
+| source | resolution | blind spot |
+|---|---|---|
+| local Photos library | per photo, timestamped | thin or empty before iCloud; has *yesterday* |
+| a day-level track (`track.csv`) | one row per day per city | no intra-day movement, so no speed; city labels are suburb-level and inconsistently spelled |
+| user memory | a hypothesis | wrong about three dates in five, on one profile |
+
+The freshest source matters for a trip happening *now*: a phone that has not
+synced means the server-side library stops weeks ago and the newest trip is
+missing entirely. But "check the freshest first" is exactly wrong for old
+travel — a library that begins in 2018 has nothing to say about 2013, and
+reading only that one produced "no evidence either way" for a year the
+day-level track covered in full. **A source that cannot see the year is not
+evidence of absence.**
 
 **On the road, resolve per photo, not per day.** One point per day is fine for a
 stay and wrong for a drive: a day crossing three countries averages into one
@@ -159,8 +185,10 @@ older polygon set than the catalogue. So:
 ### The data model
 
 A region has many visits. A visit is either standalone or owned by a trip, and
-**both count toward the region's visit total.** Quality is 0–6: transit,
-minimal, good visit, worked here, lived here, travelguru.
+**both count toward the region's visit total.** Quality is 0–6 and **0 is "no
+visit", not transit**: 0 no visit, 1 transit, 2 minimal visit, 3 good visit,
+4 worked here, 5 lived here, 6 travelguru. Sending 0 believing it means transit
+writes a downgrade that looks deliberate; `QUALITY` in `client.py` is the list.
 
 ### The four traps, in the order you will hit them
 
@@ -233,8 +261,12 @@ write  POST /ajax/my_series/
 
 The read returns no coordinates. Get them from `tiles/series2/` where every
 object of every series is a Point carrying its own `id` and its `series_id` —
-so one tile harvest geocodes all 69 series at once. The layer is **not decimated
-by zoom**, so use a coarse zoom and save thousands of requests.
+so one tile harvest geocodes all 69 series at once. The layer is not decimated
+between z9 and z15 — but it **is** below that, so do not read "use a coarse
+zoom" as licence to go coarser still: a global z4 sweep found 31 of the 211
+World Capitals, where z6 found 113. **z9 is the only zoom shown to be complete**
+— harvest there, and cut the cost by fetching only the tiles the track actually
+passes through rather than the globe.
 
 **Series need more caution than regions.** A day-level track puts one point per
 city; being within a few kilometres of a monument is evidence of being in the
@@ -242,10 +274,12 @@ area, not of having seen the thing. Grade candidates by distance, show the user
 the counts at several radii, validate recall against what they have already
 ticked by hand, and let them choose the threshold. Do not pick it for them.
 
-**KYE is not derived and not a series.** "Know Your Earth" has its own module
-and is **marked by hand** — the page says "mark quadrants as visited by clicking
-the map", and nothing fills it in from regions or trips. A profile with hundreds
-of regions can sit at zero, and this one did. Read `kye/get-kye`, write
+**KYE is not a series and has its own module.** "Know Your Earth" is not filled
+in promptly from regions or trips — a profile with hundreds of regions can sit at
+zero, and one did. But it is **not established that it is purely manual**: hours
+after 93 quadrants were ticked, seven more had appeared, six of them boxes the
+account has no coordinate inside. Read the count immediately before and after any
+write, and do not tell the user nothing else can move it. Read `kye/get-kye`, write
 `kye/set-kye {qid, visited:1}`, and never send `0` — un-ticking is a deletion.
 
 A quadrant is a 10°×10° box, so membership is *arithmetic on a coordinate*: no
@@ -345,10 +379,26 @@ The technical parts that are easy to get wrong:
 
 Produce a plan file. Show a summary table. Wait for a yes. Then apply.
 
-The plan should record: the ops with their kind, region, dates and quality; the
+The plan should record: the ops with their kind, ids, dates and quality; the
 evidence behind each one; the confidence; a fingerprint of the live state at
 plan time; hashes of the source files; the segmentation parameters; and the
 account id it was generated for.
+
+**Which field holds the id depends on the kind, and the namespaces overlap.**
+Putting an id in the wrong one is silent: the write goes to the right object
+while the snapshot and drift record describe something else entirely.
+
+| kind | id field | namespace |
+|---|---|---|
+| `add_visit`, `update_visit` | `region` | NomadMania region id |
+| `create_trip` | `regions` (a list of dicts) | region ids — **not** `region` |
+| `mark_dare` | `region` | DARE area id |
+| `mark_kye` | `item` | 10°×10° quadrant id |
+| `tick_series` | `series` + `item` | series id + object id |
+
+Region 570 and quadrant 570 are both valid and unrelated. Copy an existing op of
+the same kind rather than inventing the fields; `regions_touched()` in
+`plan/model.py` is the one place that knows this mapping.
 
 At apply time:
 
@@ -360,9 +410,20 @@ At apply time:
   created behind your back.
 - Rate-limit to human speed: ~0.1–0.2 s between writes, no concurrency on the
   write path.
+- **Never retry a write.** A read may be retried; a write that got no answer has
+  an unknown outcome, and sending it again is how duplicate visits and phantom
+  trips are made. The transport enforces this — writes get one attempt and raise
+  `UnknownWriteOutcome`, which leaves the journal entry open on purpose so the
+  next run refuses to start until a human has reconciled it.
 
-Then **verify**: re-read the affected regions from the server and compare with
-intent. Report the real numbers, including the ones that came out wrong.
+Then **verify**: `apply` now calls `verify()` itself and writes a `verify-*.json`
+beside the journal. Read it. A response saying `OK` is not evidence — both
+historical incidents here returned `OK` at the time and were found by reading the
+server back. Report the real numbers, including the ones that came out wrong.
+
+Before applying anything you did not build in this session, run
+`wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
+duplicate ops and unconfirmed journal entries without sending a write.
 
 ---
 
