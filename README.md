@@ -166,6 +166,29 @@ neither number.
 
 ---
 
+## Sharing it — a card of the numbers
+
+```bash
+wanderfill share                       # 1080×1920 story, dark
+wanderfill share --size all            # plus a square and a 1200×630 link card
+wanderfill share --theme paper --anonymous --handle @you
+```
+
+It draws UN, UN+ and NM regions, your rank, DARE and KYE, and a map of
+every region the profile has marked — the numbers the site shows, read from
+the endpoints the site reads them from, never derived here. Files land in
+`share/` with a `stats.json` saying exactly what the picture claims. Nothing
+is posted anywhere; the command has no way to.
+
+UN is the 193 member states. UN+ is NomadMania's list of 196: the 193 plus
+Kosovo, Taiwan and Palestine, named in the code and checked against the
+list on every run, so a renamed row fails rather than shifting the count.
+
+Needs Pillow (`pip install "wanderfill[share]"`), and the `geo` extra for the
+map; without it the card is numbers only. Fonts come from the machine — the
+faces macOS ships with, then the common Linux ones, then Pillow's built-in
+one — or pass `--font`.
+
 ## Risks — read this part
 
 - This uses NomadMania's **undocumented internal API**. It can break at any time,
@@ -257,6 +280,9 @@ wanderfill export --full --out profile.json
 
 # read-only: which of your claimed regions could you actually prove?
 wanderfill evidence --check-dates --out evidence
+
+# read-only: your UN / UN+ / NM numbers as a story, a square and a link card
+wanderfill share --size all --out share
 
 # see what each trip-segmentation setting produces before choosing one
 wanderfill sweep track.csv regions.json

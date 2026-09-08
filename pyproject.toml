@@ -31,8 +31,11 @@ dependencies = []
 # so it stays installable in places where shapely is a nuisance.
 geo = ["mapbox-vector-tile>=2.0", "shapely>=2.0"]
 cli = ["rich>=13.0"]
-all = ["wanderfill[geo,cli]"]
-dev = ["wanderfill[geo,cli]", "pytest>=8.0", "ruff>=0.5"]
+# `wanderfill share` draws PNG cards. It also wants geo for the map, but
+# degrades to numbers-only without it rather than refusing.
+share = ["pillow>=10.1"]
+all = ["wanderfill[geo,cli,share]"]
+dev = ["wanderfill[geo,cli,share]", "pytest>=8.0", "ruff>=0.5"]
 
 [project.urls]
 Homepage = "https://github.com/faeton/wanderfill"

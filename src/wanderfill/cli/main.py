@@ -10,6 +10,7 @@ The command set encodes the safety model rather than merely documenting it:
     plan       write a plan file. Never touches the server's state.
     show       print a plan for a human to read
     apply      execute a plan file, and only a plan file
+    share      draw your UN / UN+ / NM numbers as an image. Reads only.
 
 There is deliberately no command that computes and writes in one step.
 
@@ -604,6 +605,63 @@ def cmd_state(args) -> int:
     return 0
 
 
+def cmd_share(args) -> int:
+    """A card of the headline numbers, sized for a story, a square post or a link.
+
+    Read-only on the server side: settings, the country list, the region id
+    list, DARE and KYE, and sixteen public map tiles. The writes are PNG files
+    and a ``stats.json`` in ``--out``. Nothing is posted anywhere — sharing is
+    the user's own act, afterwards, and this command has no way to do it.
+
+    The numbers are the server's, never derived here. The map paints the
+    regions the profile already has marked.
+    """
+    from .. import share as sh
+
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        sys.exit("share needs Pillow: pip install 'wanderfill[share]'")
+
+    c = _client(args)
+    stats = sh.collect(c, name=args.name)
+    if args.anonymous:
+        stats.name = ""
+
+    polygons = None
+    if not args.no_map:
+        try:
+            polygons = sh.world_polygons(zoom=args.zoom)
+        except ImportError:
+            sh.warn("no map: the geo extra is missing (pip install 'wanderfill[geo]')")
+        if polygons is not None and not polygons:
+            sh.warn("no map: the tile server returned nothing; the card is drawn without it")
+            polygons = None
+
+    avatar = None
+    if not args.no_avatar and not args.anonymous and stats.avatar:
+        avatar = sh.fetch_avatar(stats.avatar)
+        if avatar is None:
+            sh.warn("avatar not fetched; drawing without it")
+
+    fonts = sh.Fonts(display=args.font, text=args.font_text or args.font)
+    sizes = list(sh.SIZES) if args.size == "all" else [args.size]
+    written = sh.write_cards(
+        stats, Path(args.out), sizes=sizes, theme=args.theme, polygons=polygons,
+        avatar=avatar, fonts=fonts, handle=args.handle,
+        show_rank=not args.no_rank, show_extras=not args.no_extras,
+    )
+    print(f"UN {stats.un} / {sh.UN_MEMBERS}   UN+ {stats.un_plus} / {stats.un_plus_total}"
+          f"   NM {stats.nm} / {stats.nm_total}")
+    if stats.rank:
+        print(f"rank #{stats.rank} worldwide"
+              + (f", #{stats.country_rank} in {stats.country}" if stats.country_rank else ""))
+    print(f"fonts: {fonts.describe()}")
+    for p in written:
+        print(p)
+    return 0
+
+
 def cmd_apply(args) -> int:
     from ..plan.apply import apply_plan
     from ..plan.model import Plan
@@ -744,6 +802,32 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("state", help="read-only: KYE, series and YES as the server has them")
     st.add_argument("--series", type=int, help="one series id, e.g. 1 for World Capitals")
     st.set_defaults(func=cmd_state)
+
+    shr = sub.add_parser(
+        "share",
+        help="render your UN / UN+ / NM numbers as an image for stories and posts",
+        description=(
+            "Draw a card with your three headline counts, your rank and a map of "
+            "every region you have marked. Reads the profile, writes PNG files. "
+            "It never posts anything."
+        ),
+    )
+    shr.add_argument("--out", default="share", help="directory for the images")
+    shr.add_argument("--size", choices=("story", "square", "post", "all"), default="story",
+                     help="story 1080x1920, square 1080x1080, post 1200x630, or all")
+    shr.add_argument("--theme", choices=("night", "paper"), default="night")
+    shr.add_argument("--name", help="show this name instead of the one on the profile")
+    shr.add_argument("--handle", help="show this under the name instead of the profile URL")
+    shr.add_argument("--anonymous", action="store_true", help="no name, no avatar")
+    shr.add_argument("--no-avatar", action="store_true")
+    shr.add_argument("--no-map", action="store_true", help="skip the tiles; numbers only")
+    shr.add_argument("--no-rank", action="store_true", help="leave the rank line off")
+    shr.add_argument("--no-extras", action="store_true", help="leave DARE and KYE off")
+    shr.add_argument("--zoom", type=int, default=2, help="tile zoom for the map (2 = 16 tiles)")
+    shr.add_argument("--font", help="a .ttf/.ttc for the numbers (default: what the OS has)")
+    shr.add_argument("--font-text", help="a .ttf/.ttc for the small text")
+    shr.add_argument("--quiet", action="store_true")
+    shr.set_defaults(func=cmd_share)
 
     a = sub.add_parser("apply", help="execute a plan file")
     a.add_argument("plan")

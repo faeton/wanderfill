@@ -375,6 +375,25 @@ The technical parts that are easy to get wrong:
 
 ---
 
+## 6b. Sharing — the one output aimed at a feed, not the server
+
+`wanderfill share` draws the UN / UN+ / NM numbers, rank, DARE, KYE and a map
+of marked regions as PNG cards. It is **read-only on the server side** and
+needs no plan: the numbers are the server's own counts, read from the same
+endpoints the site uses, and the map is the visited id list painted onto the
+public tiles. Nothing here derives a visit, and nothing here posts anything —
+the user does that, afterwards, themselves.
+
+Two things to hold to:
+
+- **Never make a card from anything but the live profile.** Not from a plan
+  that has not been applied, not from a draft count, not from "what it will
+  be once the batch runs". A picture of an unapplied plan is a claim with no
+  server behind it.
+- UN+ is 196 because NomadMania's list is 196: the 193 UN members plus
+  Kosovo, Taiwan and Palestine, named in `NON_UN` and checked on every run.
+  If the check fails, the list changed — read it before touching the constant.
+
 ## 7. The plan-then-apply protocol
 
 Produce a plan file. Show a summary table. Wait for a yes. Then apply.

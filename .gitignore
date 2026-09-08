@@ -24,6 +24,9 @@ tiles/
 evidence/
 coords.json
 
+# `share` writes cards with your name and face on them. Post them yourself.
+share/
+
 # Your own account's work: tracks, caches, plans, logs, applied records.
 # Never goes to GitHub. See workspace/WORKSPACE.md.
 workspace/
