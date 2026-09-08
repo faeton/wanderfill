@@ -12,8 +12,14 @@ The command set encodes the safety model rather than merely documenting it:
     apply      execute a plan file, and only a plan file
     share      draw your UN / UN+ / NM numbers as an image. Reads only.
     history    where was I, and when: visa forms, ESTA, tax days, absences. Reads only.
+    delete-visit  remove ONE visit record, by id, that you have named yourself
 
 There is deliberately no command that computes and writes in one step.
+
+``delete-visit`` is the only delete, and it is deliberately not a plan op:
+a plan is something the tool computed, and a deletion must never be. It takes
+one id per run, shows the record, does nothing without ``--confirm``, journals
+the request, and reads the region back afterwards.
 
 ``evidence`` is the odd one out and deliberately so: it is the only command
 whose output is aimed at the user rather than at the server. Everything else
@@ -31,8 +37,8 @@ import sys
 from pathlib import Path
 
 from .. import __version__
-from ..api.client import NomadMania, YearOnly
-from ..api.errors import WanderfillError
+from ..api.client import QUALITY, NomadMania, YearOnly, _iso
+from ..api.errors import UnknownWriteOutcome, WanderfillError
 from ..evidence import (
     MIN_SERIAL_DAYS,
     MIN_SERIAL_SHOTS,
@@ -877,6 +883,85 @@ def cmd_apply(args) -> int:
     return 1 if report.failed else 0
 
 
+def cmd_delete_visit(args) -> int:
+    """Delete one visit record the user has named by id.
+
+    Writes: exactly one ``quickEnter/delete-visit``, and only with ``--confirm``.
+    Why it is safe: the client reads the region first and refuses if the id is
+    not on it, refuses a trip-owned record unless ``--allow-trip-owned``, and
+    reads the region back afterwards rather than trusting ``OK``. The request
+    and its answer are journalled to ``deletes-<account>.ndjson`` in the workdir
+    with an ``open`` entry written *before* the request, so a crash mid-write
+    is visible as an unfinished entry, not as silence.
+    What it costs: the region loses one visit; if that was the region's only
+    one, the region and possibly the country drop off the profile. Country
+    counts and YES are batch-derived and will lag by up to an hour.
+    """
+    from types import SimpleNamespace
+
+    from ..plan.apply import Journal
+
+    c = _client(args)
+    visits = c.visits_for_region(args.region)
+    target = next((v for v in visits if v.id == args.visit_id), None)
+    if target is None:
+        ids = ", ".join(str(v.id) for v in visits) or "none"
+        print(f"visit {args.visit_id} is not on region {args.region} (visits there: {ids})")
+        return 2
+    print(
+        f"region {args.region}: visit {target.id} quality {target.quality} "
+        f"({QUALITY.get(target.quality, '?')}) "
+        f"{_iso(target.date_from) or 'undated'} → {_iso(target.date_to) or 'undated'}"
+        + (f", owned by trip {target.trip_id}" if target.trip_id else ", standalone")
+    )
+    others = len(visits) - 1
+    print(f"the region keeps {others} other visit(s) after this" if others
+          else "this is the region's ONLY visit: the region leaves the profile")
+    if not args.confirm:
+        print("\nDry run. Nothing was sent. Re-run with --confirm to delete it.")
+        return 0
+
+    account = c.account_id()
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    journal = Journal(workdir / f"deletes-{account}.ndjson")
+    op = SimpleNamespace(
+        key=f"delete_visit:{args.region}:{args.visit_id}",
+        kind="delete_visit",
+        label=f"region {args.region} visit {args.visit_id} q{target.quality} "
+              f"{_iso(target.date_from)}..{_iso(target.date_to)} trip={target.trip_id}",
+    )
+    if op.key in journal.unresolved():
+        print(f"{journal.path.name} has an unfinished entry for this visit. "
+              "Read the region back and resolve it by hand before running again.")
+        return 2
+    journal.opening(op)
+    try:
+        gone = c.delete_visit(
+            args.visit_id, args.region, allow_trip_owned=args.allow_trip_owned
+        )
+    except UnknownWriteOutcome as exc:
+        # Left open on purpose. See apply_plan for why.
+        print(f"error: {exc}")
+        return 1
+    except WanderfillError as exc:
+        journal.note(op, None, error=str(exc))
+        print(f"error: {exc}")
+        return 1
+    journal.note(op, {"deleted": gone.id, "region": gone.region})
+    remaining = c.visits_for_region(args.region)
+    print(
+        f"deleted visit {gone.id}; server now lists {len(remaining)} visit(s) "
+        f"on region {args.region}"
+    )
+    print(f"journal: {journal.path}")
+    print(
+        f"to undo, add it back: quality {gone.quality}, "
+        f"{_iso(gone.date_from) or 'undated'} → {_iso(gone.date_to) or 'undated'}"
+    )
+    return 0
+
+
 # ------------------------------------------------------------------ parser
 
 
@@ -884,7 +969,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wanderfill",
         description="Import your location history into NomadMania. Unofficial, unaffiliated.",
-        epilog="Token comes from NM_TOKEN. This tool never deletes anything.",
+        epilog=(
+            "Token comes from NM_TOKEN. The only delete is delete-visit: "
+            "one record, by id, with --confirm."
+        ),
     )
     p.add_argument("--version", action="version", version=f"wanderfill {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1060,6 +1148,22 @@ def build_parser() -> argparse.ArgumentParser:
     shr.add_argument("--font-text", help="a .ttf/.ttc for the small text")
     shr.add_argument("--quiet", action="store_true")
     shr.set_defaults(func=cmd_share)
+
+    d = sub.add_parser(
+        "delete-visit",
+        help="remove ONE visit record by id — dry run unless --confirm",
+        description=(
+            "Deletes a single visit record you have identified yourself, e.g. from "
+            "`wanderfill export --full`. Never computed, never batched: one id per run."
+        ),
+    )
+    d.add_argument("region", type=int, help="NomadMania region id the visit is on")
+    d.add_argument("visit_id", type=int, help="the visit record id")
+    d.add_argument("--confirm", action="store_true", help="actually delete")
+    d.add_argument("--allow-trip-owned", action="store_true",
+                   help="also allowed if the visit belongs to a trip (it leaves the trip too)")
+    d.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
+    d.set_defaults(func=cmd_delete_visit)
 
     a = sub.add_parser("apply", help="execute a plan file")
     a.add_argument("plan")

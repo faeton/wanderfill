@@ -12,6 +12,8 @@ Three quirks are handled here rather than left to the user:
     seeing before it will read ``regions_json``.
   * ``visits_for_region`` returns every visit, standalone and trip-owned alike,
     because both count and filtering to one kind is how duplicates get made.
+  * ``delete_visit`` is the only delete, takes one visit id, reads the record
+    before and after, and refuses to act on a record it cannot see.
 """
 
 from __future__ import annotations
@@ -479,6 +481,56 @@ class NomadMania:
             **_parts(date_to, "to"),
         )
 
+    def delete_visit(self, visit_id: int, region: int, *, allow_trip_owned: bool = False) -> Visit:
+        """Delete one visit record by id. The only delete in this library.
+
+        This existed nowhere in v1 — not behind a flag, absent from the class,
+        with a test asserting so — because cleaning up records the tool did not
+        create is a conversation with a human, not a feature. It was added when
+        the owner of a profile asked for a specific, mis-entered visit to go,
+        named its id, and wanted the endpoint exercised. That is still the only
+        shape it is meant for: **one record, named by the account owner, with a
+        reason**. A loop over this method is a policy violation, whatever the
+        loop's argument is.
+
+        The endpoint is ``quickEnter/delete-visit`` with a single ``id`` field,
+        found in the inline script of ``/regions/``. Three guards, each learnt
+        from a write that looked fine at the time:
+
+        * it reads the region first and refuses if the id is not on it, so a
+          typo cannot delete somebody else's record on another region;
+        * a trip-owned visit is refused unless ``allow_trip_owned`` says so —
+          the site itself warns that the visit leaves the trip too;
+        * ``OK`` is not evidence. It reads the region back afterwards and raises
+          if the record is still there.
+
+        Returns the record as it was, so the caller can print it, journal it,
+        and re-create it with :meth:`add_visit` if the deletion was a mistake.
+        The transport gives writes one attempt: a lost answer raises
+        :class:`UnknownWriteOutcome`, and the caller reads back rather than
+        re-sends.
+        """
+        before = self.visits_for_region(region)
+        current = next((v for v in before if v.id == int(visit_id)), None)
+        if current is None:
+            raise PrecisionLoss(
+                f"visit {visit_id} is not on region {region} — refusing to delete blind"
+            )
+        if current.trip_id is not None and not allow_trip_owned:
+            raise PrecisionLoss(
+                f"visit {visit_id} belongs to trip {current.trip_id}; deleting it also "
+                "removes it from the trip. Pass allow_trip_owned=True if that is deliberate."
+            )
+        resp = self.t.webapi("quickEnter/delete-visit", id=int(visit_id))
+        after = self.visits_for_region(region)
+        if any(v.id == int(visit_id) for v in after):
+            raise ApiError(
+                "quickEnter/delete-visit",
+                f"server answered {resp!r} but visit {visit_id} is still on region {region}",
+                resp,
+            )
+        return current
+
     def kye(self) -> dict:
         """The Know Your Earth grid and which quadrants are ticked.
 
@@ -493,8 +545,9 @@ class NomadMania:
         """Tick one KYE quadrant. Only ever sends 1, like :meth:`mark_dare`.
 
         The endpoint takes ``visited: 0`` too — that is how the map un-ticks a
-        cell — but un-marking is a deletion in spirit and this library does not
-        do deletions.
+        cell — but un-marking is a deletion in spirit, and the one delete this
+        library has (:meth:`delete_visit`) is for a single record the owner has
+        named, not for bulk un-marking.
 
         A quadrant is a 10°×10° box, so membership is arithmetic on a coordinate
         rather than a polygon lookup, and there is no stale-id problem. What that
@@ -507,8 +560,8 @@ class NomadMania:
     def mark_dare(self, dare_id: int) -> dict:
         """Mark a DARE area visited. Binary, no dates, no counts.
 
-        Only ever sends 1. Un-marking is a deletion in spirit and this library
-        does not do deletions.
+        Only ever sends 1. Un-marking is a deletion in spirit; see
+        :meth:`mark_kye` for why that is not offered.
         """
         return self.t.webapi("quickEnter/updateMQP", region=dare_id, visits=1)
 

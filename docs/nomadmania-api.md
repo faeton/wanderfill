@@ -95,6 +95,7 @@ lived here, travelguru.
 | `trips/new-trip` | `description, date_from, date_to, regions, regions_json` | needs **both** region fields |
 | `trips/update-trip` | as above plus `trip_id` | |
 | `trips/delete-trip` | `trip_id` | removes the trip *and* the visits it owns |
+| `quickEnter/delete-visit` | `id` (visit id) | found on `/regions/` (inline script, `removeVisit`). Confirmed 2026-09-09 on visit 13450095: returns `{"result":"OK"}`, the visit is gone from `get-visits-to-region` and the region from `get-visited-regions-ids-simple` at once; the country row in `slow/get-slow-app` still said visited with `yes: 8` on the first read after, so it is batch-derived like YES. Same page also calls `quickEnter/set-not-visited {region}`, not exercised. Client: `delete_visit(visit_id, region)`; CLI: `wanderfill delete-visit`. One id per call, never a plan op. |
 
 ### Geocoding
 

@@ -185,10 +185,79 @@ def test_mark_dare_never_sends_zero():
     assert fields["visits"] == 1
 
 
-def test_client_has_no_delete_methods():
-    """v1 has no delete path at all — not a flag, absent from the class."""
+# --------------------------------------------------------------------------
+# the one delete
+# --------------------------------------------------------------------------
+
+def test_delete_visit_is_the_only_delete():
+    """v1 had no delete path at all. There is now exactly one, by visit id.
+
+    Un-marking DARE or KYE, deleting trips, and `set-not-visited` stay absent:
+    the class may delete a single record the owner has named, and nothing else.
+    """
     names = [n for n in dir(NomadMania) if not n.startswith("_")]
-    assert not [n for n in names if "delete" in n or "remove" in n or "unmark" in n]
+    deletes = [n for n in names if "delete" in n or "remove" in n or "unmark" in n]
+    assert deletes == ["delete_visit"]
+
+
+class SequencedTransport(FakeTransport):
+    """Answers get-visits-to-region from a queue, so 'before' and 'after' differ."""
+
+    def __init__(self, visits_sequence, delete_reply=None):
+        super().__init__({"quickEnter/delete-visit": delete_reply or {"result": "OK"}})
+        self.queue = list(visits_sequence)
+
+    def webapi(self, action, **fields):
+        if action == "quickEnter/get-visits-to-region":
+            self.sent.append((action, fields))
+            return {"result": "OK", "data": self.queue.pop(0)}
+        return super().webapi(action, **fields)
+
+
+ROW = {"id": 13450095, "quality": 3, "year_from": None, "month_from": None, "day_from": None,
+       "year_to": None, "month_to": None, "day_to": None, "trip_id": None}
+
+
+def test_delete_visit_sends_only_the_id_and_verifies():
+    """The site sends {id}; OK is not evidence, so the region is read back."""
+    t = SequencedTransport([[ROW], []])
+    c = NomadMania(token="fake", transport=t)
+    gone = c.delete_visit(13450095, 791)
+    assert gone.id == 13450095 and gone.region == 791 and gone.quality == 3
+    writes = [(a, f) for a, f in t.sent if a == "quickEnter/delete-visit"]
+    assert writes == [("quickEnter/delete-visit", {"id": 13450095})]
+    read = "quickEnter/get-visits-to-region"
+    assert [a for a, _ in t.sent] == [read, "quickEnter/delete-visit", read]
+
+
+def test_delete_visit_refuses_an_id_not_on_the_region():
+    """A typo in the region must not delete a record elsewhere. Nothing is sent."""
+    t = SequencedTransport([[ROW]])
+    c = NomadMania(token="fake", transport=t)
+    with pytest.raises(PrecisionLoss):
+        c.delete_visit(999, 791)
+    assert not [a for a, _ in t.sent if a == "quickEnter/delete-visit"]
+
+
+def test_delete_visit_refuses_trip_owned_unless_told():
+    """The site warns a trip-owned visit leaves the trip too; so does this."""
+    owned = {**ROW, "trip_id": 55}
+    t = SequencedTransport([[owned]])
+    c = NomadMania(token="fake", transport=t)
+    with pytest.raises(PrecisionLoss):
+        c.delete_visit(13450095, 791)
+    assert not [a for a, _ in t.sent if a == "quickEnter/delete-visit"]
+    t = SequencedTransport([[owned], []])
+    c = NomadMania(token="fake", transport=t)
+    assert c.delete_visit(13450095, 791, allow_trip_owned=True).trip_id == 55
+
+
+def test_delete_visit_raises_when_ok_but_record_remains():
+    """Both incidents on this profile returned OK and were wrong. Read back."""
+    t = SequencedTransport([[ROW], [ROW]])
+    c = NomadMania(token="fake", transport=t)
+    with pytest.raises(ApiError):
+        c.delete_visit(13450095, 791)
 
 
 # --------------------------------------------------------------------------

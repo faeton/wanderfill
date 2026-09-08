@@ -258,8 +258,11 @@ These are constraints in the code, not aspirations in a document.
 
 - **Your account only, your data only.** No reads of other users, no leaderboard
   scraping. Those endpoints are not in the client.
-- **It never deletes.** v1 has no delete code path — not behind a flag, absent
-  from the class. There is a test asserting this.
+- **It never deletes what it computed.** There is exactly one delete,
+  `wanderfill delete-visit`, and it takes one visit id you name yourself, shows
+  the record, does nothing without `--confirm`, and reads the server back
+  afterwards. It is not a plan op and cannot be: a plan is something the tool
+  worked out, and a deletion must never be. A test asserts it is the only one.
 - **It never invents travel.** Only regions containing an observed point are
   claimed. No interpolation between points, no "you must have crossed X to get
   from A to B". This is a scored competition; an inferred region is a fabricated
@@ -345,6 +348,10 @@ wanderfill show plan.json --verbose
 # execute it — dry run by default
 wanderfill apply plan.json
 wanderfill apply plan.json --confirm
+
+# remove ONE visit you have identified yourself (id from `export --full`)
+wanderfill delete-visit 791 13450095            # shows it, sends nothing
+wanderfill delete-visit 791 13450095 --confirm  # deletes it, reads back
 ```
 
 There is deliberately **no command that computes and writes in one step.**

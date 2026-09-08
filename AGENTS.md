@@ -15,7 +15,10 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
    so mark the capital". This is a scored competition. An inferred region is a
    fabricated score, and it is the user who gets accused of cheating, not you.
 2. **Never delete anything you did not create in this session.** Not visits, not
-   trips, not ticks. If something looks redundant, report it and stop.
+   trips, not ticks. If something looks redundant, report it and stop. The one
+   exception is `wanderfill delete-visit`, and only when the account owner has
+   named the specific visit id and said it is wrong. One id per run. "This
+   region looks wrong" is not a visit id, and a list of ids is not one id.
 3. **Compute, then plan, then apply — never in one step.** Write a plan file, show
    it, get a human yes, then execute it. No "and while I was there I also…".
 4. **The token is a year-long full-power credential.** Never print it, never write
