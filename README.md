@@ -261,8 +261,10 @@ These are constraints in the code, not aspirations in a document.
 - **It never deletes what it computed.** The one way off the profile is
   `wanderfill delete <kind> <id>` — a visit, a trip, a region's visits, a DARE
   mark or a KYE tick — and it takes one id you name yourself, shows what goes,
-  does nothing without `--confirm`, journals the request before sending it, and
-  reads the server back afterwards. It is not a plan op and cannot be: a plan
+  does nothing without `--confirm` and a `--reason`, journals the full record
+  before sending anything, and reads the server back afterwards. If that
+  read-back cannot prove the thing is gone, the journal entry stays open and
+  blocks every further deletion until you have looked yourself. It is not a plan op and cannot be: a plan
   is something the tool worked out, and a deletion must never be. A test
   asserts those five are the only removing methods in the client.
 - **It never invents travel.** Only regions containing an observed point are
@@ -353,11 +355,11 @@ wanderfill apply plan.json --confirm
 
 # undo ONE thing you have identified yourself (ids from `export --full` / `state`)
 wanderfill delete visit 13450095 --region 791   # shows it, sends nothing
-wanderfill delete visit 13450095 --region 791 --confirm
-wanderfill delete trip 305716 --confirm         # the trip AND the visits it owns
-wanderfill delete region 791 --confirm          # every visit on the region
-wanderfill delete dare 1142 --confirm           # un-mark one DARE area
-wanderfill delete kye 570 --confirm             # un-tick one KYE quadrant
+wanderfill delete visit 13450095 --region 791 --confirm --reason "never went"
+wanderfill delete trip 305716 --confirm --reason "..."        # the trip AND its visits
+wanderfill delete region 791 --all-visits --confirm --reason "..."  # every visit on it
+wanderfill delete dare 1142 --confirm --reason "..."          # un-mark one DARE area
+wanderfill delete kye 570 --confirm --reason "..."            # un-tick one KYE quadrant
 ```
 
 There is deliberately **no command that computes and writes in one step.**

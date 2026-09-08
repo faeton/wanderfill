@@ -12,7 +12,7 @@ import json
 import pytest
 
 from wanderfill.api.client import NomadMania, Visit, YearOnly
-from wanderfill.api.errors import ApiError, DriftError, PrecisionLoss
+from wanderfill.api.errors import ApiError, DriftError, PrecisionLoss, VerificationFailed
 from wanderfill.plan.model import Op, Plan
 from wanderfill.plan.segment import (
     MULTI_REGION_FLOOR,
@@ -308,15 +308,18 @@ def test_clear_region_refuses_empty_and_trip_owned_and_leftovers():
 TRIP = {"result": "OK", "trip": {"id": 305716, "date_from": "2024-12-27", "date_to": "2025-01-09",
                                  "description": "", "regions": [{"region": 211, "quality": 3}]}}
 GONE = {"result": "ERROR", "result_description": "Unauthorised."}
+YEAR = "trips/get-trips-for-year-app"
 
 
-def test_delete_trip_reads_first_sends_trip_id_and_succeeds_when_read_back_fails():
-    """Success is get-trip *failing* afterwards. The trip is returned for re-creation."""
-    t = SequencedTransport({"trips/get-trip": [TRIP, GONE]})
+def test_delete_trip_reads_first_sends_trip_id_and_proves_absence_twice():
+    """Success is get-trip failing with exactly 'Unauthorised.' AND the year's
+    listing no longer carrying the id. The trip is returned for re-creation."""
+    t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [{"trips": [{"id": 1}]}]})
     c = NomadMania(token="fake", transport=t)
     before = c.delete_trip(305716)
     assert before["regions"][0]["region"] == 211
     assert writes(t, "trips/delete-trip") == [("trips/delete-trip", {"trip_id": 305716})]
+    assert writes(t, YEAR) == [(YEAR, {"year": 2024})]
 
 
 def test_delete_trip_refuses_unknown_trip_and_a_trip_that_survives():
@@ -326,8 +329,56 @@ def test_delete_trip_refuses_unknown_trip_and_a_trip_that_survives():
         NomadMania(token="fake", transport=t).delete_trip(1)
     assert not writes(t, "trips/delete-trip")
     t = SequencedTransport({"trips/get-trip": [TRIP, TRIP]})
-    with pytest.raises(ApiError):
+    with pytest.raises(VerificationFailed):
         NomadMania(token="fake", transport=t).delete_trip(305716)
+
+
+def test_delete_trip_does_not_take_any_error_as_proof():
+    """A database error on the read-back is not 'the trip is gone'. Codex found
+    the first version accepting any ApiError here."""
+    other = {"result": "ERROR", "result_description": "Internal error."}
+    t = SequencedTransport({"trips/get-trip": [TRIP, other]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).delete_trip(305716)
+    # 'Unauthorised.' alone is not enough either if the listing still has it
+    t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [{"trips": [{"id": 305716}]}]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).delete_trip(305716)
+
+
+def test_delete_trip_is_bound_to_the_previewed_regions():
+    t = SequencedTransport({"trips/get-trip": [TRIP]})
+    with pytest.raises(PrecisionLoss):
+        NomadMania(token="fake", transport=t).delete_trip(305716, expect_regions=[211, 176])
+    assert not writes(t, "trips/delete-trip")
+
+
+def test_clear_region_is_bound_to_the_previewed_visit_ids():
+    """What was confirmed is a set of records, not 'whatever is there now'."""
+    second = {**ROW, "id": 2}
+    t = SequencedTransport({READ: [visits(ROW, second)]})
+    with pytest.raises(PrecisionLoss):
+        NomadMania(token="fake", transport=t).clear_region(791, expect_ids=[13450095])
+    assert not writes(t, "quickEnter/set-not-visited")
+
+
+def test_undo_read_backs_reject_a_response_missing_the_list():
+    """{"result":"OK"} with the field dropped must not verify a deletion."""
+    bare = {"result": "OK"}
+    t = SequencedTransport({READ: [visits(ROW), bare]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).delete_visit(13450095, 791)
+    t = SequencedTransport({"maps/get-visited-dare-ids-simple": [{"ids": [1142]}, bare]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).unmark_dare(1142)
+    t = SequencedTransport({"kye/get-kye": [{"visited": [570]}, bare]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).unmark_kye(570)
+    # and before the write, too: a bare answer is not "no visits here"
+    t = SequencedTransport({READ: [bare]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).clear_region(791)
+    assert not writes(t, "quickEnter/set-not-visited")
 
 
 DARE_READ = "maps/get-visited-dare-ids-simple"
@@ -369,6 +420,125 @@ def test_mark_methods_still_never_send_zero():
     c.mark_kye(570)
     c.mark_dare(1142)
     assert all(f.get("visited", f.get("visits")) == 1 for _, f in t.sent)
+
+
+def test_deletions_are_not_plan_ops():
+    """A plan is what the tool computed; a deletion is what the owner decided."""
+    from typing import get_args
+
+    from wanderfill.plan.model import OpKind
+
+    assert not [k for k in get_args(OpKind) if "delete" in k or "clear" in k or "unmark" in k]
+
+
+# --------------------------------------------------------------------------
+# the delete command's journal discipline
+# --------------------------------------------------------------------------
+
+class FakeClient:
+    """Just enough of NomadMania for cmd_delete: one DARE area, scripted outcome."""
+
+    def __init__(self, outcome=None):
+        self.outcome = outcome  # None = success, else an exception to raise
+        self.calls = []
+
+    def account_id(self):
+        return 79597
+
+    def visited_dare_ids(self):
+        return {1142}
+
+    def unmark_dare(self, dare_id):
+        self.calls.append(dare_id)
+        if self.outcome is not None:
+            raise self.outcome
+
+
+def _run_delete(monkeypatch, tmp_path, fake, *argv):
+    from wanderfill.cli import main as cli
+
+    monkeypatch.setattr(cli, "_client", lambda args: fake)
+    return cli.main(["delete", *argv, "--workdir", str(tmp_path)])
+
+
+def _journal_lines(tmp_path):
+    files = list(tmp_path.glob("deletes-*.ndjson"))
+    if not files:
+        return []
+    return [json.loads(x) for x in files[0].read_text().splitlines() if x.strip()]
+
+
+def test_delete_dry_run_sends_nothing_and_writes_no_journal(monkeypatch, tmp_path):
+    fake = FakeClient()
+    assert _run_delete(monkeypatch, tmp_path, fake, "dare", "1142") == 0
+    assert fake.calls == [] and _journal_lines(tmp_path) == []
+
+
+def test_delete_confirm_needs_a_reason(monkeypatch, tmp_path):
+    fake = FakeClient()
+    assert _run_delete(monkeypatch, tmp_path, fake, "dare", "1142", "--confirm") == 2
+    assert fake.calls == [] and _journal_lines(tmp_path) == []
+
+
+def test_delete_confirm_journals_open_then_done_with_snapshot(monkeypatch, tmp_path):
+    fake = FakeClient()
+    rc = _run_delete(monkeypatch, tmp_path, fake, "dare", "1142", "--confirm", "--reason", "typo")
+    assert rc == 0 and fake.calls == [1142]
+    lines = _journal_lines(tmp_path)
+    assert [e["phase"] for e in lines] == ["open", "done"]
+    assert lines[0]["snapshot"] == {"dare": 1142, "was_marked": True}
+    assert "typo" in lines[0]["label"] and lines[1]["error"] == ""
+
+
+def test_delete_leaves_entry_open_on_failed_verification_and_lost_answer(monkeypatch, tmp_path):
+    from wanderfill.api.errors import TransportError, UnknownWriteOutcome
+
+    for exc in (VerificationFailed("quickEnter/updateMQP", "still marked"),
+                UnknownWriteOutcome("no answer"), TransportError("read-back died")):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        fake = FakeClient(outcome=exc)
+        rc = _run_delete(monkeypatch, tmp_path, fake, "dare", "1142", "--confirm", "--reason", "x")
+        assert rc == 1
+        assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"], type(exc).__name__
+
+
+def test_delete_closes_entry_only_on_definite_refusals(monkeypatch, tmp_path):
+    for exc in (PrecisionLoss("not marked"), ApiError("quickEnter/updateMQP", "Missing params")):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        fake = FakeClient(outcome=exc)
+        rc = _run_delete(monkeypatch, tmp_path, fake, "dare", "1142", "--confirm", "--reason", "x")
+        assert rc == 1
+        lines = _journal_lines(tmp_path)
+        assert [e["phase"] for e in lines] == ["open", "done"] and lines[1]["error"]
+
+
+def test_any_open_entry_blocks_every_further_deletion(monkeypatch, tmp_path):
+    """Not only the same key: a region cannot be cleared while one of its
+    visits is in an unknown state."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    _run_delete(monkeypatch, tmp_path, FakeClient(outcome=UnknownWriteOutcome("lost")),
+                "dare", "1142", "--confirm", "--reason", "x")
+    fake = FakeClient()
+    rc = _run_delete(monkeypatch, tmp_path, fake, "dare", "1142", "--confirm", "--reason", "x")
+    assert rc == 2 and fake.calls == []
+
+
+def test_journal_unresolved_is_chronological(tmp_path):
+    """open → done → open is unresolved: the latest attempt has no answer."""
+    from types import SimpleNamespace
+
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(tmp_path / "j.ndjson")
+    op = SimpleNamespace(key="k", kind="delete_visit", label="")
+    j.opening(op)
+    j.note(op, None, error="refused")
+    assert j.unresolved() == set()
+    j.opening(op)
+    assert j.unresolved() == {"k"}
 
 
 # --------------------------------------------------------------------------

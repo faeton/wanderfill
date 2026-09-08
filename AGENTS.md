@@ -231,13 +231,22 @@ trips list fewer regions than the journey really covered.
 
 There is one path off the profile: `wanderfill delete <kind> <id>` with kinds
 `visit` (needs `--region`), `trip` (takes its visits with it), `region`
-(`set-not-visited`: every visit on it), `dare` and `kye`. Each shows a preview,
-sends nothing without `--confirm`, journals an `open` entry before the request
-to `deletes-<account>.ndjson`, reads the server back and fails if the thing is
-still there. Prefer `visit` over `region`: the narrowest cut that fixes the
-mistake. A trip-owned visit needs `--allow-trip-owned`, because it leaves the
-trip too. None of this is in the plan model, and it must not be: a plan is what
-the tool computed, and a deletion is what the owner decided.
+(`set-not-visited`: every visit on it, needs `--all-visits`), `dare` and `kye`.
+Each shows a preview, sends nothing without `--confirm --reason "..."`, journals
+an `open` entry carrying the full record to `deletes-<account>.ndjson` before
+the request, and reads the server back. Prefer `visit` over `region`: the
+narrowest cut that fixes the mistake. A trip-owned visit needs
+`--allow-trip-owned`, because it leaves the trip too, and `add_visit` cannot
+put it back *into* that trip afterwards.
+
+What the read-back accepts is narrow on purpose. A trip is gone only if
+`get-trip` fails with exactly `Unauthorised.` **and** the year's listing no
+longer carries it; a response with the list field missing is an error, not an
+empty list. If proof fails, or the answer is lost, the journal entry stays open
+— and **any** open entry blocks every further deletion for that account until
+a human has read the server and closed it by hand. Do not close one for them.
+None of this is in the plan model, and it must not be: a plan is what the tool
+computed, and a deletion is what the owner decided.
 
 ### Trip segmentation is ill-posed — say so
 

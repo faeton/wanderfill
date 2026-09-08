@@ -38,7 +38,7 @@ class Journal:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
             fh.flush()
 
-    def opening(self, op: Op) -> None:
+    def opening(self, op: Op, snapshot: object = None) -> None:
         """Record the intent BEFORE the request goes out.
 
         A crash between "server accepted" and "we wrote it down" leaves no trace
@@ -46,9 +46,17 @@ class Journal:
         a write that already landed. An unmatched ``open`` entry is the visible
         form of "we do not know whether this happened", which is the honest
         state and the one a human can act on.
+
+        ``snapshot`` is whatever the caller wants preserved *in full* before the
+        write — for a deletion, the record as it was, so it can be put back.
+        It goes in the open entry, not the done one, because the done entry is
+        the one that may never get written.
         """
-        self._append({"at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                      "phase": "open", "key": op.key, "kind": op.kind, "label": op.label})
+        entry = {"at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                 "phase": "open", "key": op.key, "kind": op.kind, "label": op.label}
+        if snapshot is not None:
+            entry["snapshot"] = snapshot
+        self._append(entry)
 
     def note(self, op: Op, result: object, error: str = "") -> None:
         self._append({"at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -79,10 +87,17 @@ class Journal:
         return keys
 
     def unresolved(self) -> set[str]:
-        """Ops that were started and never finished — a human decision, not a retry."""
-        opened, closed = set(), set()
+        """Ops that were started and never finished — a human decision, not a retry.
+
+        Read in order, not as two sets: a key that went ``open → done → open``
+        is unresolved, because the *latest* attempt is the one with no answer.
+        Computing ``opened - closed`` over the whole file said the opposite,
+        which mattered once a key could be reused — a deletion refused on the
+        first try and lost on the second looked fine.
+        """
         if not self.path.exists():
             return set()
+        pending: set[str] = set()
         for line in self.path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -90,8 +105,11 @@ class Journal:
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            (opened if e.get("phase") == "open" else closed).add(e.get("key"))
-        return opened - closed
+            if e.get("phase") == "open":
+                pending.add(e.get("key"))
+            else:
+                pending.discard(e.get("key"))
+        return pending
 
 
 @dataclass

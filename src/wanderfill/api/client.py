@@ -26,7 +26,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import ApiError, PrecisionLoss
+from .errors import ApiError, PrecisionLoss, VerificationFailed
 from .transport import Transport
 
 # What the server scores a country that is marked visited but carries no year.
@@ -483,6 +483,33 @@ class NomadMania:
             **_parts(date_to, "to"),
         )
 
+    # ---------------------------------------------------------------- undo
+    #
+    # The read-backs below are *strict*: a response missing the list they need
+    # is an error, not an empty list. The ordinary readers default a missing
+    # field to empty because that is harmless for display; here an empty
+    # answer is taken as proof of absence, and ``{"result": "OK"}`` with the
+    # field dropped would otherwise verify a deletion that never happened.
+
+    def _strict(self, action: str, field: str, **params: Any) -> list:
+        data = self.t.webapi(action, **params)
+        value = data.get(field) if isinstance(data, dict) else None
+        if not isinstance(value, list):
+            raise VerificationFailed(
+                action, f"read-back has no {field!r} list to check against: {str(data)[:200]}", data
+            )
+        return value
+
+    def _visits_strict(self, region: int) -> list[Visit]:
+        rows = self._strict("quickEnter/get-visits-to-region", "data", region=region)
+        return [Visit.from_api(v, region) for v in rows]
+
+    def _dare_strict(self) -> set[int]:
+        return {int(i) for i in self._strict("maps/get-visited-dare-ids-simple", "ids")}
+
+    def _kye_strict(self) -> set[int]:
+        return {int(q) for q in self._strict("kye/get-kye", "visited")}
+
     def delete_visit(self, visit_id: int, region: int, *, allow_trip_owned: bool = False) -> Visit:
         """Delete one visit record by id.
 
@@ -507,12 +534,20 @@ class NomadMania:
           if the record is still there.
 
         Returns the record as it was, so the caller can print it, journal it,
-        and re-create it with :meth:`add_visit` if the deletion was a mistake.
+        and re-create it with :meth:`add_visit` if the deletion was a mistake —
+        with one limit: ``add_visit`` cannot put a visit back *into its trip*.
+        It makes a standalone record (inside a fresh auto-created trip), so a
+        trip-owned visit that was deleted by mistake comes back as a different
+        kind of record, and restoring the original trip membership is a
+        separate, separately approved edit of the trip.
+
         The transport gives writes one attempt: a lost answer raises
         :class:`UnknownWriteOutcome`, and the caller reads back rather than
-        re-sends.
+        re-sends. A read-back that still shows the record raises
+        :class:`VerificationFailed`, which is an ``ApiError`` a journal can
+        tell apart from a refusal.
         """
-        before = self.visits_for_region(region)
+        before = self._visits_strict(region)
         current = next((v for v in before if v.id == int(visit_id)), None)
         if current is None:
             raise PrecisionLoss(
@@ -524,17 +559,28 @@ class NomadMania:
                 "removes it from the trip. Pass allow_trip_owned=True if that is deliberate."
             )
         resp = self.t.webapi("quickEnter/delete-visit", id=int(visit_id))
-        after = self.visits_for_region(region)
+        after = self._visits_strict(region)
         if any(v.id == int(visit_id) for v in after):
-            raise ApiError(
+            raise VerificationFailed(
                 "quickEnter/delete-visit",
                 f"server answered {resp!r} but visit {visit_id} is still on region {region}",
                 resp,
             )
         return current
 
-    def clear_region(self, region: int, *, allow_trip_owned: bool = False) -> list[Visit]:
+    def clear_region(
+        self,
+        region: int,
+        *,
+        allow_trip_owned: bool = False,
+        expect_ids: Iterable[int] | None = None,
+    ) -> list[Visit]:
         """Mark a region "not visited": ``quickEnter/set-not-visited {region}``.
+
+        ``expect_ids`` binds the call to what a human was shown: pass the visit
+        ids from the preview, and the call refuses if the region now holds a
+        different set. Without it the confirmation covers "whatever is there
+        at send time", which is not what anybody confirmed.
 
         This is the red "Mark as not visited" button on ``/regions/``. It takes
         the region, not a visit, and the server removes **every** visit record
@@ -549,9 +595,14 @@ class NomadMania:
         each can be re-created with :meth:`add_visit`. Reads back and raises if
         anything is still there.
         """
-        before = self.visits_for_region(region)
+        before = self._visits_strict(region)
         if not before:
             raise PrecisionLoss(f"region {region} has no visits — nothing to clear")
+        if expect_ids is not None and {v.id for v in before} != {int(i) for i in expect_ids}:
+            raise PrecisionLoss(
+                f"region {region} now holds visits {sorted(v.id for v in before)}, not the "
+                f"{sorted(int(i) for i in expect_ids)} that were previewed — re-run to re-preview"
+            )
         owned = [v for v in before if v.trip_id is not None]
         if owned and not allow_trip_owned:
             raise PrecisionLoss(
@@ -560,38 +611,72 @@ class NomadMania:
                 "those trips. Pass allow_trip_owned=True if that is deliberate."
             )
         resp = self.t.webapi("quickEnter/set-not-visited", region=region)
-        after = self.visits_for_region(region)
+        after = self._visits_strict(region)
         if after:
-            raise ApiError(
+            raise VerificationFailed(
                 "quickEnter/set-not-visited",
                 f"server answered {resp!r} but region {region} still has {len(after)} visit(s)",
                 resp,
             )
         return before
 
-    def delete_trip(self, trip_id: int) -> dict:
+    def delete_trip(self, trip_id: int, *, expect_regions: Iterable[int] | None = None) -> dict:
         """Delete a trip **and every visit it owns**: ``trips/delete-trip``.
 
         Reads the trip first, which doubles as the ownership check — the server
-        answers ``Unauthorised`` for a trip that is not yours or does not exist,
-        and :meth:`trip` raises on that, so nothing is sent. Returns the trip as
-        it was, regions and their dates included, which is enough to re-create
-        it with :meth:`create_trip`.
+        answers ``Unauthorised.`` for a trip that is not yours or does not exist,
+        and :meth:`trip` raises on that, so nothing is sent. ``expect_regions``
+        binds the call to the preview: the region ids the trip carries must
+        match what the human was shown, or nothing is sent.
 
-        The read-back is inverted here: success is ``get-trip`` *failing*. If it
-        still answers with the trip, this raises.
+        Returns the trip as it was, regions and their dates included, which is
+        enough to re-create it with :meth:`create_trip`.
+
+        **Absence is proved twice, and only the expected way.** After the write,
+        ``get-trip`` must fail with exactly the ``Unauthorised.`` the server
+        gives for a missing trip — any other error (a database hiccup, a token
+        that just expired) is *not* proof and raises
+        :class:`VerificationFailed`. And because ``Unauthorised.`` is also what
+        a lost session would say, the year's trip listing is read as well and
+        must no longer contain the id. That second read is a real, authenticated
+        answer, so the two together cannot both be explained by lost access.
         """
         before = self.trip(trip_id)
+        trip = before.get("trip", before)
+        if expect_regions is not None:
+            have = sorted(int(r.get("region", r.get("id"))) for r in trip.get("regions", []))
+            if have != sorted(int(r) for r in expect_regions):
+                raise PrecisionLoss(
+                    f"trip {trip_id} now carries regions {have}, not the "
+                    f"{sorted(int(r) for r in expect_regions)} previewed — re-run to re-preview"
+                )
+        year = int(str(trip.get("date_from", ""))[:4] or 0)
         resp = self.t.webapi("trips/delete-trip", trip_id=int(trip_id))
         try:
             still = self.trip(trip_id)
-        except ApiError:
-            return before.get("trip", before)
-        raise ApiError(
-            "trips/delete-trip",
-            f"server answered {resp!r} but trip {trip_id} still reads back: {still!r}"[:400],
-            resp,
-        )
+        except ApiError as exc:
+            if exc.description.strip() != "Unauthorised.":
+                raise VerificationFailed(
+                    "trips/delete-trip",
+                    f"server answered {resp!r}; get-trip then failed with {exc.description!r}, "
+                    "which is not the missing-trip answer — outcome unknown",
+                    resp,
+                ) from exc
+        else:
+            raise VerificationFailed(
+                "trips/delete-trip",
+                f"server answered {resp!r} but trip {trip_id} still reads back: {still!r}"[:400],
+                resp,
+            )
+        if year:
+            listed = self._strict("trips/get-trips-for-year-app", "trips", year=year)
+            if any(int(t.get("id", -1)) == int(trip_id) for t in listed):
+                raise VerificationFailed(
+                    "trips/delete-trip",
+                    f"get-trip says trip {trip_id} is gone but the {year} listing still has it",
+                    resp,
+                )
+        return trip
 
     def unmark_dare(self, dare_id: int) -> None:
         """Un-mark one DARE area: ``quickEnter/updateMQP {region, visits: 0}``.
@@ -601,11 +686,11 @@ class NomadMania:
         rather than a no-op that looks like success. Reads the visited list
         back and raises if the id is still in it.
         """
-        if int(dare_id) not in self.visited_dare_ids():
+        if int(dare_id) not in self._dare_strict():
             raise PrecisionLoss(f"DARE area {dare_id} is not marked — nothing to un-mark")
         resp = self.t.webapi("quickEnter/updateMQP", region=int(dare_id), visits=0)
-        if int(dare_id) in self.visited_dare_ids():
-            raise ApiError(
+        if int(dare_id) in self._dare_strict():
+            raise VerificationFailed(
                 "quickEnter/updateMQP",
                 f"server answered {resp!r} but DARE area {dare_id} is still marked",
                 resp,
@@ -619,11 +704,11 @@ class NomadMania:
         so a changed total is not necessarily this call's doing. Reads the
         ticked list back and raises if the id is still in it.
         """
-        if int(qid) not in {int(q) for q in self.kye().get("visited", [])}:
+        if int(qid) not in self._kye_strict():
             raise PrecisionLoss(f"KYE quadrant {qid} is not ticked — nothing to un-tick")
         resp = self.t.webapi("kye/set-kye", qid=int(qid), visited=0)
-        if int(qid) in {int(q) for q in self.kye().get("visited", [])}:
-            raise ApiError(
+        if int(qid) in self._kye_strict():
+            raise VerificationFailed(
                 "kye/set-kye", f"server answered {resp!r} but quadrant {qid} is still ticked", resp
             )
 

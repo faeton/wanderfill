@@ -26,6 +26,16 @@ class ApiError(WanderfillError):
         super().__init__(f"{action}: {description}")
 
 
+class VerificationFailed(ApiError):
+    """The server said OK to a write, and the read-back says it did not happen.
+
+    Raised by the undo methods after the request went out. It is distinct from
+    a plain :class:`ApiError` so that a caller keeping a journal can tell "the
+    server refused, nothing changed" from "something was sent and the state is
+    now unknown" — the second must stay unresolved until a human reads back.
+    """
+
+
 class TransportError(WanderfillError):
     """The request never got an answer — timeout, DNS, connection reset."""
 
