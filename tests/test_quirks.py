@@ -189,75 +189,186 @@ def test_mark_dare_never_sends_zero():
 # the one delete
 # --------------------------------------------------------------------------
 
-def test_delete_visit_is_the_only_delete():
-    """v1 had no delete path at all. There is now exactly one, by visit id.
+UNDO_METHODS = {"delete_visit", "delete_trip", "clear_region", "unmark_dare", "unmark_kye"}
 
-    Un-marking DARE or KYE, deleting trips, and `set-not-visited` stay absent:
-    the class may delete a single record the owner has named, and nothing else.
+
+def test_the_undo_methods_are_exactly_these_five():
+    """v1 had no delete path at all. There are now five, each by one id.
+
+    Anything else that removes — bulk un-marking, series un-ticking — stays
+    absent. The class may undo a single thing the owner has named, and nothing
+    else, and none of the five is a plan op.
     """
     names = [n for n in dir(NomadMania) if not n.startswith("_")]
-    deletes = [n for n in names if "delete" in n or "remove" in n or "unmark" in n]
-    assert deletes == ["delete_visit"]
+    found = {n for n in names if any(w in n for w in ("delete", "remove", "unmark", "clear"))}
+    assert found == UNDO_METHODS
 
 
 class SequencedTransport(FakeTransport):
-    """Answers get-visits-to-region from a queue, so 'before' and 'after' differ."""
+    """Reads answer from per-action queues, so 'before' and 'after' can differ.
 
-    def __init__(self, visits_sequence, delete_reply=None):
-        super().__init__({"quickEnter/delete-visit": delete_reply or {"result": "OK"}})
-        self.queue = list(visits_sequence)
+    ``sequences`` maps an action to the list of replies it gives in order; any
+    other action gets the static reply from ``replies`` (default ``OK``).
+    """
+
+    def __init__(self, sequences, replies=None):
+        super().__init__(replies)
+        self.queues = {k: list(v) for k, v in sequences.items()}
 
     def webapi(self, action, **fields):
-        if action == "quickEnter/get-visits-to-region":
+        if action in self.queues:
             self.sent.append((action, fields))
-            return {"result": "OK", "data": self.queue.pop(0)}
+            reply = self.queues[action].pop(0)
+            if isinstance(reply, dict) and reply.get("result") == "ERROR":
+                raise ApiError(action, reply.get("result_description", ""), reply)
+            return reply
         return super().webapi(action, **fields)
+
+
+def visits(*rows):
+    return {"result": "OK", "data": list(rows)}
+
+
+def writes(t, action):
+    return [(a, f) for a, f in t.sent if a == action]
 
 
 ROW = {"id": 13450095, "quality": 3, "year_from": None, "month_from": None, "day_from": None,
        "year_to": None, "month_to": None, "day_to": None, "trip_id": None}
+READ = "quickEnter/get-visits-to-region"
 
 
 def test_delete_visit_sends_only_the_id_and_verifies():
     """The site sends {id}; OK is not evidence, so the region is read back."""
-    t = SequencedTransport([[ROW], []])
+    t = SequencedTransport({READ: [visits(ROW), visits()]})
     c = NomadMania(token="fake", transport=t)
     gone = c.delete_visit(13450095, 791)
     assert gone.id == 13450095 and gone.region == 791 and gone.quality == 3
-    writes = [(a, f) for a, f in t.sent if a == "quickEnter/delete-visit"]
-    assert writes == [("quickEnter/delete-visit", {"id": 13450095})]
-    read = "quickEnter/get-visits-to-region"
-    assert [a for a, _ in t.sent] == [read, "quickEnter/delete-visit", read]
+    assert writes(t, "quickEnter/delete-visit") == [("quickEnter/delete-visit", {"id": 13450095})]
+    assert [a for a, _ in t.sent] == [READ, "quickEnter/delete-visit", READ]
 
 
 def test_delete_visit_refuses_an_id_not_on_the_region():
     """A typo in the region must not delete a record elsewhere. Nothing is sent."""
-    t = SequencedTransport([[ROW]])
+    t = SequencedTransport({READ: [visits(ROW)]})
     c = NomadMania(token="fake", transport=t)
     with pytest.raises(PrecisionLoss):
         c.delete_visit(999, 791)
-    assert not [a for a, _ in t.sent if a == "quickEnter/delete-visit"]
+    assert not writes(t, "quickEnter/delete-visit")
 
 
 def test_delete_visit_refuses_trip_owned_unless_told():
     """The site warns a trip-owned visit leaves the trip too; so does this."""
     owned = {**ROW, "trip_id": 55}
-    t = SequencedTransport([[owned]])
+    t = SequencedTransport({READ: [visits(owned)]})
     c = NomadMania(token="fake", transport=t)
     with pytest.raises(PrecisionLoss):
         c.delete_visit(13450095, 791)
-    assert not [a for a, _ in t.sent if a == "quickEnter/delete-visit"]
-    t = SequencedTransport([[owned], []])
+    assert not writes(t, "quickEnter/delete-visit")
+    t = SequencedTransport({READ: [visits(owned), visits()]})
     c = NomadMania(token="fake", transport=t)
     assert c.delete_visit(13450095, 791, allow_trip_owned=True).trip_id == 55
 
 
 def test_delete_visit_raises_when_ok_but_record_remains():
     """Both incidents on this profile returned OK and were wrong. Read back."""
-    t = SequencedTransport([[ROW], [ROW]])
+    t = SequencedTransport({READ: [visits(ROW), visits(ROW)]})
     c = NomadMania(token="fake", transport=t)
     with pytest.raises(ApiError):
         c.delete_visit(13450095, 791)
+
+
+def test_clear_region_sends_region_returns_all_visits_and_verifies():
+    """set-not-visited takes the region and removes every visit on it."""
+    second = {**ROW, "id": 2, "quality": 5}
+    t = SequencedTransport({READ: [visits(ROW, second), visits()]})
+    c = NomadMania(token="fake", transport=t)
+    gone = c.clear_region(791)
+    assert [v.id for v in gone] == [13450095, 2] and gone[1].quality == 5
+    assert writes(t, "quickEnter/set-not-visited") == [
+        ("quickEnter/set-not-visited", {"region": 791})
+    ]
+
+
+def test_clear_region_refuses_empty_and_trip_owned_and_leftovers():
+    c = NomadMania(token="fake", transport=SequencedTransport({READ: [visits()]}))
+    with pytest.raises(PrecisionLoss):
+        c.clear_region(791)
+    owned = {**ROW, "trip_id": 55}
+    t = SequencedTransport({READ: [visits(ROW, owned)]})
+    c = NomadMania(token="fake", transport=t)
+    with pytest.raises(PrecisionLoss):
+        c.clear_region(791)
+    assert not writes(t, "quickEnter/set-not-visited")
+    t = SequencedTransport({READ: [visits(ROW), visits(ROW)]})
+    with pytest.raises(ApiError):
+        NomadMania(token="fake", transport=t).clear_region(791)
+
+
+TRIP = {"result": "OK", "trip": {"id": 305716, "date_from": "2024-12-27", "date_to": "2025-01-09",
+                                 "description": "", "regions": [{"region": 211, "quality": 3}]}}
+GONE = {"result": "ERROR", "result_description": "Unauthorised."}
+
+
+def test_delete_trip_reads_first_sends_trip_id_and_succeeds_when_read_back_fails():
+    """Success is get-trip *failing* afterwards. The trip is returned for re-creation."""
+    t = SequencedTransport({"trips/get-trip": [TRIP, GONE]})
+    c = NomadMania(token="fake", transport=t)
+    before = c.delete_trip(305716)
+    assert before["regions"][0]["region"] == 211
+    assert writes(t, "trips/delete-trip") == [("trips/delete-trip", {"trip_id": 305716})]
+
+
+def test_delete_trip_refuses_unknown_trip_and_a_trip_that_survives():
+    """Unauthorised on the first read means not yours or not there: nothing sent."""
+    t = SequencedTransport({"trips/get-trip": [GONE]})
+    with pytest.raises(ApiError):
+        NomadMania(token="fake", transport=t).delete_trip(1)
+    assert not writes(t, "trips/delete-trip")
+    t = SequencedTransport({"trips/get-trip": [TRIP, TRIP]})
+    with pytest.raises(ApiError):
+        NomadMania(token="fake", transport=t).delete_trip(305716)
+
+
+DARE_READ = "maps/get-visited-dare-ids-simple"
+
+
+def test_unmark_dare_sends_zero_only_for_a_marked_area_and_verifies():
+    t = SequencedTransport({DARE_READ: [{"ids": [1142, 7]}, {"ids": [7]}]})
+    c = NomadMania(token="fake", transport=t)
+    c.unmark_dare(1142)
+    assert writes(t, "quickEnter/updateMQP") == [
+        ("quickEnter/updateMQP", {"region": 1142, "visits": 0})
+    ]
+    t = SequencedTransport({DARE_READ: [{"ids": [7]}]})
+    with pytest.raises(PrecisionLoss):
+        NomadMania(token="fake", transport=t).unmark_dare(1142)
+    assert not writes(t, "quickEnter/updateMQP")
+    t = SequencedTransport({DARE_READ: [{"ids": [1142]}, {"ids": [1142]}]})
+    with pytest.raises(ApiError):
+        NomadMania(token="fake", transport=t).unmark_dare(1142)
+
+
+def test_unmark_kye_sends_zero_only_for_a_ticked_quadrant_and_verifies():
+    t = SequencedTransport({"kye/get-kye": [{"visited": [112, 570]}, {"visited": [112]}]})
+    c = NomadMania(token="fake", transport=t)
+    c.unmark_kye(570)
+    assert writes(t, "kye/set-kye") == [("kye/set-kye", {"qid": 570, "visited": 0})]
+    t = SequencedTransport({"kye/get-kye": [{"visited": [112]}]})
+    with pytest.raises(PrecisionLoss):
+        NomadMania(token="fake", transport=t).unmark_kye(570)
+    assert not writes(t, "kye/set-kye")
+    t = SequencedTransport({"kye/get-kye": [{"visited": [570]}, {"visited": [570]}]})
+    with pytest.raises(ApiError):
+        NomadMania(token="fake", transport=t).unmark_kye(570)
+
+
+def test_mark_methods_still_never_send_zero():
+    """The undo lives in unmark_*; the mark methods stay one-directional."""
+    c, t = client()
+    c.mark_kye(570)
+    c.mark_dare(1142)
+    assert all(f.get("visited", f.get("visits")) == 1 for _, f in t.sent)
 
 
 # --------------------------------------------------------------------------

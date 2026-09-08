@@ -16,9 +16,10 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
    fabricated score, and it is the user who gets accused of cheating, not you.
 2. **Never delete anything you did not create in this session.** Not visits, not
    trips, not ticks. If something looks redundant, report it and stop. The one
-   exception is `wanderfill delete-visit`, and only when the account owner has
-   named the specific visit id and said it is wrong. One id per run. "This
-   region looks wrong" is not a visit id, and a list of ids is not one id.
+   exception is `wanderfill delete <kind> <id>`, and only when the account owner
+   has named the specific id and said it is wrong. One id per run, `--confirm`
+   from them, and the preview shown first. "This region looks wrong" is not an
+   id, a list of ids is not one id, and a deletion is never a plan op.
 3. **Compute, then plan, then apply — never in one step.** Write a plan file, show
    it, get a human yes, then execute it. No "and while I was there I also…".
 4. **The token is a year-long full-power credential.** Never print it, never write
@@ -226,6 +227,18 @@ totals inflate by the number of first visits. Either the trips own everything
 state the trade-off, and say plainly what it costs: in the second option some
 trips list fewer regions than the journey really covered.
 
+### Undoing, when the owner asks
+
+There is one path off the profile: `wanderfill delete <kind> <id>` with kinds
+`visit` (needs `--region`), `trip` (takes its visits with it), `region`
+(`set-not-visited`: every visit on it), `dare` and `kye`. Each shows a preview,
+sends nothing without `--confirm`, journals an `open` entry before the request
+to `deletes-<account>.ndjson`, reads the server back and fails if the thing is
+still there. Prefer `visit` over `region`: the narrowest cut that fixes the
+mistake. A trip-owned visit needs `--allow-trip-owned`, because it leaves the
+trip too. None of this is in the plan model, and it must not be: a plan is what
+the tool computed, and a deletion is what the owner decided.
+
 ### Trip segmentation is ill-posed — say so
 
 For a continuously nomadic person there is no home to return to and therefore no
@@ -243,7 +256,9 @@ and let them choose. Record the chosen parameters in the plan.
 ## 6. DARE, series and the side-lists
 
 **DARE** is a binary flag per area, no dates and no counts:
-`quickEnter/updateMQP {region: <dare_id>, visits: 1}`. Only ever send `1`.
+`quickEnter/updateMQP {region: <dare_id>, visits: 1}`. `mark_dare` only ever
+sends `1`; `0` un-marks and lives in `unmark_dare` / `wanderfill delete dare`,
+one area per run, under rule 2.
 Match areas by point-in-polygon against `tiles/dare/`. Beware:
 `get-regions-mqp` returns `visited` as *the area's own id as a string*, not a
 boolean — `"1142"` means visited, `"0"` means not. Use
@@ -283,7 +298,8 @@ zero, and one did. But it is **not established that it is purely manual**: hours
 after 93 quadrants were ticked, seven more had appeared, six of them boxes the
 account has no coordinate inside. Read the count immediately before and after any
 write, and do not tell the user nothing else can move it. Read `kye/get-kye`, write
-`kye/set-kye {qid, visited:1}`, and never send `0` — un-ticking is a deletion.
+`kye/set-kye {qid, visited:1}`. `0` un-ticks and is a deletion: it lives in
+`unmark_kye` / `wanderfill delete kye`, one quadrant per run, under rule 2.
 
 A quadrant is a 10°×10° box, so membership is *arithmetic on a coordinate*: no
 polygons, no stale ids, no tolerance to choose. That makes it the cleanest list

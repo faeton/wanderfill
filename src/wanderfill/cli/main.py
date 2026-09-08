@@ -12,14 +12,16 @@ The command set encodes the safety model rather than merely documenting it:
     apply      execute a plan file, and only a plan file
     share      draw your UN / UN+ / NM numbers as an image. Reads only.
     history    where was I, and when: visa forms, ESTA, tax days, absences. Reads only.
-    delete-visit  remove ONE visit record, by id, that you have named yourself
+    delete     undo ONE thing you have named by id: a visit, a trip, a region's
+               visits, a DARE mark or a KYE tick
 
 There is deliberately no command that computes and writes in one step.
 
-``delete-visit`` is the only delete, and it is deliberately not a plan op:
-a plan is something the tool computed, and a deletion must never be. It takes
-one id per run, shows the record, does nothing without ``--confirm``, journals
-the request, and reads the region back afterwards.
+``delete`` is the only way anything leaves the profile, and it is deliberately
+not a plan op: a plan is something the tool computed, and a deletion must
+never be. Every kind takes one id per run, shows what it is about to remove,
+does nothing without ``--confirm``, journals the request before sending it, and
+reads the server back afterwards rather than trusting ``OK``.
 
 ``evidence`` is the odd one out and deliberately so: it is the only command
 whose output is aimed at the user rather than at the server. Everything else
@@ -883,83 +885,166 @@ def cmd_apply(args) -> int:
     return 1 if report.failed else 0
 
 
-def cmd_delete_visit(args) -> int:
-    """Delete one visit record the user has named by id.
+def _fmt_visit(v) -> str:
+    return (
+        f"visit {v.id} quality {v.quality} ({QUALITY.get(v.quality, '?')}) "
+        f"{_iso(v.date_from) or 'undated'} → {_iso(v.date_to) or 'undated'}"
+        + (f", owned by trip {v.trip_id}" if v.trip_id else ", standalone")
+    )
 
-    Writes: exactly one ``quickEnter/delete-visit``, and only with ``--confirm``.
-    Why it is safe: the client reads the region first and refuses if the id is
-    not on it, refuses a trip-owned record unless ``--allow-trip-owned``, and
-    reads the region back afterwards rather than trusting ``OK``. The request
-    and its answer are journalled to ``deletes-<account>.ndjson`` in the workdir
-    with an ``open`` entry written *before* the request, so a crash mid-write
-    is visible as an unfinished entry, not as silence.
-    What it costs: the region loses one visit; if that was the region's only
-    one, the region and possibly the country drop off the profile. Country
-    counts and YES are batch-derived and will lag by up to an hour.
+
+def _undo(args, *, kind: str, key: str, label: str, preview: list[str], run) -> int:
+    """The shared shape of every ``wanderfill delete`` kind.
+
+    Print what is about to be removed; stop unless ``--confirm``; write an
+    ``open`` journal entry *before* the request so a crash mid-write shows as
+    an unfinished entry rather than as silence; run the one client call, which
+    does its own read-back; close the entry. A lost answer leaves the entry
+    open on purpose — the next run refuses until a human has read the server.
     """
     from types import SimpleNamespace
 
     from ..plan.apply import Journal
 
-    c = _client(args)
-    visits = c.visits_for_region(args.region)
-    target = next((v for v in visits if v.id == args.visit_id), None)
-    if target is None:
-        ids = ", ".join(str(v.id) for v in visits) or "none"
-        print(f"visit {args.visit_id} is not on region {args.region} (visits there: {ids})")
-        return 2
-    print(
-        f"region {args.region}: visit {target.id} quality {target.quality} "
-        f"({QUALITY.get(target.quality, '?')}) "
-        f"{_iso(target.date_from) or 'undated'} → {_iso(target.date_to) or 'undated'}"
-        + (f", owned by trip {target.trip_id}" if target.trip_id else ", standalone")
-    )
-    others = len(visits) - 1
-    print(f"the region keeps {others} other visit(s) after this" if others
-          else "this is the region's ONLY visit: the region leaves the profile")
+    for line in preview:
+        print(line)
     if not args.confirm:
-        print("\nDry run. Nothing was sent. Re-run with --confirm to delete it.")
+        print("\nDry run. Nothing was sent. Re-run with --confirm to do it.")
         return 0
 
-    account = c.account_id()
+    c = args._client
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    journal = Journal(workdir / f"deletes-{account}.ndjson")
-    op = SimpleNamespace(
-        key=f"delete_visit:{args.region}:{args.visit_id}",
-        kind="delete_visit",
-        label=f"region {args.region} visit {args.visit_id} q{target.quality} "
-              f"{_iso(target.date_from)}..{_iso(target.date_to)} trip={target.trip_id}",
-    )
-    if op.key in journal.unresolved():
-        print(f"{journal.path.name} has an unfinished entry for this visit. "
-              "Read the region back and resolve it by hand before running again.")
+    journal = Journal(workdir / f"deletes-{c.account_id()}.ndjson")
+    op = SimpleNamespace(key=key, kind=kind, label=label)
+    if key in journal.unresolved():
+        print(
+            f"{journal.path.name} has an unfinished entry for {key}. "
+            "Read the server back and resolve it by hand before running again."
+        )
         return 2
     journal.opening(op)
     try:
-        gone = c.delete_visit(
-            args.visit_id, args.region, allow_trip_owned=args.allow_trip_owned
-        )
+        removed = run()
     except UnknownWriteOutcome as exc:
-        # Left open on purpose. See apply_plan for why.
-        print(f"error: {exc}")
+        print(f"error: {exc}")  # journal entry deliberately left open
         return 1
     except WanderfillError as exc:
         journal.note(op, None, error=str(exc))
         print(f"error: {exc}")
         return 1
-    journal.note(op, {"deleted": gone.id, "region": gone.region})
-    remaining = c.visits_for_region(args.region)
-    print(
-        f"deleted visit {gone.id}; server now lists {len(remaining)} visit(s) "
-        f"on region {args.region}"
-    )
-    print(f"journal: {journal.path}")
-    print(
-        f"to undo, add it back: quality {gone.quality}, "
-        f"{_iso(gone.date_from) or 'undated'} → {_iso(gone.date_to) or 'undated'}"
-    )
+    journal.note(op, removed)
+    print(f"done; server confirms. journal: {journal.path}")
     return 0
+
+
+def cmd_delete(args) -> int:
+    """Undo one thing the user has named by id. Dry run unless ``--confirm``.
+
+    Writes, per kind, exactly one request:
+      visit   quickEnter/delete-visit {id}        one visit record
+      trip    trips/delete-trip {trip_id}         the trip AND every visit it owns
+      region  quickEnter/set-not-visited {region} every visit on the region
+      dare    quickEnter/updateMQP {region, visits: 0}
+      kye     kye/set-kye {qid, visited: 0}
+    Why it is safe: each client method reads the thing first and refuses if it
+    is not there, reads it back afterwards and raises if it still is; trip-owned
+    visits need ``--allow-trip-owned``; the request is journalled before it goes
+    out; and there is no way to pass more than one id.
+    What it costs: whatever is listed in the preview leaves the profile. Region
+    and country counts follow at once; YES and the country row lag by up to an
+    hour. The preview prints enough to put each thing back by hand.
+    """
+    c = _client(args)
+    args._client = c
+    kind, ident = args.kind, args.id
+
+    if kind == "visit":
+        if args.region is None:
+            print("delete visit needs --region REGION_ID (the region the visit is on)")
+            return 2
+        visits = c.visits_for_region(args.region)
+        target = next((v for v in visits if v.id == ident), None)
+        if target is None:
+            ids = ", ".join(str(v.id) for v in visits) or "none"
+            print(f"visit {ident} is not on region {args.region} (visits there: {ids})")
+            return 2
+        others = len(visits) - 1
+        return _undo(
+            args, kind="delete_visit", key=f"delete_visit:{args.region}:{ident}",
+            label=f"region {args.region} {_fmt_visit(target)}",
+            preview=[
+                f"region {args.region}: {_fmt_visit(target)}",
+                (f"the region keeps {others} other visit(s)" if others
+                 else "this is the region's ONLY visit: the region leaves the profile"),
+            ],
+            run=lambda: c.delete_visit(ident, args.region, allow_trip_owned=args.allow_trip_owned)
+            and f"deleted visit {ident}",
+        )
+
+    if kind == "region":
+        visits = c.visits_for_region(ident)
+        if not visits:
+            print(f"region {ident} has no visits — nothing to clear")
+            return 2
+        return _undo(
+            args, kind="clear_region", key=f"clear_region:{ident}",
+            label=f"region {ident}: {len(visits)} visit(s)",
+            preview=[f"region {ident} has {len(visits)} visit(s); ALL of them go:"]
+            + [f"  {_fmt_visit(v)}" for v in visits]
+            + ["the region leaves the profile"],
+            run=lambda: [
+                v.id for v in c.clear_region(ident, allow_trip_owned=args.allow_trip_owned)
+            ],
+        )
+
+    if kind == "trip":
+        trip = c.trip(ident).get("trip", {})
+        regions = trip.get("regions", [])
+        return _undo(
+            args, kind="delete_trip", key=f"delete_trip:{ident}",
+            label=f"trip {ident} {trip.get('date_from')}..{trip.get('date_to')} "
+                  f"{len(regions)} region(s)",
+            preview=[
+                f"trip {ident}: {trip.get('date_from')} → {trip.get('date_to')} "
+                f"'{trip.get('description', '')}'",
+                f"it owns {len(regions)} visit(s), and they are deleted WITH the trip:",
+            ] + [
+                f"  region {r.get('region', r.get('id'))} {r.get('region_name', '')[:50]} "
+                f"q{r.get('quality')} {r.get('date_from')} → {r.get('date_to')}"
+                for r in regions
+            ],
+            run=lambda: {"deleted_trip": c.delete_trip(ident)},
+        )
+
+    if kind == "dare":
+        if ident not in c.visited_dare_ids():
+            print(f"DARE area {ident} is not marked — nothing to un-mark")
+            return 2
+        return _undo(
+            args, kind="unmark_dare", key=f"unmark_dare:{ident}", label=f"DARE {ident}",
+            preview=[f"DARE area {ident} is marked; un-marking it (updateMQP visits=0)"],
+            run=lambda: c.unmark_dare(ident) or f"un-marked DARE {ident}",
+        )
+
+    if kind == "kye":
+        k = c.kye()
+        ticked = {int(q) for q in k.get("visited", [])}
+        if ident not in ticked:
+            print(f"KYE quadrant {ident} is not ticked — nothing to un-tick")
+            return 2
+        return _undo(
+            args, kind="unmark_kye", key=f"unmark_kye:{ident}", label=f"KYE {ident}",
+            preview=[
+                f"KYE quadrant {ident} is ticked ({len(ticked)} of {k.get('max', '?')} ticked); "
+                "un-ticking it (set-kye visited=0)",
+                "note: KYE has been seen to gain quadrants on its own; re-read the count later",
+            ],
+            run=lambda: c.unmark_kye(ident) or f"un-ticked KYE {ident}",
+        )
+
+    print(f"unknown kind {kind!r}")
+    return 2
 
 
 # ------------------------------------------------------------------ parser
@@ -970,8 +1055,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wanderfill",
         description="Import your location history into NomadMania. Unofficial, unaffiliated.",
         epilog=(
-            "Token comes from NM_TOKEN. The only delete is delete-visit: "
-            "one record, by id, with --confirm."
+            "Token comes from NM_TOKEN. Nothing leaves the profile except through "
+            "`delete`: one id per run, with --confirm."
         ),
     )
     p.add_argument("--version", action="version", version=f"wanderfill {__version__}")
@@ -1150,20 +1235,24 @@ def build_parser() -> argparse.ArgumentParser:
     shr.set_defaults(func=cmd_share)
 
     d = sub.add_parser(
-        "delete-visit",
-        help="remove ONE visit record by id — dry run unless --confirm",
+        "delete",
+        help="undo ONE thing by id (visit, trip, region, dare, kye) — dry run unless --confirm",
         description=(
-            "Deletes a single visit record you have identified yourself, e.g. from "
-            "`wanderfill export --full`. Never computed, never batched: one id per run."
+            "Removes a single thing you have identified yourself, e.g. from "
+            "`wanderfill export --full` or `wanderfill state`. Never computed, never "
+            "batched: one id per run. Kinds: visit (needs --region), trip (deletes the "
+            "visits it owns too), region (every visit on it), dare, kye."
         ),
     )
-    d.add_argument("region", type=int, help="NomadMania region id the visit is on")
-    d.add_argument("visit_id", type=int, help="the visit record id")
-    d.add_argument("--confirm", action="store_true", help="actually delete")
+    d.add_argument("kind", choices=["visit", "trip", "region", "dare", "kye"])
+    d.add_argument("id", type=int, help="visit id, trip id, region id, DARE area id or KYE qid")
+    d.add_argument("--region", type=int, help="for kind=visit: the region the visit is on")
+    d.add_argument("--confirm", action="store_true", help="actually send it")
     d.add_argument("--allow-trip-owned", action="store_true",
-                   help="also allowed if the visit belongs to a trip (it leaves the trip too)")
+                   help="visit/region: proceed even if a visit belongs to a trip "
+                        "(it leaves the trip too)")
     d.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
-    d.set_defaults(func=cmd_delete_visit)
+    d.set_defaults(func=cmd_delete)
 
     a = sub.add_parser("apply", help="execute a plan file")
     a.add_argument("plan")

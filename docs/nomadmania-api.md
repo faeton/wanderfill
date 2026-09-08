@@ -91,11 +91,12 @@ lived here, travelguru.
 |---|---|---|
 | `quickEnter/add-visit` | `region, quality, year_from…day_to` | **auto-creates a trip** — see traps |
 | `quickEnter/update-visit` | `id, region, quality, year_from…day_to` | **full replacement** — see traps |
-| `quickEnter/updateMQP` | `region, visits` | binary DARE mark |
+| `quickEnter/updateMQP` | `region, visits` | binary DARE mark; `visits: 0` un-marks (the "Mark as not visited" button on `/dare/`). Client: `mark_dare` sends 1 only, `unmark_dare` sends 0 only |
 | `trips/new-trip` | `description, date_from, date_to, regions, regions_json` | needs **both** region fields |
 | `trips/update-trip` | as above plus `trip_id` | |
-| `trips/delete-trip` | `trip_id` | removes the trip *and* the visits it owns |
-| `quickEnter/delete-visit` | `id` (visit id) | found on `/regions/` (inline script, `removeVisit`). Confirmed 2026-09-09 on visit 13450095: returns `{"result":"OK"}`, the visit is gone from `get-visits-to-region` and the region from `get-visited-regions-ids-simple` at once; the country row in `slow/get-slow-app` still said visited with `yes: 8` on the first read after, so it is batch-derived like YES. Same page also calls `quickEnter/set-not-visited {region}`, not exercised. Client: `delete_visit(visit_id, region)`; CLI: `wanderfill delete-visit`. One id per call, never a plan op. |
+| `trips/delete-trip` | `trip_id` | removes the trip *and* the visits it owns. Afterwards `get-trip` answers `Unauthorised.` — the same as for a trip that never existed, so read before you write. Client: `delete_trip` |
+| `quickEnter/set-not-visited` | `region` | the red "Mark as not visited" button on `/regions/`; removes **every** visit on the region. Client: `clear_region`, which refuses a region with trip-owned visits unless told |
+| `quickEnter/delete-visit` | `id` (visit id) | found on `/regions/` (inline script, `removeVisit`). Confirmed 2026-09-09 on visit 13450095: returns `{"result":"OK"}`, the visit is gone from `get-visits-to-region` and the region from `get-visited-regions-ids-simple` at once; the country row in `slow/get-slow-app` still said visited with `yes: 8` on the first read after, so it is batch-derived like YES. Client: `delete_visit(visit_id, region)`; CLI: `wanderfill delete visit`. One id per call, never a plan op. |
 
 ### Geocoding
 
@@ -304,7 +305,7 @@ did until it was filled in deliberately.
 read   POST /webapi/kye/get-kye
        -> { result, visited: [qid…], max: 434, regions: [{qid, name}…] }
 
-write  POST /webapi/kye/set-kye   { qid, visited: 0|1 }
+write  POST /webapi/kye/set-kye   { qid, visited: 0|1 }   (client: mark_kye sends 1, unmark_kye sends 0)
 
 shape  GET  /static/json/kye.json          the quadrant geometry the map draws
 ```
