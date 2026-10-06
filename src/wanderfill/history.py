@@ -1217,10 +1217,15 @@ def parse_when(
 
 
 def parse_period(text: str, today: dt.date | None = None) -> tuple[dt.date, dt.date]:
-    """``2024-03-01..2024-04-15``, ``2024-03`` (a month), or ``2024`` (a year)."""
+    """``2024-03-01..2024-04-15``, ``2024-03`` (a month), or ``2024`` (a year).
+
+    Either end of a range may itself be a year or a month: ``2016..2017`` runs
+    to 31 December 2017, not to 1 January.
+    """
     if ".." in text:
         a, b = text.split("..", 1)
-        return parse_when(a, today), parse_when(b, today) if b else (today or dt.date.today())
+        end = parse_when(b, today, end=True) if b else (today or dt.date.today())
+        return parse_when(a, today), end
     if len(text) == 4 and text.isdigit():
         y = int(text)
         return dt.date(y, 1, 1), dt.date(y, 12, 31)

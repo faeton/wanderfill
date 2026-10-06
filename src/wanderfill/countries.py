@@ -492,15 +492,24 @@ def build_country_map(country_rows: list[dict], region_rows: dict[int, dict]) ->
     that fails does it stay unmapped, reported and never dropped.
 
     The name step is there because the flag join breaks silently. A country
-    can change its flag image before its regions do: on 2026-10-06 Syria the
+    can change its flag image before its regions do: in October 2026 Syria the
     country carried flag 809 while all four Syrian regions still carried 82,
     so each came out as its own unmapped "country" and ``check --countries
     vwp-restricted`` answered "Syria: no evidence" whatever the profile held.
-    Only the live 196 are matched, so the Vatican and Greenland are unchanged.
+
+    A name cannot say whether ``"France – New Caledonia"`` is a territory, and
+    with the flags gone nothing else can either. So a region placed by name
+    that carries a second flag is labelled as a territory of that country:
+    listed on its own and kept when the sovereign is excluded. That over-lists
+    an ordinary region with a regional flag, which is the safe direction —
+    folding a territory silently into its sovereign is the omission.
+
+    Only the live countries are matched, by any spelling the table knows, so
+    the Vatican and Greenland stay unmapped.
     """
     names = validate(country_rows)
     by_flag = {r["flag"]: r for r in country_rows if r.get("flag")}
-    by_name = {fold(country): code for country, code in names.items()}
+    live = set(names.values())
     cmap = CountryMap()
     for rid, reg in region_rows.items():
         name = str(reg.get("name") or reg.get("region_name") or f"region {rid}")
@@ -514,7 +523,8 @@ def build_country_map(country_rows: list[dict], region_rows: dict[int, dict]) ->
             code = names[parent["country"]]
             cmap.places[rid] = Place(code, name_of(code), territory=name)
             continue
-        code = by_name.get(fold(re.split(r"\s+[–-]\s+", name, maxsplit=1)[0]))
-        if code is not None:
-            cmap.places[rid] = Place(code, name_of(code))
+        code = iso_for(re.split(r"\s+[–-]\s+", name, maxsplit=1)[0])
+        if code in live:
+            territory = name if reg.get("flag2") else ""
+            cmap.places[rid] = Place(code, name_of(code), territory=territory)
     return cmap

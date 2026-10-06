@@ -129,20 +129,41 @@ def test_territory_by_second_flag():
 
 
 def test_syria_changed_its_flag_before_its_regions_did():
-    # Live on 2026-10-06: the country row had flag 809, the four regions 82,
+    # Live in October 2026: the country row had flag 809, its four regions 82,
     # and an ESTA check said "Syria: no evidence" for any Syrian visit.
     countries = [{"country": "Syria", "flag": "809"}, {"country": "Russia", "flag": "58"}]
     regions = {
-        1588: {"name": "Syria - Southwest (Damascus, Dara'a)", "flag1": "82", "flag2": None},
-        1298: {"name": "Russia – Franz Josef Land", "flag1": "306", "flag2": None},
-        86: {"name": "Vatican", "flag1": "247", "flag2": None},
-        1294: {"name": "Greenland – Northeast NP (Kulusuk)", "flag1": "185", "flag2": None},
+        1: {"name": "Syria - Southwest (Damascus, Dara'a)", "flag1": "82", "flag2": None},
+        2: {"name": "Russia – Franz Josef Land", "flag1": "306", "flag2": None},
+        3: {"name": "Vatican", "flag1": "247", "flag2": None},
+        4: {"name": "Greenland – Northeast NP (Kulusuk)", "flag1": "185", "flag2": None},
     }
     m = build_country_map(countries, regions)
-    assert m.place(1588) == Place("SY", "Syria")
-    assert m.place(1298) == Place("RU", "Russia")
+    assert m.place(1) == Place("SY", "Syria")
+    assert m.place(2) == Place("RU", "Russia")
     # not one of the live countries by name: still unmapped, still listed
-    assert m.place(86).iso == "??" and m.place(1294).iso == "??"
+    assert m.place(3).iso == "??" and m.place(4).iso == "??"
+
+
+def test_a_region_placed_by_name_keeps_its_territory_label():
+    # With the flags gone a name cannot say that New Caledonia is not France
+    # proper. A second flag is the only hint left, so it is listed on its own
+    # rather than folded in and lost to `--exclude FR`.
+    countries = [{"country": "France", "flag": "new"}]
+    regions = {
+        1: {"name": "France – New Caledonia - Main island (Noumea)", "flag1": "nc", "flag2": "old"},
+        2: {"name": "France – Aquitaine (Bordeaux)", "flag1": "old", "flag2": None},
+    }
+    m = build_country_map(countries, regions)
+    assert m.place(1).iso == "FR" and "New Caledonia" in m.place(1).territory
+    assert m.place(2) == Place("FR", "France")
+
+
+def test_a_region_placed_by_name_follows_the_alias_table():
+    # The country list says "Naoero"; a region still called "Nauru" is the same place.
+    m = build_country_map([{"country": "Naoero", "flag": "new"}],
+                          {1: {"name": "Nauru - Yaren", "flag1": "old", "flag2": None}})
+    assert m.place(1).iso == "NR"
 
 
 # ------------------------------------------------------------------- ledger
@@ -494,6 +515,11 @@ def test_since_takes_a_bare_year_as_the_spec_says():
     assert h.parse_when("2016", today) == D(2016, 1, 1)
     assert h.parse_when("2016", today, end=True) == D(2016, 12, 31)
     assert h.parse_when("2024-02", today, end=True) == D(2024, 2, 29)
+    # either end of a range, and the relative forms are not swallowed
+    assert h.parse_period("2016..2017", today) == (D(2016, 1, 1), D(2017, 12, 31))
+    assert h.parse_period("2024-03..2024-06", today) == (D(2024, 3, 1), D(2024, 6, 30))
+    assert h.parse_when("90d", today) == D(2026, 7, 8)
+    assert h.parse_when("1m", today) == D(2026, 9, 6)
 
 
 def test_render_markdown_has_header_and_notes():
