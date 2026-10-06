@@ -206,6 +206,9 @@ wanderfill history trips --since 10y --exclude uk-form,uk --first --track track.
 # ESTA: the VWP-restricted list since 1 March 2011
 wanderfill history check --countries vwp-restricted --since 2011-03-01
 
+# every trip since a year (--since, --until and either end of a period take YYYY or YYYY-MM)
+wanderfill history list --since 2016
+
 # days present per country in the UK tax year 2025/26
 wanderfill history days --year 2025 --tax-year uk
 
@@ -229,9 +232,20 @@ country out is the dangerous mistake:
 - A short gap with the same country on both sides is filled and labelled
   `bridged`; a gap between two countries is left open ("left between Mar 3
   and Mar 9") rather than guessed.
-- Territories (Greenland, the Canaries, Hong Kong…) are listed on their own
-  by default and are not removed by excluding their sovereign — Greenland is
-  Danish and not in the EEA.
+- Territories (the Canaries, Hong Kong, Bermuda…) are listed on their own
+  by default and are not removed by excluding their sovereign.
+- A region the live data ties to no country is listed as `unmapped: …`, never
+  dropped. That is Antarctica, but also Greenland, French Polynesia and
+  Somaliland, which NomadMania gives no second flag — so read those rows
+  yourself: a form asking about Denmark or Somalia will not find them.
+
+Two things it cannot tell apart, and you can:
+
+- Every day inside a dated profile visit counts as a day present, even when
+  your photos that day are somewhere else. The `agree` / `disagree` column
+  compares only the first and last day of each source, so it will not always
+  flag this.
+- A photo somebody AirDropped or messaged you counts as you being there.
 
 Output lands in `history/` as Markdown, CSV and JSON. It is a dated record of
 where you sleep: it stays on your machine, and it is gitignored. It does not
@@ -453,7 +467,8 @@ cost a wrong write or a wrong number the first time.
 | A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |
 | Nothing fills KYE in from your visits, and a photo from a plane window sits in a cell like a week on the ground | `mark_kye` only ever sends `1`; `grade.py` scores candidates by implied speed, not point count |
 | A write retried after a lost response duplicates it | Reads retry, writes do not; an unanswered write raises `UnknownWriteOutcome` and leaves the journal open |
-| `OK` is not evidence that the profile changed as intended | `apply` re-reads every touched object and writes a `verify-*.json` |
+| `OK` is not evidence that the profile changed as intended | `apply` re-reads every visit and every trip region, prints mismatches and anything it could not prove, and writes a `verify-*.json` |
+| A transit-quality visit is stored but does **not** mark the region, so "two regions added" moves the count by one | `MARKS_REGION_FROM`; `verify` reports the visit as `not_counted` |
 | `get-regions-mqp` returns `visited` as an id string, not a boolean | Not used; `visited_dare_ids` is the source of truth |
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |

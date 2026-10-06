@@ -194,6 +194,13 @@ visit", not transit**: 0 no visit, 1 transit, 2 minimal visit, 3 good visit,
 4 worked here, 5 lived here, 6 travelguru. Sending 0 believing it means transit
 writes a downgrade that looks deliberate; `QUALITY` in `client.py` is the list.
 
+**A transit does not mark the region.** A region whose best visit is quality 1
+has the visit and is still absent from the visited list and the region total:
+two adds, at quality 2 and quality 1, moved one profile's count by one. Say
+that at plan time, before the user picks a quality, not after the count comes
+back one short. `verify()` reports it as `not_counted`, for a standalone visit
+and for a region inside a trip alike.
+
 ### The four traps, in the order you will hit them
 
 **`quickEnter/add-visit` auto-creates a single-region trip with an empty
@@ -396,6 +403,15 @@ The technical parts that are easy to get wrong:
   coordinates. Screenshots are `ZKIND = 0, ZKINDSUBTYPE = 10`. Both are excluded
   at the query, and both would otherwise manufacture evidence for travel that
   did not happen.
+- **That filter does not catch everything that is not theirs.** An AirDropped
+  photo (`ZIMPORTEDBYBUNDLEIDENTIFIER = com.apple.sharingd`), a Telegram or
+  Messages save, and a Meta-glasses import all pass it. On one library the
+  glasses importer stamped a stale coordinate from another country on photos
+  taken a sea away, and AirDrop put a second person in one capital while the
+  camera was still in another country. Before a write, split the days by
+  importer: when the own camera (`com.apple.camera`) is somewhere else the
+  same day, the other photo is not evidence. Older libraries have no importer
+  recorded at all, so this is a check to run, not a filter to apply blind.
 - Attribute exhibits against the **live tiles**, and carry the
   nearest-polygon flag through to the output. Offering a photo taken across a
   border as proof of the region on this side of it is precisely the accusation
@@ -466,9 +482,16 @@ and none of them are:
   and the form then gets "approximately" or the year, not a date you chose.
 - **probably overflight or transit** — seen only at aircraft speed. Some forms
   count an airside layover, most do not. That is the person's call.
-- **territories** — Greenland, the Canaries, Hong Kong. Kept by default even
+- **territories** — the Canaries, Hong Kong, Bermuda. Kept by default even
   when the sovereign is excluded. Whether the form counts them is the
   person's call.
+- **unmapped** — a region the live data ties to no country. Greenland, French
+  Polynesia and Somaliland carry no second flag, so they print as
+  `unmapped: Greenland – …` rather than under Denmark, France or Somalia, and
+  `--territories sovereign` does not fold them in. Read every unmapped row
+  against the question: ESTA asks about Somalia, and Somaliland will not
+  answer to that name. Antarctica and the poles are unmapped because nobody
+  owns them.
 
 **3. Never fill an open edge.** "Entered between Mar 3 and Mar 9" stays a
 range. Do not ask "so, the 5th?" — that is rule 7, and a yes to a date you
@@ -484,6 +507,17 @@ you say so. A source that cannot see a year is not evidence of absence (§4).
 **5. Disagreement is a report.** When the profile and the photos give
 different dates for a trip, show both. Correcting the profile is a write and
 goes through §7 — it is not something to do on the way to a visa form.
+
+**Every day inside a dated profile visit counts as observed**, whatever the
+photos say about that day. One profile visit spanned twelve days across two
+airport transits; `history` counted every one of them while the camera spent
+ten in other countries. For a visa form that errs toward listing; for `days`
+it inflates a tax count. Do not lean on the `agree` / `disagree` column to
+catch it: that compares only the first and last day each source gives, so a
+conflict in the middle of a stay still reads `agree`. Photos received from
+somebody else count as presence too (§6a). A country that appears for a day or
+two inside a stay elsewhere, or a long stay the person does not recognise,
+deserves a look at where it came from before it goes on a form.
 
 **6. Do not say "you're fine".** Tax residency, the 183-day test and absence
 limits for residence or citizenship are decided by law and by the authority.
@@ -544,6 +578,13 @@ Then **verify**: `apply` now calls `verify()` itself and writes a `verify-*.json
 beside the journal. Read it. A response saying `OK` is not evidence — both
 historical incidents here returned `OK` at the time and were found by reading the
 server back. Report the real numbers, including the ones that came out wrong.
+`apply` prints every mismatch and exits non-zero on one; `not_counted` lists
+visits that are stored but leave their region unmarked. A trip is read back
+region by region, by the trip id the server answered: one visit per region,
+its planned dates and quality, and no second visit beside it for those dates.
+`unproven` is what the read-back could not establish either way — the visited
+list came back without its ids, or the trip's id is not known to this run. It
+is not a pass; read the server yourself before reporting the write as done.
 
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
@@ -572,3 +613,84 @@ Both were caught by verifying against the server rather than trusting the
 responses. So: audit after every phase, surface what broke before the user finds
 it, propose the narrowest possible repair, and get explicit approval before
 deleting anything — including your own mess.
+
+---
+
+## 10. Changing the package itself
+
+Sections 0–9 are for driving a profile. This one is for editing the code that
+drives it.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+
+.venv/bin/pytest -q                                   # whole suite, ~2s
+.venv/bin/pytest tests/test_quirks.py -k update_visit  # one trap at a time
+.venv/bin/ruff check .                                 # line-length 100, py310
+.venv/bin/wanderfill whoami                            # the only check that needs a token
+```
+
+**The suite never touches the network and never reads a token.** `FakeTransport`
+in `tests/test_quirks.py` answers every call from a dict. A test that needs a
+live profile is a test nobody runs, so the traps are asserted against the request
+that *would* have been sent — `test_create_trip_sends_both_region_fields` checks
+the junk `regions` field is in the body, not that a trip appeared.
+
+The ruff `ignore` list in `pyproject.toml` is four deliberate decisions with
+their reasons written beside them. Read them before silencing a fifth.
+
+### The shape
+
+```
+sources/ ──► geo/ ──► plan/{model,segment,series} ──► PLAN FILE ──► plan/apply ──► api/
+  parse      resolve        compute                    (on disk)     execute     POST
+```
+
+Left to right, and the invariant is structural rather than a convention:
+**nothing left of the plan file writes, and `plan/apply.py` computes nothing.**
+`api/` is the only module that speaks to NomadMania.
+
+| module | holds |
+|---|---|
+| `api/transport.py` | the two surfaces, the rate limiter, the retry decision |
+| `api/client.py` | one method per endpoint, each quirk encoded as *behaviour* |
+| `plan/model.py` | `Op`, `Plan`, `Op.key`, `regions_touched`, `basis_of` |
+| `plan/apply.py` | the five preconditions, the journal, `verify()` |
+| `plan/segment.py` | trips; `home=` is the parameter the module turns on |
+| `plan/series.py` | shortlists and the recall curve, never an auto-marker |
+| `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |
+| `geo/tiles.py` | gzip sniffing, polygons, the series harvest |
+| `grade.py` | is-this-coordinate-a-visit, by speed and time spread |
+| `evidence.py`, `share.py` | read-only leaves; nothing in the write path imports them |
+
+### Five things that are load-bearing and do not look it
+
+- **`CLAUDE.md` is a symlink to `AGENTS.md`.** Writing one rewrites the other.
+- **`Transport.WRITE_HINTS` decides what may be retried**, by substring on the
+  action name. A new write endpoint whose name misses every hint becomes
+  silently retryable, and a retried write is how duplicates are made. Add the
+  hint in the same commit as the method.
+- **`regions_touched()` is the only place that knows which op kind puts its id in
+  which field.** A KYE quadrant id and a region id overlap numerically, so
+  reading one as the other snapshots an unrelated region and fails drift for the
+  wrong reason. Section 7 has the table; that function is its implementation.
+- **The core is stdlib-only.** `shapely`, `mapbox_vector_tile`, `rich` and
+  `PIL` are extras, and every one of their imports sits inside the function that
+  needs it. Hoisting one to module level breaks the bare install.
+- **Two tests guard the ethos rather than a behaviour** —
+  `test_the_undo_methods_are_exactly_these_five` and
+  `test_deletions_are_not_plan_ops`. A sixth removing method on the client, or a
+  delete op kind, fails the suite on purpose. If a change seems to need one, that
+  is the conversation in rule 2, not a fixture to update.
+
+### Where new work goes
+
+A trap found against the live API gets three things and not two: the behaviour in
+`api/client.py`, a test in `tests/test_quirks.py` named after the incident, and a
+row in the README's trap table. A comment saying "be careful" is the one outcome
+the client's design rule forbids.
+
+`workspace/` is gitignored and holds one real account's tracks, plans, logs and
+one-off scripts. It is not the package and its scripts are not examples; anything
+there that becomes generally useful moves into `src/wanderfill` with the personal
+data stripped. See `workspace/WORKSPACE.md`.

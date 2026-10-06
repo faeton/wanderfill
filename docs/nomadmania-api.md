@@ -251,6 +251,16 @@ Omitted fields are overwritten, not preserved. A hardcoded `quality: 3` turned a
 region marked *lived here* into *good visit*. Always read-modify-write, and take
 the maximum of existing and intended quality so an update can never downgrade.
 
+### A transit does not mark the region
+
+A region whose only visit has quality 1 is **not** in
+`maps/get-visited-regions-ids-simple` and does not move the region count. The
+visit is real — `get-visits-to-region` returns it and `quickEnter/get-regions`
+shows `best_visit_quality: 1, no_of_visits: 1` — it simply does not count. Measured
+in October 2026: two `add-visit` writes, one at quality 2 and one at quality 1,
+moved the region count by one. An already-marked region keeps its best quality
+when a quality-1 repeat visit is added to it.
+
 ### `visited` is not a boolean
 
 `get-regions-mqp` returns `visited` as the area's own id rendered as a string —
