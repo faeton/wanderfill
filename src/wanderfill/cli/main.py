@@ -500,7 +500,13 @@ def cmd_history(args) -> int:
     person copies from it into the form themselves.
     """
     from .. import history as hi
-    from ..countries import GroupError, UnmappedCountries, build_country_map, groups_used
+    from ..countries import (
+        UNMAPPED,
+        GroupError,
+        UnmappedCountries,
+        build_country_map,
+        groups_used,
+    )
     from ..countries import parse_groups as groups
 
     today = dt.date.today()
@@ -577,7 +583,7 @@ def cmd_history(args) -> int:
     territories = args.territories or hi.DEFAULT_TERRITORIES.get(q, "separate")
 
     if q == "absences" and not home:
-        homes = {cmap.place(r).iso for r in c.home_regions()} - {"??"}
+        homes = {cmap.place(r).iso for r in c.home_regions()} - {UNMAPPED}
         if not homes:
             sys.exit("history absences: give --home; the profile has no homebase set")
         home = homes
@@ -606,7 +612,8 @@ def cmd_history(args) -> int:
         )
     elif q == "check":
         report = hi.query_check(
-            ledger, countries=include, since=since, until=until, territories=territories, hdr=hdr,
+            ledger, countries=include, exclude=exclude, since=since, until=until,
+            territories=territories, hdr=hdr,
         )
     elif q == "where":
         report = hi.query_where(

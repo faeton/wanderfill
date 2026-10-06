@@ -213,8 +213,8 @@ def test_gap_longer_than_bridge_is_two_trips():
 def test_different_countries_are_never_bridged_and_edges_open():
     pts = days_of(D(2024, 3, 1), 3, TR1) + days_of(D(2024, 3, 9), 2, GR)
     tr, gr = h.trips(ledger(pts))
-    assert tr.exit == D(2024, 3, 3) and tr.exit_latest == D(2024, 3, 8) and tr.exit_open
-    assert gr.entry == D(2024, 3, 9) and gr.entry_earliest == D(2024, 3, 4) and gr.entry_open
+    assert tr.exit == D(2024, 3, 3) and tr.exit_latest == D(2024, 3, 9) and tr.exit_open
+    assert gr.entry == D(2024, 3, 9) and gr.entry_earliest == D(2024, 3, 3) and gr.entry_open
 
 
 def test_third_country_inside_the_gap_blocks_the_bridge():
@@ -238,6 +238,47 @@ def test_crossing_day_closes_the_edge():
     pts = [*days_of(D(2024, 3, 1), 2, TR1), pt(D(2024, 3, 2), GR), *days_of(D(2024, 3, 3), 2, GR)]
     gr = next(t for t in h.trips(ledger(pts)) if t.iso == "GR")
     assert not gr.entry_open
+
+
+def test_adjacent_days_in_two_countries_leave_the_crossing_open():
+    """Spain on the 1st, Portugal on the 2nd: either day could be the travel day."""
+    pts = [pt(D(2024, 1, 1), ES), pt(D(2024, 1, 2), PT)]
+    es, pt_ = h.trips(ledger(pts))
+    assert es.exit_open and es.exit_latest == D(2024, 1, 2)
+    assert pt_.entry_open and pt_.entry_earliest == D(2024, 1, 1)
+
+
+def test_an_unplaced_point_blocks_the_bridge():
+    pts = [pt(D(2024, 1, 1), ES), pt(D(2024, 1, 2), None), pt(D(2024, 1, 3), ES)]
+    assert not any(d.kind == h.BRIDGED for d in ledger(pts).days())
+
+
+def test_an_unplaced_point_on_an_edge_blocks_the_bridge():
+    pts = [pt(D(2024, 1, 1), ES), pt(D(2024, 1, 1), None), pt(D(2024, 1, 3), ES)]
+    assert not any(d.kind == h.BRIDGED for d in ledger(pts).days())
+
+
+def test_two_unmapped_regions_stay_two_and_never_bridge():
+    pts = [pt(D(2024, 1, 1), 901), pt(D(2024, 1, 3), 902)]
+    lg = ledger(pts)
+    assert len({d.key for d in lg.days()}) == 2
+    assert not any(d.kind == h.BRIDGED for d in lg.days())
+    assert len(h.trips(lg)) == 2
+
+
+def test_half_dated_visit_is_a_day_and_a_claim_over_both_years():
+    lg = ledger(visits=[visit(ES, D(2023, 12, 1), YearOnly(2024), 3)])
+    assert [d.date for d in lg.days()] == [D(2023, 12, 1)]
+    [u] = lg.undated
+    assert (u.year_from, u.year_to) == (2023, 2024)
+    r = h.query_trips(lg, since=D(2024, 1, 1), until=D(2024, 12, 31))
+    assert any("#3" in row["flags"] for row in r.sections[0].rows)
+
+
+def test_year_range_visit_overlaps_a_later_window():
+    lg = ledger(visits=[visit(ES, YearOnly(2023), YearOnly(2024), 4)])
+    r = h.query_trips(lg, since=D(2024, 1, 1), until=D(2024, 12, 31))
+    assert [row["entry"] for row in r.sections[0].rows] == ["CHECK"]
 
 
 # -------------------------------------------------------------------- trips
@@ -453,35 +494,68 @@ def test_cli_end_to_end_reads_only(tmp_path, monkeypatch):
         "regions/get-regions-list-2": {
             "data": {"1": {"name": "Istanbul"}, "4": {"name": "Madrid"}},
         },
-        "quickEnter/get-regions": {"data": {"regions": [
-            {"id": 1, "flag1": "tr"}, {"id": 4, "flag1": "es"},
-        ]}},
-        "slow/get-slow-app": {"slow": [
-            {"country": "Turkey", "flag": "tr", "country_id": 1},
-            {"country": "Spain", "flag": "es", "country_id": 2},
-        ]},
+        "quickEnter/get-regions": {
+            "data": {
+                "regions": [
+                    {"id": 1, "flag1": "tr"},
+                    {"id": 4, "flag1": "es"},
+                ]
+            }
+        },
+        "slow/get-slow-app": {
+            "slow": [
+                {"country": "Turkey", "flag": "tr", "country_id": 1},
+                {"country": "Spain", "flag": "es", "country_id": 2},
+            ]
+        },
         "maps/get-visited-regions-ids-simple": {"ids": [4]},
-        "quickEnter/get-visits-to-region": {"data": [
-            {"id": 9, "year_from": 2019, "month_from": None, "day_from": None,
-             "year_to": None, "month_to": None, "day_to": None, "quality": 3},
-        ]},
+        "quickEnter/get-visits-to-region": {
+            "data": [
+                {
+                    "id": 9,
+                    "year_from": 2019,
+                    "month_from": None,
+                    "day_from": None,
+                    "year_to": None,
+                    "month_to": None,
+                    "day_to": None,
+                    "quality": 3,
+                },
+            ]
+        },
     }
     t = FakeTransport(replies)
     monkeypatch.setattr(cli, "_client", lambda args: NomadMania(token="fake", transport=t))
-    monkeypatch.setattr(cli, "_resolve_coords", lambda args, cat, coords: {
-        k: type("R", (), {"region": 1})() for k in coords
-    })
+    monkeypatch.setattr(
+        cli,
+        "_resolve_coords",
+        lambda args, cat, coords: {k: type("R", (), {"region": 1})() for k in coords},
+    )
     out = tmp_path / "out"
-    rc = cli.main(["history", "trips", "--track", str(track), "--no-photos",
-                   "--since", "2016-01-01", "--out", str(out)])
+    rc = cli.main(
+        [
+            "history",
+            "trips",
+            "--track",
+            str(track),
+            "--no-photos",
+            "--since",
+            "2016-01-01",
+            "--out",
+            str(out),
+        ]
+    )
     assert rc == 0
     md = (out / "history-trips.md").read_text()
     assert "Türkiye" in md and "2024-03-01" in md
     assert "CHECK" in md and "some time in 2019" in md
     sent = {a for a, _ in t.sent}
     assert sent <= {
-        "regions/get-regions-list-2", "quickEnter/get-regions", "slow/get-slow-app",
-        "maps/get-visited-regions-ids-simple", "quickEnter/get-visits-to-region",
+        "regions/get-regions-list-2",
+        "quickEnter/get-regions",
+        "slow/get-slow-app",
+        "maps/get-visited-regions-ids-simple",
+        "quickEnter/get-visits-to-region",
     }
 
 
@@ -497,3 +571,44 @@ def test_cli_rejects_unknown_group_before_any_request(monkeypatch):
     monkeypatch.setattr(cli, "_client", lambda args: pytest.fail("no request expected"))
     with pytest.raises(SystemExit, match="unknown country or group"):
         cli.main(["history", "trips", "--exclude", "eea,schengn"])
+
+
+# ------------------------------------------------- the second review's holes
+
+
+def test_csv_carries_check_rows_overflights_and_notes():
+    on_ground = pt(D(2024, 3, 1), TR1, "photos", dt.datetime(2024, 3, 1, 8), 41.0, 29.0)
+    lg = ledger([on_ground, *_flight(D(2024, 3, 1))], [visit(ES, None, None, 42)])
+    out = h.render_csv(h.query_trips(lg, since=None, until=None))
+    assert "#42" in out and "overflight" in out and "note" in out
+
+
+def test_days_lists_undated_claims_and_overflights_beside_the_count():
+    lg = ledger(visits=[visit(ES, YearOnly(2024), None, 11)])
+    r = h.query_days(lg, year=2024, today=D(2026, 1, 1))
+    assert r.sections[0].rows == []
+    assert any("#11" in row["visit"] for s in r.sections[1:] for row in s.rows)
+
+
+def test_absences_lists_undated_claims_abroad():
+    lg = ledger(days_of(D(2024, 1, 1), 2, PT), [visit(ES, YearOnly(2024), None, 12)])
+    r = h.query_absences(lg, home={"PT"}, since=D(2024, 1, 1), until=D(2024, 12, 31))
+    assert any("#12" in str(row) for s in r.sections for row in s.rows)
+
+
+def test_vwp_note_has_one_exception_and_it_is_cuba():
+    note = GROUPS["vwp-restricted"].note
+    assert "2011-03-01" in note and "Cuba" in note and "2021-01-12" in note
+    assert "North Korea" not in note
+
+
+def test_far_relative_dates_raise_rather_than_hang():
+    with pytest.raises(ValueError):
+        h.parse_when("2026y", D(2026, 10, 6))
+    assert h.parse_when("1m", D(2026, 3, 31)) == D(2026, 2, 28)
+
+
+def test_check_honours_exclude():
+    lg = ledger(days_of(D(2024, 1, 1), 2, IR))
+    r = h.query_check(lg, countries={"IR", "IQ"}, exclude={"IR"}, since=None, until=None)
+    assert [row["iso"] for row in r.sections[0].rows] == ["IQ"]

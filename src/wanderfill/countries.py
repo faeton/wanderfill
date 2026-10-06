@@ -320,7 +320,7 @@ GROUPS: dict[str, Group] = {
     "vwp-restricted": Group(
         frozenset("IR IQ SY SD LY SO YE KP CU".split()),
         "2026-10",
-        "ESTA: travel on or after 2011-03-01 (North Korea from 2016-01-12, Cuba from 2021-01-12)",
+        "ESTA: travel on or after 2011-03-01 — except Cuba, which counts from 2021-01-12",
     ),
     "five-eyes": Group(frozenset({"US", "GB", "CA", "AU", "NZ"}), "2026-10", "Five Eyes"),
     "gcc": Group(frozenset("SA AE QA KW BH OM".split()), "2026-10", "Gulf Cooperation Council"),
@@ -412,13 +412,17 @@ def groups_used(text: str | None) -> list[str]:
 # ------------------------------------------------------- region -> country
 
 
+UNMAPPED = "??"
+
+
 @dataclass(frozen=True)
 class Place:
     """Where a NomadMania region sits, in the vocabulary a form uses."""
 
-    iso: str  # sovereign country, ISO alpha-2 — or "??" if unmapped
+    iso: str  # sovereign country, ISO alpha-2 — or UNMAPPED
     country: str  # display name of that country
     territory: str = ""  # region name when the region is a territory of ``iso``
+    region: int = 0  # set only for an unmapped region, to keep each one apart
 
     def label(self, territories: str = "separate") -> str:
         if self.territory and territories == "separate":
@@ -426,6 +430,10 @@ class Place:
         return self.country
 
     def key(self, territories: str = "separate") -> str:
+        if self.iso == UNMAPPED:
+            # Two unmapped regions are not one country. Sharing a key would
+            # merge them into one trip and let a bridge run between them.
+            return f"{UNMAPPED}/{self.region}"
         if self.territory and territories == "separate":
             return f"{self.iso}/{self.territory}"
         return self.iso
@@ -444,7 +452,7 @@ class CountryMap:
             return p
         # Never drop an unmapped region: it becomes its own "country", loudly.
         name = self.region_names.get(region, f"region {region}")
-        return Place("??", f"unmapped: {name}")
+        return Place(UNMAPPED, f"unmapped: {name}", region=region)
 
     def region_name(self, region: int) -> str:
         return self.region_names.get(region, f"region {region}")

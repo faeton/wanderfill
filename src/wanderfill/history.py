@@ -43,6 +43,7 @@ And nothing is invented — AGENTS.md rules 6 and 7 hold:
 
 from __future__ import annotations
 
+import calendar
 import csv
 import datetime as dt
 import io
@@ -53,7 +54,7 @@ from itertools import pairwise
 from typing import Any
 
 from .api.client import Visit, YearOnly
-from .countries import GROUPS, CountryMap, Place, name_of
+from .countries import GROUPS, UNMAPPED, CountryMap, Place, name_of
 from .grade import FAST_KMH, km
 
 BRIDGE_DAYS = 7
@@ -96,16 +97,41 @@ class Point:
 
 @dataclass(frozen=True)
 class UndatedClaim:
-    """A profile visit that cannot become days: year-only, or nothing at all."""
+    """A profile visit that cannot become days: year-only, half-dated, or nothing.
+
+    ``year_from`` / ``year_to`` bound the years it could fall in; ``None`` on a
+    side means unbounded. A visit dated "2023-12-01 to some time in 2024" is
+    one observed day in the ledger *and* a claim spanning 2023–2024 here,
+    because the end year is a statement too and dropping it would make the
+    visit vanish from a 2024 question.
+    """
 
     region: int
     place: Place
     region_name: str
-    year: int | None
+    year_from: int | None
+    year_to: int | None
     visit_id: int
+    when: str = ""
+
+    @property
+    def year(self) -> int | None:
+        return self.year_from
+
+    def overlaps(self, since: dt.date | None, until: dt.date | None) -> bool:
+        if since and self.year_to is not None and self.year_to < since.year:
+            return False
+        return not (until and self.year_from is not None and self.year_from > until.year)
 
     def describe(self) -> str:
-        when = f"some time in {self.year}" if self.year else "no date at all"
+        when = self.when
+        if not when:
+            if self.year_from is None and self.year_to is None:
+                when = "no date at all"
+            elif self.year_from == self.year_to or self.year_to is None:
+                when = f"some time in {self.year_from}"
+            else:
+                when = f"some time in {self.year_from}–{self.year_to}"
         return f"NomadMania visit #{self.visit_id} to {self.region_name}: {when}"
 
 
@@ -162,6 +188,10 @@ class Ledger:
     airborne_points: int = 0
     bridge: int = BRIDGE_DAYS
     fast_kmh: float = FAST_KMH
+    # Dates with a point that resolved to no region. Something was recorded
+    # there — a flight, a ferry, a coordinate not yet cached — so no bridge
+    # may be drawn across or from them.
+    unplaced: set[dt.date] = field(default_factory=set)
 
     # -- country days, per territory mode, with bridging applied --------------
 
@@ -215,11 +245,13 @@ class Ledger:
         by_date: dict[dt.date, list[Day]] = defaultdict(list)
         for d in days:
             by_date[d.date].append(d)
-        seen = sorted(by_date)
+        seen = sorted(set(by_date) | self.unplaced)
         out = []
         for a, b in pairwise(seen):
             gap = (b - a).days - 1
             if not 1 <= gap <= self.bridge:
+                continue
+            if a in self.unplaced or b in self.unplaced:
                 continue
             left, right = by_date[a], by_date[b]
             if len(left) != 1 or len(right) != 1:
@@ -227,6 +259,8 @@ class Ledger:
             lo, hi = left[0], right[0]
             if lo.key != hi.key or lo.kind != OBSERVED or hi.kind != OBSERVED:
                 continue
+            if lo.iso == UNMAPPED:
+                continue  # an unmapped region is not a country to be "in" between points
             for i in range(1, gap + 1):
                 out.append(
                     Day(
@@ -277,15 +311,33 @@ def _airborne_flags(points: Sequence[Point], fast_kmh: float) -> list[bool]:
     return flags
 
 
-def _visit_days(v: Visit) -> list[dt.date] | None:
-    """The days a dated visit covers, or None if it has no day-precise start."""
-    start = v.date_from
-    if not isinstance(start, dt.date) or isinstance(start, YearOnly):
-        return None
-    end = v.date_to if isinstance(v.date_to, dt.date) else start
-    if end < start:
-        end = start
-    return [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+def _is_day(x) -> bool:
+    return isinstance(x, dt.date) and not isinstance(x, YearOnly)
+
+
+def _visit_parts(v: Visit) -> tuple[list[dt.date], tuple[int | None, int | None, str] | None]:
+    """Split a visit into the days it pins down and the claim it leaves open.
+
+    Fully dated (or a single day with no end): days, no claim. Anything with a
+    year-only or missing side: the day-precise endpoints become days — the
+    visit says they were there that day — and the whole visit also becomes a
+    claim over the years it could span, so no window it overlaps can lose it.
+    """
+    a, b = v.date_from, v.date_to
+    if _is_day(a) and (b is None or _is_day(b)):
+        end = b if b is not None and b >= a else a
+        return [a + dt.timedelta(days=i) for i in range((end - a).days + 1)], None
+    days = [x for x in (a, b) if _is_day(x)]
+    lo = a.year if a is not None else None
+    hi = b.year if b is not None else (lo if isinstance(a, YearOnly) else None)
+    if lo is not None and hi is not None and hi < lo:
+        lo, hi = hi, lo
+    when = ""
+    if days:
+        fa = a.isoformat() if a is not None else "an unknown date"
+        fb = b.isoformat() if b is not None else "an unknown date"
+        when = f"from {fa} to {fb}"
+    return days, (lo, hi, when)
 
 
 def build_ledger(
@@ -306,12 +358,14 @@ def build_ledger(
     flags = _airborne_flags(points, fast_kmh)
     cells: dict[tuple[dt.date, int], Cell] = {}
     unresolved = airborne = 0
+    unplaced: set[dt.date] = set()
     spans: dict[str, list[dt.date]] = defaultdict(list)
 
     for p, fast in zip(points, flags, strict=True):
         spans[p.source].append(p.date)
         if p.region is None:
             unresolved += 1
+            unplaced.add(p.date)
             continue
         airborne += fast
         c = cells.setdefault((p.date, p.region), Cell())
@@ -322,19 +376,20 @@ def build_ledger(
 
     undated: list[UndatedClaim] = []
     for v in visits:
-        days = _visit_days(v)
-        if days is None:
-            year = v.date_from.year if isinstance(v.date_from, YearOnly) else None
+        days, claim = _visit_parts(v)
+        if claim is not None:
+            lo, hi, when = claim
             undated.append(
                 UndatedClaim(
                     v.region,
                     cmap.place(v.region),
                     cmap.region_name(v.region),
-                    year,
+                    lo,
+                    hi,
                     v.id,
+                    when,
                 )
             )
-            continue
         for d in days:
             spans["profile"].append(d)
             c = cells.setdefault((d, v.region), Cell())
@@ -347,7 +402,7 @@ def build_ledger(
         Coverage(src, min(ds) if ds else None, max(ds) if ds else None, src != "profile")
         for src, ds in sorted(spans.items())
     ]
-    return Ledger(cells, undated, coverage, cmap, unresolved, airborne, bridge, fast_kmh)
+    return Ledger(cells, undated, coverage, cmap, unresolved, airborne, bridge, fast_kmh, unplaced)
 
 
 # ------------------------------------------------------------------ trips
@@ -393,8 +448,10 @@ def trips(ledger: Ledger, territories: str = "separate") -> list[Trip]:
     grounded = [d for d in days if d.kind in (OBSERVED, BRIDGED)]
     any_ground = sorted({d.date for d in grounded})
     by_key: dict[str, list[Day]] = defaultdict(list)
+    keys_on: dict[dt.date, set[str]] = defaultdict(set)
     for d in grounded:
         by_key[d.key].append(d)
+        keys_on[d.date].add(d.key)
 
     import bisect
 
@@ -415,20 +472,30 @@ def trips(ledger: Ledger, territories: str = "separate") -> list[Trip]:
                 run.append(d)
                 continue
             if run:
-                out.append(_trip(run, prev_known, next_known))
+                out.append(_trip(run, prev_known, next_known, keys_on))
             run = [d] if d is not None else []
     out.sort(key=lambda t: (t.entry, t.key))
     return out
 
 
-def _trip(run: list[Day], prev_known, next_known) -> Trip:
+def _trip(run: list[Day], prev_known, next_known, keys_on) -> Trip:
+    """One trip, with edges only as exact as the sources make them.
+
+    An edge is exact only when its own day also shows another country — the
+    crossing is on record that day. Otherwise the border was crossed some time
+    between the neighbouring day with data and this one, *both included*: a
+    day-level record of Spain on the 1st and Portugal on the 2nd cannot say
+    whether the 1st or the 2nd was the travel day.
+    """
     first, last = run[0], run[-1]
     sources: dict[str, list[dt.date]] = defaultdict(list)
     for d in run:
         for s in d.sources:
             sources[s].append(d.date)
-    before = prev_known(first.date)
-    after = next_known(last.date)
+    crossed_in = len(keys_on.get(first.date, ())) > 1
+    crossed_out = len(keys_on.get(last.date, ())) > 1
+    before = first.date if crossed_in else prev_known(first.date)
+    after = last.date if crossed_out else next_known(last.date)
     return Trip(
         key=first.key,
         label=first.label,
@@ -439,8 +506,8 @@ def _trip(run: list[Day], prev_known, next_known) -> Trip:
         observed=sum(d.kind == OBSERVED for d in run),
         bridged=sum(d.kind == BRIDGED for d in run),
         sources={s: (min(v), max(v)) for s, v in sorted(sources.items())},
-        entry_earliest=(before + dt.timedelta(days=1)) if before else None,
-        exit_latest=(after - dt.timedelta(days=1)) if after else None,
+        entry_earliest=before,
+        exit_latest=after,
     )
 
 
@@ -587,12 +654,8 @@ def _undated_in(ledger: Ledger, since, until, include, exclude, territories) -> 
         territory = bool(u.place.territory) and territories == "separate"
         if not _wanted(u.place.iso, territory, include, exclude):
             continue
-        if u.year is not None:
-            if since and u.year < since.year:
-                continue
-            if until and u.year > until.year:
-                continue
-        out.append(u)
+        if u.overlaps(since, until):
+            out.append(u)
     return out
 
 
@@ -639,6 +702,38 @@ def _undated_row(u: UndatedClaim, territories: str) -> dict[str, Any]:
         "cannot see": "",
         "flags": u.describe(),
     }
+
+
+def _review_sections(
+    ledger: Ledger, since, until, include, exclude, territories, *, skip_iso=frozenset()
+) -> list[Section]:
+    """CHECK claims and overflights for a window — listed beside a count, never in it."""
+    out = []
+    und = [
+        u
+        for u in _undated_in(ledger, since, until, include, set(exclude), territories)
+        if u.place.iso not in skip_iso
+    ]
+    if und:
+        out.append(
+            Section(
+                "CHECK — profile visits with no day that may fall in this period",
+                ["country", "visit"],
+                [{"country": u.place.label(territories), "visit": u.describe()} for u in und],
+                note="Not in the counts above, because they have no days. Not dropped either.",
+            )
+        )
+    days = [d for d in ledger.days(territories) if d.iso not in skip_iso]
+    air = _overflights(ledger, days, since, until, include, set(exclude))
+    if air:
+        out.append(
+            Section(
+                "probably overflight or transit — you decide",
+                ["country", "iso", "dates", "days", "why"],
+                air,
+            )
+        )
+    return out
 
 
 def query_trips(
@@ -721,6 +816,7 @@ def query_check(
     ledger: Ledger,
     *,
     countries: set[str],
+    exclude: set[str] | frozenset[str] = frozenset(),
     since: dt.date | None,
     until: dt.date | None,
     territories: str = "separate",
@@ -729,7 +825,7 @@ def query_check(
     ts = [t for t in trips(ledger, territories) if _in_window(t.entry, t.exit, since, until)]
     days = ledger.days(territories)
     rows = []
-    for iso in sorted(countries):
+    for iso in sorted(set(countries) - set(exclude)):
         mine = [t for t in ts if t.iso == iso]
         air = [
             d
@@ -818,9 +914,9 @@ def query_days(
         "counts and margins only.",
     ]
     cols = ["country", "iso", OBSERVED, BRIDGED, "present", AIRBORNE, f"vs {threshold}"]
-    return Report(
-        "days", hdr or {}, [Section(f"days present, tax year {label}", cols, rows)], notes
-    )
+    sections = [Section(f"days present, tax year {label}", cols, rows)]
+    sections += _review_sections(ledger, begin, last, None, set(), territories)
+    return Report("days", hdr or {}, sections, notes)
 
 
 def query_absences(
@@ -915,6 +1011,7 @@ def query_absences(
         "Limits for residence and citizenship are set by law and the authority; this is a count, "
         "not a verdict.",
     ]
+    sections += _review_sections(ledger, since, until, None, set(), territories, skip_iso=home)
     return Report("absences", hdr or {}, sections, notes)
 
 
@@ -1030,15 +1127,25 @@ def render_markdown(report: Report) -> str:
 
 
 def render_csv(report: Report) -> str:
-    """The first section only — the one a form is filled in from."""
+    """Every section in one table, each row tagged with the section it is from.
+
+    Only the first section is the answer a form is filled in from, but the
+    CHECK rows, overflights and notes are the part that keeps an omission out
+    of it. A CSV that dropped them would be the tidy, dangerous version.
+    """
     buf = io.StringIO()
     if not report.sections:
         return ""
-    s = report.sections[0]
-    w = csv.DictWriter(buf, fieldnames=s.columns, extrasaction="ignore")
+    columns = ["section"]
+    for s in report.sections:
+        columns += [c for c in s.columns if c not in columns]
+    w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
     w.writeheader()
-    for r in s.rows:
-        w.writerow(r)
+    for s in report.sections:
+        for r in s.rows:
+            w.writerow({"section": s.title, **r})
+    for n in report.notes:
+        w.writerow({"section": "note", columns[1]: n})
     return buf.getvalue()
 
 
@@ -1094,12 +1201,9 @@ def parse_when(text: str | None, today: dt.date | None = None) -> dt.date | None
         months = n * 12 if t[-1] == "y" else n
         y, m = divmod(today.year * 12 + today.month - 1 - months, 12)
         m += 1
-        day = today.day
-        while True:
-            try:
-                return dt.date(y, m, day)
-            except ValueError:
-                day -= 1
+        if y < dt.MINYEAR:
+            raise ValueError(f"{text!r} goes back before year 1")
+        return dt.date(y, m, min(today.day, calendar.monthrange(y, m)[1]))
     return dt.date.fromisoformat(text)
 
 
