@@ -1282,3 +1282,123 @@ def test_verify_reports_a_duplicate_rather_than_passing():
                         date_from="2024-01-01", date_to="2024-01-01", quality=3)])
     assert any("duplicate" in m for m in out["mismatches"])
     assert out["phantom_trips"], "the auto-created trip id must be recorded"
+
+
+def _stored(**over):
+    row = {"id": 1, "quality": 3, "trip_id": 900,
+           "year_from": 2024, "month_from": 3, "day_from": 1,
+           "year_to": 2024, "month_to": 3, "day_to": 2}
+    return {**row, **over}
+
+
+def _readback(rows, marked=None):
+    replies = {"quickEnter/get-visits-to-region": {"result": "OK", "data": rows}}
+    if marked is not None:
+        replies["maps/get-visited-regions-ids-simple"] = {"result": "OK", "ids": marked}
+    return client(replies)[0]
+
+
+def test_a_transit_is_stored_but_does_not_mark_the_region():
+    """Two regions were added once and the count moved by one: the other was a transit."""
+    from wanderfill.plan.apply import verify
+    add = Op(kind="add_visit", region=7, date_from="2024-03-01", date_to="2024-03-02", quality=1)
+    out = verify(_readback([_stored(quality=1)], marked=[8]), [add])
+    assert out["mismatches"] == []
+    assert out["not_counted"] == [{"region": 7, "quality": 1,
+                                   "why": "a transit-quality visit does not mark the region"}]
+
+    # the same absence at quality 2 is not expected, and is said so
+    add2 = Op(kind="add_visit", region=7, date_from="2024-03-01", date_to="2024-03-02", quality=2)
+    out = verify(_readback([_stored(quality=2)], marked=[8]), [add2])
+    assert out["not_counted"] == [] and "not in the visited list" in out["mismatches"][0]
+
+    # and a transit inside a trip is the same transit
+    trip = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-02",
+              regions=[{"id": 7, "quality": 1}])
+    out = verify(_readback([_stored(quality=1)], marked=[8]), [trip], {trip.key: {"trip_id": 900}})
+    assert out["mismatches"] == [] and out["not_counted"][0]["region"] == 7
+
+
+def test_verify_compares_the_stored_quality_not_the_planned_one():
+    """A visit that came back as 0 is "no visit" wearing the plan's dates."""
+    from wanderfill.plan.apply import verify
+    add = Op(kind="add_visit", region=7, date_from="2024-03-01", date_to="2024-03-02", quality=1)
+    out = verify(_readback([_stored(quality=0)], marked=[]), [add])
+    assert any("stored quality [0], planned 1" in m for m in out["mismatches"])
+    assert out["not_counted"][0]["quality"] == 0, "reported as stored, not as planned"
+
+
+def test_a_missing_visited_list_proves_nothing_either_way():
+    """{"result": "OK"} with no ids is not an empty profile."""
+    from wanderfill.plan.apply import verify
+    for quality in (1, 3):
+        add = Op(kind="add_visit", region=7, date_from="2024-03-01", date_to="2024-03-02",
+                 quality=quality)
+        out = verify(_readback([_stored(quality=quality)]), [add])
+        assert out["mismatches"] == [] and out["not_counted"] == []
+        assert "could not be read back" in out["unproven"][0]
+
+
+def test_verify_reads_a_created_trip_back():
+    """Trips once verified as "checked: 0" — create_trip had no read-back at all."""
+    from wanderfill.plan.apply import verify
+    region = {"id": 7, "quality": 3, "hidden": 0,
+              "year_from": 2024, "month_from": 3, "day_from": 1,
+              "year_to": 2024, "month_to": 3, "day_to": 2}
+    op = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10", regions=[region])
+    made = {op.key: {"result": "OK", "trip_id": 900}}
+    clean = {"checked": 1, "mismatches": [], "phantom_trips": [], "not_counted": [],
+             "unproven": []}
+
+    assert verify(_readback([_stored()], marked=[7]), [op], made) == clean
+
+    # a visit that was already there, owned by another trip, is not the new one
+    out = verify(_readback([_stored(trip_id=99)], marked=[7]), [op], made)
+    assert "has no visit owned by trip 900" in out["mismatches"][0]
+
+    # the new visit landed beside an older one for the same dates
+    out = verify(_readback([_stored(), _stored(id=2, trip_id=None)], marked=[7]), [op], made)
+    assert any("duplicate" in m for m in out["mismatches"])
+
+    # stored under other dates than planned
+    out = verify(_readback([_stored(day_to=5)], marked=[7]), [op], made)
+    assert any("planned 2024-03-01..2024-03-02" in m for m in out["mismatches"])
+
+    assert "has no visit" in verify(_readback([], marked=[7]), [op], made)["mismatches"][0]
+
+
+def test_a_trip_whose_id_is_unknown_is_unproven_not_passed():
+    """Matching by date alone cannot tell the new visit from one that predates it."""
+    from wanderfill.plan.apply import verify
+    op = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-02",
+            regions=[{"id": 7, "quality": 3}])
+    out = verify(_readback([_stored(trip_id=99)], marked=[7]), [op])
+    assert out["mismatches"] == []
+    assert "could predate it" in out["unproven"][0]
+
+    out = verify(_readback([_stored(), _stored(id=2, trip_id=None)], marked=[7]), [op])
+    assert any("not all owned by one trip" in m for m in out["mismatches"])
+
+
+def test_trip_region_dates_as_the_wire_carries_them():
+    """Year-only and string-valued components are valid, and were read as missing."""
+    from wanderfill.plan.apply import verify
+    year_only = {"id": 7, "quality": 3, "year_from": 2013, "month_from": None, "day_from": None,
+                 "year_to": 2013, "month_to": None, "day_to": None}
+    op = Op(kind="create_trip", date_from="2013-01-01", date_to="2013-12-31", regions=[year_only])
+    made = {op.key: {"trip_id": 900}}
+    stored = _stored(year_from=2013, month_from=None, day_from=None,
+                     year_to=2013, month_to=None, day_to=None)
+    assert verify(_readback([stored], marked=[7]), [op], made)["mismatches"] == []
+
+    strings = {"id": 7, "quality": 3, "year_from": "2024", "month_from": "3", "day_from": "1",
+               "year_to": "2024", "month_to": "3", "day_to": "2"}
+    op = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10", regions=[strings])
+    assert verify(_readback([_stored()], marked=[7]), [op],
+                  {op.key: {"trip_id": 900}})["mismatches"] == []
+
+    # no dates of its own: found by ownership, not by the trip's outer dates
+    bare = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
+              regions=[{"id": 7, "quality": 3}])
+    assert verify(_readback([_stored()], marked=[7]), [bare],
+                  {bare.key: {"trip_id": 900}})["mismatches"] == []

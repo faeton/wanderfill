@@ -63,6 +63,17 @@ QUALITY = {
     6: "travelguru",
 }
 
+MARKS_REGION_FROM = 2
+"""The lowest quality that makes a region count as visited.
+
+A region whose only visit is a transit is absent from
+``maps/get-visited-regions-ids-simple`` and from the region total, although the
+visit itself is stored and returned. Measured in October 2026: two ``add-visit``
+writes, at quality 2 and quality 1, moved the region count by one.
+:func:`wanderfill.plan.apply.verify` reports such a visit as ``not_counted``
+rather than letting a plan summary promise a region the profile will not show.
+"""
+
 
 @dataclass(frozen=True)
 class YearOnly:
@@ -335,7 +346,15 @@ class NomadMania:
 
     # ------------------------------------------------------------- my state
 
-    def visited_region_ids(self) -> set[int]:
+    def visited_region_ids(self, *, strict: bool = False) -> set[int]:
+        """Region ids that count as visited.
+
+        ``strict=True`` is for read-backs: a response with no ``ids`` list raises
+        instead of reading as an empty profile, which would otherwise "prove"
+        that nothing is marked.
+        """
+        if strict:
+            return {int(i) for i in self._strict("maps/get-visited-regions-ids-simple", "ids")}
         return set(self.t.webapi("maps/get-visited-regions-ids-simple").get("ids", []))
 
     def visited_dare_ids(self) -> set[int]:

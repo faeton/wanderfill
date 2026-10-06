@@ -17,8 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..api.client import NomadMania, YearOnly
-from ..api.errors import AccountMismatch, DriftError, UnknownWriteOutcome
+from ..api.client import MARKS_REGION_FROM, NomadMania, YearOnly
+from ..api.errors import (
+    AccountMismatch,
+    DriftError,
+    UnknownWriteOutcome,
+    VerificationFailed,
+)
 from .model import Op, Plan, basis_of, fingerprint, regions_touched
 
 
@@ -221,6 +226,10 @@ def apply_plan(
             "Check those keys against the profile by hand before running this again."
         )
 
+    # What the server answered, per op, for this run only. verify() needs the
+    # trip id a create_trip was given: without it a visit that was already
+    # there is indistinguishable from the one the trip was meant to create.
+    results: dict[str, Any] = {}
     for i, op in enumerate(ops, 1):
         if op.key in already:
             report.skipped += 1
@@ -231,6 +240,7 @@ def apply_plan(
         try:
             result = _execute(client, op)
             ok = True
+            results[op.key] = result
             journal.note(op, result)
             already.add(op.key)
             report.succeeded += 1
@@ -255,14 +265,16 @@ def apply_plan(
         if on_progress:
             on_progress(i, len(ops), op, ok)
 
-    report.verified = verify(client, ops)
+    report.verified = verify(client, ops, results)
     (workdir / f"verify-{stamp}.json").write_text(
         json.dumps(report.verified, indent=1, default=str), encoding="utf-8"
     )
     return report
 
 
-def verify(client: NomadMania, ops: Sequence[Op]) -> dict:
+def verify(
+    client: NomadMania, ops: Sequence[Op], results: dict[str, Any] | None = None
+) -> dict:
     """Re-read what the plan touched and compare it with what the plan intended.
 
     A response saying ``OK`` is not evidence that the profile changed the way you
@@ -275,8 +287,43 @@ def verify(client: NomadMania, ops: Sequence[Op]) -> dict:
     Returns a report rather than raising: by the time this runs the writes have
     already happened, so the useful thing is an accurate account of what is now
     true, including the parts that came out wrong.
+
+    ``results`` maps ``Op.key`` to what the server answered when the op ran.
+    It is how a created trip is told apart from visits that were already
+    there; without it that question goes under ``unproven`` rather than being
+    answered by resemblance. ``unproven`` is for anything the read-back could
+    not establish either way. It is not a pass.
     """
-    out: dict[str, Any] = {"checked": 0, "mismatches": [], "phantom_trips": []}
+    out: dict[str, Any] = {
+        "checked": 0, "mismatches": [], "phantom_trips": [], "not_counted": [], "unproven": [],
+    }
+    results = results or {}
+    marked: list[set[int] | None] = []  # read once, and only if an op needs it
+
+    def counted(region: int, stored: Sequence[int], what: str) -> None:
+        """A stored visit either marks its region, or is a transit that does not."""
+        if not marked:
+            try:
+                marked.append(client.visited_region_ids(strict=True))
+            except VerificationFailed as exc:
+                marked.append(None)
+                out["unproven"].append(
+                    f"the visited list could not be read back ({exc}), so whether the "
+                    "regions written now count is not known"
+                )
+        if marked[0] is None or region in marked[0]:
+            return
+        best = max(stored)
+        if best < MARKS_REGION_FROM:
+            out["not_counted"].append({
+                "region": region, "quality": best,
+                "why": "a transit-quality visit does not mark the region",
+            })
+        else:
+            out["mismatches"].append(
+                f"{what}: the visit is there at quality {best} "
+                "but the region is not in the visited list"
+            )
 
     for op in ops:
         if op.kind == "update_visit":
@@ -316,6 +363,75 @@ def verify(client: NomadMania, ops: Sequence[Op]) -> dict:
             for v in live:
                 if v.trip_id:
                     out["phantom_trips"].append({"region": op.region, "trip_id": v.trip_id})
+            # The stored quality is what counts, not the planned one: a visit
+            # that came back as 0 is "no visit" wearing the plan's dates.
+            if op.quality is not None and any(v.quality != op.quality for v in live):
+                out["mismatches"].append(
+                    f"region {op.region}: stored quality {[v.quality for v in live]}, "
+                    f"planned {op.quality}"
+                )
+            # The visit being there does not mean the region counts. A transit
+            # is stored and returned and leaves the region unmarked, so a plan
+            # that "adds two regions" can honestly move the total by one.
+            if live:
+                counted(op.region, [v.quality for v in live], f"region {op.region}")
+
+        elif op.kind == "create_trip":
+            # One trip, and each region in it carrying exactly one visit. With
+            # the trip id the server answered, the visit is found by ownership,
+            # so one that was already there cannot stand in for it. Without the
+            # id it can only be found by its dates, and that is said out loud.
+            out["checked"] += 1
+            trip = f"trip {op.date_from}..{op.date_to}"
+            trip_id = _trip_id(results.get(op.key))
+            owners: set[int | None] = set()
+            for r in op.regions:
+                region = int(r["id"])
+                visits = client.visits_for_region(region)
+                span = _region_span(r)
+
+                def dates(v) -> tuple[str | None, str | None]:
+                    return _iso_of(v.date_from), _iso_of(v.date_to)
+
+                if trip_id is not None:
+                    mine = [v for v in visits if v.trip_id == trip_id]
+                    found_by = f"owned by trip {trip_id}"
+                else:
+                    want = span or (op.date_from, op.date_to)
+                    mine = [v for v in visits if dates(v) == want]
+                    found_by = f"for {want[0]}..{want[1]}"
+                if not mine:
+                    out["mismatches"].append(f"{trip}: region {region} has no visit {found_by}")
+                    continue
+                if span and any(dates(v) != span for v in mine):
+                    out["mismatches"].append(
+                        f"{trip}: region {region} stored {[dates(v) for v in mine]}, "
+                        f"planned {span[0]}..{span[1]}"
+                    )
+                same = [v for v in visits if dates(v) == dates(mine[0])]
+                if len(same) > 1 or len(mine) > 1:
+                    out["mismatches"].append(
+                        f"{trip}: region {region} now has {max(len(same), len(mine))} visits "
+                        f"for {dates(mine[0])[0]}..{dates(mine[0])[1]} — a duplicate"
+                    )
+                want_quality = r.get("quality")
+                if want_quality is not None and any(v.quality != want_quality for v in mine):
+                    out["mismatches"].append(
+                        f"{trip}: region {region} quality is "
+                        f"{[v.quality for v in mine]}, planned {want_quality}"
+                    )
+                owners |= {v.trip_id for v in mine}
+                counted(region, [v.quality for v in mine], f"{trip}: region {region}")
+            if trip_id is None:
+                if len(owners) > 1 or None in owners:
+                    out["mismatches"].append(
+                        f"{trip}: its visits are not all owned by one trip "
+                        f"(owners: {sorted(owners, key=str)})"
+                    )
+                out["unproven"].append(
+                    f"{trip}: the id the server gave it is not known to this run, so the "
+                    "visits found were matched by date and could predate it"
+                )
 
         elif op.kind == "mark_kye":
             out["checked"] += 1
@@ -337,6 +453,35 @@ def verify(client: NomadMania, ops: Sequence[Op]) -> dict:
 
 def _iso_of(day) -> str | None:
     return day.isoformat() if day else None
+
+
+def _trip_id(result: object) -> int | None:
+    try:
+        return int(result["trip_id"])  # type: ignore[index]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _region_span(r: dict) -> tuple[str, str] | None:
+    """The dates one trip region was planned with, as ``_iso_of`` would print them.
+
+    ``None`` when the plan gave the region no dates of its own. A year with no
+    month or day is a :class:`YearOnly` on the profile, not 1 January, and the
+    wire carries numbers as strings as often as not.
+    """
+    def side(which: str) -> str | None:
+        year, month, day = (r.get(f"{part}_{which}") for part in ("year", "month", "day"))
+        try:
+            if not year:
+                return None
+            if not month or not day:
+                return YearOnly(int(year)).isoformat()
+            return dt.date(int(year), int(month), int(day)).isoformat()
+        except (TypeError, ValueError):
+            return None
+
+    start, end = side("from"), side("to")
+    return (start, end) if start and end else None
 
 
 def _when(text: str | None):

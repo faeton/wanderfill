@@ -882,7 +882,15 @@ def cmd_apply(args) -> int:
     )
     for e in report.errors[:20]:
         print(f"  error: {e}")
-    return 1 if report.failed else 0
+    # Read back from the server, not from the responses. Printed, because a
+    # verify file nobody opens is the habit that lapses.
+    for m in report.verified.get("mismatches", [])[:20]:
+        print(f"  MISMATCH: {m}")
+    for n in report.verified.get("not_counted", []):
+        print(f"  not counted: region {n['region']} — {n['why']} (quality {n['quality']})")
+    for u in report.verified.get("unproven", []):
+        print(f"  UNPROVEN: {u}")
+    return 1 if report.failed or report.verified.get("mismatches") else 0
 
 
 def _visit_snapshot(v) -> dict:
@@ -1254,7 +1262,8 @@ def build_parser() -> argparse.ArgumentParser:
     window = argparse.ArgumentParser(add_help=False)
     window.add_argument("--since",
                         help="YYYY-MM-DD, YYYY, YYYY-MM, or 10y / 18m / 90d back from today")
-    window.add_argument("--until", help="YYYY-MM-DD (default: today)")
+    window.add_argument("--until",
+                        help="YYYY-MM-DD, YYYY or YYYY-MM for its last day (default: today)")
     pick = argparse.ArgumentParser(add_help=False)
     pick.add_argument("--countries", help="only these: codes and groups, e.g. vwp-restricted,cu")
     pick.add_argument("--exclude", help="leave these out, e.g. eea,ch,uk,us (- subtracts)")
