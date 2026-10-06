@@ -166,7 +166,7 @@ ISO: dict[str, tuple[str, ...]] = {
     "MZ": ("Mozambique",),
     "MM": ("Myanmar", "Burma"),
     "NA": ("Namibia",),
-    "NR": ("Nauru",),
+    "NR": ("Nauru", "Naoero"),
     "NP": ("Nepal",),
     "NL": ("Netherlands", "The Netherlands", "Holland"),
     "NZ": ("New Zealand",),
@@ -487,11 +487,20 @@ def build_country_map(country_rows: list[dict], region_rows: dict[int, dict]) ->
     ``flag1`` / ``flag2`` and ``name``. A region whose ``flag1`` is a country is
     in that country. One whose ``flag1`` matches nothing but whose ``flag2``
     does is a **territory** of the ``flag2`` country, labelled with its own
-    name. One that matches neither stays unmapped and is reported, never
-    dropped.
+    name. One that matches neither is placed by the country its own name
+    starts with — ``"Syria - Southwest (Damascus)"`` is in Syria — and only if
+    that fails does it stay unmapped, reported and never dropped.
+
+    The name step is there because the flag join breaks silently. A country
+    can change its flag image before its regions do: on 2026-10-06 Syria the
+    country carried flag 809 while all four Syrian regions still carried 82,
+    so each came out as its own unmapped "country" and ``check --countries
+    vwp-restricted`` answered "Syria: no evidence" whatever the profile held.
+    Only the live 196 are matched, so the Vatican and Greenland are unchanged.
     """
     names = validate(country_rows)
     by_flag = {r["flag"]: r for r in country_rows if r.get("flag")}
+    by_name = {fold(country): code for country, code in names.items()}
     cmap = CountryMap()
     for rid, reg in region_rows.items():
         name = str(reg.get("name") or reg.get("region_name") or f"region {rid}")
@@ -504,4 +513,8 @@ def build_country_map(country_rows: list[dict], region_rows: dict[int, dict]) ->
         if parent is not None:
             code = names[parent["country"]]
             cmap.places[rid] = Place(code, name_of(code), territory=name)
+            continue
+        code = by_name.get(fold(re.split(r"\s+[–-]\s+", name, maxsplit=1)[0]))
+        if code is not None:
+            cmap.places[rid] = Place(code, name_of(code))
     return cmap

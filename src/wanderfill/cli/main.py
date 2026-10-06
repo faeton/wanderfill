@@ -524,7 +524,7 @@ def cmd_history(args) -> int:
         exclude = groups(args.exclude) if getattr(args, "exclude", None) else set()
         home = groups(args.home) if getattr(args, "home", None) else None
         since = hi.parse_when(getattr(args, "since", None), today)
-        until = hi.parse_when(getattr(args, "until", None), today) or today
+        until = hi.parse_when(getattr(args, "until", None), today, end=True) or today
         if q == "where":
             since, until = hi.parse_period(args.period, today)
     except (GroupError, ValueError) as exc:
@@ -1252,7 +1252,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--no-resolve", action="store_true",
                         help="use only the coordinate cache; do not fetch tiles")
     window = argparse.ArgumentParser(add_help=False)
-    window.add_argument("--since", help="YYYY-MM-DD, or 10y / 18m / 90d back from today")
+    window.add_argument("--since",
+                        help="YYYY-MM-DD, YYYY, YYYY-MM, or 10y / 18m / 90d back from today")
     window.add_argument("--until", help="YYYY-MM-DD (default: today)")
     pick = argparse.ArgumentParser(add_help=False)
     pick.add_argument("--countries", help="only these: codes and groups, e.g. vwp-restricted,cu")

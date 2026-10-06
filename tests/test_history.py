@@ -107,6 +107,13 @@ def test_palestine_as_nomadmania_spells_it():
     assert validate([{"country": "Palestinian Territory"}]) == {"Palestinian Territory": "PS"}
 
 
+def test_nauru_as_nomadmania_spells_it_since_october_2026():
+    # The live list said "Nauru" in August 2026 and "Naoero" by October; the
+    # first real run of `history` stopped on it.
+    assert validate([{"country": "Naoero"}]) == {"Naoero": "NR"}
+    assert parse_groups("Nauru") == {"NR"}
+
+
 def test_territory_by_second_flag():
     countries = [{"country": "Denmark", "flag": "dk"}, {"country": "Spain", "flag": "es"}]
     regions = {
@@ -119,6 +126,23 @@ def test_territory_by_second_flag():
     assert m.place(11).territory == "Greenland" and m.place(11).iso == "DK"
     # unmapped is kept, loudly, never dropped
     assert m.place(12).iso == "??" and "Nowhere" in m.place(12).country
+
+
+def test_syria_changed_its_flag_before_its_regions_did():
+    # Live on 2026-10-06: the country row had flag 809, the four regions 82,
+    # and an ESTA check said "Syria: no evidence" for any Syrian visit.
+    countries = [{"country": "Syria", "flag": "809"}, {"country": "Russia", "flag": "58"}]
+    regions = {
+        1588: {"name": "Syria - Southwest (Damascus, Dara'a)", "flag1": "82", "flag2": None},
+        1298: {"name": "Russia – Franz Josef Land", "flag1": "306", "flag2": None},
+        86: {"name": "Vatican", "flag1": "247", "flag2": None},
+        1294: {"name": "Greenland – Northeast NP (Kulusuk)", "flag1": "185", "flag2": None},
+    }
+    m = build_country_map(countries, regions)
+    assert m.place(1588) == Place("SY", "Syria")
+    assert m.place(1298) == Place("RU", "Russia")
+    # not one of the live countries by name: still unmapped, still listed
+    assert m.place(86).iso == "??" and m.place(1294).iso == "??"
 
 
 # ------------------------------------------------------------------- ledger
@@ -462,6 +486,14 @@ def test_relative_dates():
     assert h.parse_when("1y", D(2024, 2, 29)) == D(2023, 2, 28)
     assert h.parse_period("2024-02", today) == (D(2024, 2, 1), D(2024, 2, 29))
     assert h.parse_period("2024-03-01..2024-04-15", today) == (D(2024, 3, 1), D(2024, 4, 15))
+
+
+def test_since_takes_a_bare_year_as_the_spec_says():
+    # `history list --since 2016` is in the design spec and died on fromisoformat.
+    today = D(2026, 10, 6)
+    assert h.parse_when("2016", today) == D(2016, 1, 1)
+    assert h.parse_when("2016", today, end=True) == D(2016, 12, 31)
+    assert h.parse_when("2024-02", today, end=True) == D(2024, 2, 29)
 
 
 def test_render_markdown_has_header_and_notes():

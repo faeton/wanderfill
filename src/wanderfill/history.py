@@ -1188,12 +1188,21 @@ def render_text(report: Report, limit: int = 60) -> str:
 # ------------------------------------------------------------------ dates
 
 
-def parse_when(text: str | None, today: dt.date | None = None) -> dt.date | None:
-    """ISO date, or ``10y`` / ``18m`` / ``90d`` back from today."""
+def parse_when(
+    text: str | None, today: dt.date | None = None, *, end: bool = False
+) -> dt.date | None:
+    """ISO date, ``10y`` / ``18m`` / ``90d`` back from today, or a bare year or month.
+
+    ``2016`` and ``2016-03`` mean the first day of that period, or the last one
+    with ``end=True`` — ``--since 2016`` starts on 1 January, ``--until 2016``
+    stops on 31 December.
+    """
     if not text:
         return None
     today = today or dt.date.today()
     t = text.strip().lower()
+    if (len(t) == 4 and t.isdigit()) or (len(t) == 7 and t[4] == "-"):
+        return parse_period(t, today)[1 if end else 0]
     if t[:-1].isdigit() and t[-1] in "ymd":
         n = int(t[:-1])
         if t[-1] == "d":
