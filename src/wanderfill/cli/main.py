@@ -11,6 +11,7 @@ The command set encodes the safety model rather than merely documenting it:
     show       print a plan for a human to read
     apply      execute a plan file, and only a plan file
     share      draw your UN / UN+ / NM numbers as an image. Reads only.
+    history    where was I, and when: visa forms, ESTA, tax days, absences. Reads only.
 
 There is deliberately no command that computes and writes in one step.
 
@@ -43,6 +44,10 @@ from ..evidence import (
 )
 
 DEFAULT_WORKDIR = Path.home() / ".local" / "share" / "wanderfill"
+# Kept here rather than imported so ``--help`` does not load the history module.
+TAX_YEAR_CHOICES = (
+    "calendar", "uk", "au", "nz", "in", "za", "us", "es", "pt", "de", "fr", "it", "nl",
+)
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
@@ -122,6 +127,57 @@ def _client(args) -> NomadMania:
     if source != "NM_TOKEN in the environment" and not getattr(args, "quiet", False):
         print(f"token from {source}", file=sys.stderr)
     return NomadMania(token)
+
+
+def _resolve_coords(args, catalogue: dict, coords) -> dict:
+    """Coordinates -> :class:`Resolution`, through the shared cache.
+
+    ``evidence`` and ``history`` both resolve a library against the live
+    polygons, and both must read and write the cache the same way — a cache
+    built at one zoom and read at another mixes two answers silently.
+    Uses ``args.cache``, ``args.zoom``, ``args.tolerance`` and
+    ``args.no_resolve``.
+    """
+    from ..geo.resolve import (
+        RegionResolver,
+        coord_map_params,
+        load_coord_map,
+        save_coord_map,
+        valid_only,
+    )
+
+    cache_path = Path(args.cache)
+    settings = {"zoom": args.zoom, "tolerance_deg": args.tolerance}
+    known = load_coord_map(cache_path) if cache_path.exists() else {}
+    was = coord_map_params(cache_path) if cache_path.exists() else {}
+    if known and was and was != settings:
+        print(
+            f"cache was built at {was} and you asked for {settings} — "
+            "re-resolving everything rather than mixing two answers",
+            file=sys.stderr,
+        )
+        known = {}
+    # A cache outlives catalogues: regions get split and renumbered.
+    known = valid_only(known, catalogue)
+    todo = [c_ for c_ in coords if c_ not in known]
+    if todo and not args.no_resolve:
+        resolver = RegionResolver(catalogue, zoom=args.zoom, tolerance_deg=args.tolerance)
+        print(
+            f"resolving {len(todo):,} coordinates against the live polygons "
+            f"(tiles are cached; the first run is the slow one)...",
+            file=sys.stderr,
+        )
+
+        def tick(i, total):
+            if i % 200 == 0 or i == total:
+                print(f"  {i:,}/{total:,}", file=sys.stderr)
+
+        known.update(resolver.resolve_many(todo, on_progress=tick))
+        save_coord_map(cache_path, known, settings)
+        print(f"cache: {cache_path}", file=sys.stderr)
+    elif todo:
+        print(f"{len(todo):,} coordinates are unresolved and --no-resolve is set", file=sys.stderr)
+    return known
 
 
 # ---------------------------------------------------------------- commands
@@ -245,11 +301,7 @@ def cmd_evidence(args) -> int:
     )
     from ..geo.resolve import (
         RegionResolver,
-        coord_map_params,
-        load_coord_map,
-        save_coord_map,
         small_regions,
-        valid_only,
     )
     from ..sources.photos_app import DEFAULT_LIBRARY, PhotosAppSource
 
@@ -283,37 +335,7 @@ def cmd_evidence(args) -> int:
     coords = sorted({a.key for a in assets})
     print(f"{len(assets):,} photos, {len(coords):,} distinct coordinates", file=sys.stderr)
 
-    cache_path = Path(args.cache)
-    settings = {"zoom": args.zoom, "tolerance_deg": args.tolerance}
-    known = load_coord_map(cache_path) if cache_path.exists() else {}
-    was = coord_map_params(cache_path) if cache_path.exists() else {}
-    if known and was and was != settings:
-        print(
-            f"cache was built at {was} and you asked for {settings} — "
-            "re-resolving everything rather than mixing two answers",
-            file=sys.stderr,
-        )
-        known = {}
-    # A cache outlives catalogues: regions get split and renumbered.
-    known = valid_only(known, catalogue)
-    todo = [c_ for c_ in coords if c_ not in known]
-    if todo and not args.no_resolve:
-        resolver = RegionResolver(catalogue, zoom=args.zoom, tolerance_deg=args.tolerance)
-        print(
-            f"resolving {len(todo):,} coordinates against the live polygons "
-            f"(tiles are cached; the first run is the slow one)...",
-            file=sys.stderr,
-        )
-
-        def tick(i, total):
-            if i % 200 == 0 or i == total:
-                print(f"  {i:,}/{total:,}", file=sys.stderr)
-
-        known.update(resolver.resolve_many(todo, on_progress=tick))
-        save_coord_map(cache_path, known, settings)
-        print(f"cache: {cache_path}", file=sys.stderr)
-    elif todo:
-        print(f"{len(todo):,} coordinates are unresolved and --no-resolve is set", file=sys.stderr)
+    known = _resolve_coords(args, catalogue, coords)
 
     shots_by_region: dict[int, list[Shot]] = {}
     unplaced = 0
@@ -462,6 +484,156 @@ def cmd_evidence(args) -> int:
     print(
         "\nThis wrote nothing to NomadMania. Nothing here is a claim — it is an "
         "index of what you can already back up."
+    )
+    return 0
+
+
+def cmd_history(args) -> int:
+    """Where was I, and when — for a visa form, ESTA, a tax year, or plain recall.
+
+    Read-only on NomadMania: the country list, the region catalogue and flags,
+    and every visit record (standalone and trip-owned). Reads the Photos
+    library and/or a track file locally. Writes ``history-<query>.md``,
+    ``.csv`` and ``.json`` into ``--out`` and nothing else, anywhere.
+
+    The output is a dated movement history. It stays on this machine; the
+    person copies from it into the form themselves.
+    """
+    from .. import history as hi
+    from ..countries import GroupError, UnmappedCountries, build_country_map, groups_used
+    from ..countries import parse_groups as groups
+
+    today = dt.date.today()
+    q = args.query
+    try:
+        include = groups(args.countries) if getattr(args, "countries", None) else None
+        exclude = groups(args.exclude) if getattr(args, "exclude", None) else set()
+        home = groups(args.home) if getattr(args, "home", None) else None
+        since = hi.parse_when(getattr(args, "since", None), today)
+        until = hi.parse_when(getattr(args, "until", None), today) or today
+        if q == "where":
+            since, until = hi.parse_period(args.period, today)
+    except (GroupError, ValueError) as exc:
+        sys.exit(f"history: {exc}")
+    if q == "check" and not include:
+        sys.exit("history check: --countries is required, e.g. --countries vwp-restricted")
+    if since and since > until:
+        sys.exit(f"history: the window starts ({since}) after it ends ({until})")
+
+    c = _client(args)
+    print("reading the country list and region catalogue...", file=sys.stderr)
+    catalogue = c.regions()
+    flags = c.region_years()
+    rows = {rid: {**catalogue.get(rid, {}), **flags.get(rid, {})} for rid in {*catalogue, *flags}}
+    try:
+        cmap = build_country_map(c.countries(), rows)
+    except UnmappedCountries as exc:
+        sys.exit(f"history: {exc}")
+
+    points: list[hi.Point] = []
+    if not args.no_photos:
+        from ..sources.photos_app import DEFAULT_LIBRARY, PhotosAppSource
+
+        library = Path(args.library) if args.library else DEFAULT_LIBRARY
+        if library.exists():
+            print(f"reading {library}...", file=sys.stderr)
+            for a in PhotosAppSource(library=library).assets():
+                points.append(hi.Point(a.date, a.lat, a.lon, None, "photos", a.uuid, a.taken))
+        elif args.library:
+            sys.exit(f"history: no Photos library at {library}")
+    if args.track:
+        from ..sources.files import load
+
+        for i, p_ in enumerate(load(args.track).points):
+            points.append(hi.Point(p_.date, p_.lat, p_.lon, None, "track", f"track:{i}"))
+
+    if points:
+        coords = sorted({(round(p_.lat, 3), round(p_.lon, 3)) for p_ in points})
+        print(f"{len(points):,} points, {len(coords):,} distinct coordinates", file=sys.stderr)
+        known = _resolve_coords(args, catalogue, coords)
+
+        def region(p_):
+            r = known.get((round(p_.lat, 3), round(p_.lon, 3)))
+            return r.region if r is not None else None
+
+        points = [
+            hi.Point(p_.date, p_.lat, p_.lon, region(p_), p_.source, p_.ref, p_.at)
+            for p_ in points
+        ]
+
+    visits = []
+    if not args.no_profile:
+        claimed = sorted(c.visited_region_ids())
+        print(f"reading every visit record for {len(claimed)} regions...", file=sys.stderr)
+        for i, rid in enumerate(claimed, 1):
+            visits.extend(c.visits_for_region(rid))
+            if i % 100 == 0:
+                print(f"  {i}/{len(claimed)}", file=sys.stderr)
+
+    if not points and not visits:
+        sys.exit("history: no sources — give --track, a Photos library, or drop --no-profile")
+
+    ledger = hi.build_ledger(points, visits, cmap, bridge=args.bridge, fast_kmh=args.fast_kmh)
+    territories = args.territories or hi.DEFAULT_TERRITORIES.get(q, "separate")
+
+    if q == "absences" and not home:
+        homes = {cmap.place(r).iso for r in c.home_regions()} - {"??"}
+        if not homes:
+            sys.exit("history absences: give --home; the profile has no homebase set")
+        home = homes
+        print(f"home from your NomadMania homebase: {', '.join(sorted(home))}", file=sys.stderr)
+
+    used = groups_used(getattr(args, "countries", None)) + groups_used(
+        getattr(args, "exclude", None)) + groups_used(getattr(args, "home", None))
+    hdr = hi.header(
+        ledger, command="wanderfill " + " ".join(getattr(args, "argv", None) or ["history", q]),
+        since=since, until=until, territories=territories,
+        groups=hi.describe_groups(dict.fromkeys(used)), today=today,
+    )
+    if q == "days":
+        start = None
+        if args.tax_year_start:
+            m, d = (int(x) for x in args.tax_year_start.split("-"))
+            start = (m, d)
+        report = hi.query_days(
+            ledger, year=args.year or today.year, scheme=args.tax_year, start=start,
+            territories=territories, today=today, hdr=hdr,
+        )
+    elif q == "absences":
+        report = hi.query_absences(
+            ledger, home=home, since=since or hi.parse_when("5y", today), until=until,
+            territories=territories, hdr=hdr,
+        )
+    elif q == "check":
+        report = hi.query_check(
+            ledger, countries=include, since=since, until=until, territories=territories, hdr=hdr,
+        )
+    elif q == "where":
+        report = hi.query_where(
+            ledger, since=since, until=until, by=args.by, territories=territories, hdr=hdr,
+        )
+    else:
+        report = hi.query_trips(
+            ledger, since=since, until=until, include=include, exclude=exclude,
+            first=getattr(args, "first", False), territories=territories, hdr=hdr,
+            title="every trip" if q == "list" else "trips",
+        )
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = out / f"history-{q}"
+    stem.with_suffix(".md").write_text(hi.render_markdown(report), encoding="utf-8")
+    stem.with_suffix(".csv").write_text(hi.render_csv(report), encoding="utf-8")
+    stem.with_suffix(".json").write_text(
+        json.dumps(hi.render_json(report), indent=1, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    print(f"sources: {ledger.coverage_text()}")
+    print(hi.render_text(report))
+    print(f"\nwrote {stem}.md, .csv and .json")
+    print(
+        "This wrote nothing to NomadMania. It is a draft for you to check and copy — "
+        "it does not decide what a form counts as a visit."
     )
     return 0
 
@@ -788,6 +960,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ev.set_defaults(func=cmd_evidence)
 
+    hs = sub.add_parser(
+        "history",
+        help="read-only: where was I, and when — visa forms, ESTA, tax days, absences",
+        description=(
+            "Answer travel-history questions from your profile and your location "
+            "history, cross-checked. Writes local files only."
+        ),
+    )
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--track", help="CSV/GPX/GeoJSON day-level track")
+    common.add_argument("--library", help="path to a .photoslibrary (default: the standard one)")
+    common.add_argument("--no-photos", action="store_true", help="do not read the Photos library")
+    common.add_argument("--no-profile", action="store_true", help="do not read NomadMania visits")
+    common.add_argument("--bridge", type=int, default=7,
+                        help="fill same-country gaps of up to N days, labelled 'bridged' (0 = off)")
+    common.add_argument("--fast-kmh", type=float, default=200.0,
+                        help="timed points faster than this are treated as airborne")
+    common.add_argument("--territories", choices=("separate", "sovereign"),
+                        help="list territories (Greenland, Canaries…) on their own, or fold "
+                             "them into the sovereign (default: separate; sovereign for "
+                             "days and absences)")
+    common.add_argument("--out", default="history", help="directory for the output files")
+    common.add_argument("--cache", default=str(DEFAULT_WORKDIR / "coords.json"))
+    common.add_argument("--zoom", type=int, default=10)
+    common.add_argument("--tolerance", type=float, default=0.30)
+    common.add_argument("--no-resolve", action="store_true",
+                        help="use only the coordinate cache; do not fetch tiles")
+    window = argparse.ArgumentParser(add_help=False)
+    window.add_argument("--since", help="YYYY-MM-DD, or 10y / 18m / 90d back from today")
+    window.add_argument("--until", help="YYYY-MM-DD (default: today)")
+    pick = argparse.ArgumentParser(add_help=False)
+    pick.add_argument("--countries", help="only these: codes and groups, e.g. vwp-restricted,cu")
+    pick.add_argument("--exclude", help="leave these out, e.g. eea,ch,uk,us (- subtracts)")
+
+    hsub = hs.add_subparsers(dest="query", required=True)
+    w = hsub.add_parser("where", parents=[common], help="a timeline of one period")
+    w.add_argument("period", help="2024-03-01..2024-04-15, 2024-03, or 2024")
+    w.add_argument("--by", choices=("region", "country"), default="region")
+    t = hsub.add_parser("trips", parents=[common, window, pick],
+                        help="countries with entry/exit dates (visa forms)")
+    t.add_argument("--first", action="store_true", help="only the first trip to each country")
+    hsub.add_parser("check", parents=[common, window, pick],
+                    help="yes / no evidence for named countries (ESTA)")
+    d = hsub.add_parser("days", parents=[common], help="days present per country in a tax year")
+    d.add_argument("--year", type=int, help="the year the tax year starts in (default: this year)")
+    d.add_argument("--tax-year", default="calendar", choices=sorted(TAX_YEAR_CHOICES))
+    d.add_argument("--tax-year-start", help="MM-DD, for a tax year not in the list")
+    a_ = hsub.add_parser("absences", parents=[common, window],
+                         help="time away from a home country (residence, citizenship)")
+    a_.add_argument("--home", help="home country code (default: your NomadMania homebase)")
+    hsub.add_parser("list", parents=[common, window, pick], help="every trip, chronologically")
+    hs.set_defaults(func=cmd_history)
+
     sh = sub.add_parser("show", help="print a plan file")
     sh.add_argument("plan")
     sh.add_argument("-v", "--verbose", action="store_true")
@@ -841,6 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    args.argv = list(argv) if argv is not None else sys.argv[1:]
     try:
         return args.func(args)
     except WanderfillError as exc:

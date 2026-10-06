@@ -394,6 +394,83 @@ Two things to hold to:
   Kosovo, Taiwan and Palestine, named in `NON_UN` and checked on every run.
   If the check fails, the list changed — read it before touching the constant.
 
+## 6c. Travel history — answering a form somebody else wrote
+
+`wanderfill history` answers questions from outside NomadMania: visa forms,
+ESTA, tax residency, residence and citizenship applications, and plain "where
+was I in March 2024". It is **read-only on the server** and needs no plan. Use
+it when somebody pastes a form question and asks you to help answer it.
+
+**The asymmetry flips here.** Everywhere else in this file the danger is
+claiming too much. On a visa form the danger is leaving something out:
+omission is "deception", and a UK refusal for deception can carry a ten-year
+ban. Rules 6 and 7 still hold in full — nothing gets invented either. So the
+whole job is presenting uncertainty, never resolving it.
+
+**1. Quote the question, then map it — out loud.** Pick the query by the unit
+the question asks for, and show the person the command *and* the expanded
+groups before showing them the answer. They are checking the mapping as much
+as the result: whether "EU/EEA" in their form includes Switzerland (it does not
+— that is `efta`), whether "the last ten years" means from today or from the
+application date.
+
+| the form asks | query |
+|---|---|
+| countries visited, with dates | `history trips --since 10y --exclude …` |
+| first trip to each country | `history trips … --first` |
+| "have you been to X since …?" | `history check --countries X --since …` |
+| days in a country in a tax year | `history days --year … --tax-year …` |
+| time away from one country | `history absences --home …` |
+| where was I in a period | `history where <period>` |
+
+Groups: `eu`, `eea`, `efta`, `schengen`, `cta`, `uk-form`, `vwp-restricted`,
+`five-eyes`, `gcc`, `asean`, `mercosur`, `cis`, `commonwealth`, `un`, `un+`.
+They mix with ISO codes and names, and `-` subtracts: `eea,ch,uk,us,-ie`.
+Membership changes — Croatia joined Schengen in 2023, Bulgaria and Romania in
+2025 — and every output prints the `as_of`. If the form's window predates a
+change, say so.
+
+**2. Never drop a row to make the answer tidier.** Three kinds look droppable
+and none of them are:
+
+- **CHECK** — a profile visit with only a year, or no date. Present it. Ask
+  what the person independently remembers; "I don't know" is a final answer,
+  and the form then gets "approximately" or the year, not a date you chose.
+- **probably overflight or transit** — seen only at aircraft speed. Some forms
+  count an airside layover, most do not. That is the person's call.
+- **territories** — Greenland, the Canaries, Hong Kong. Kept by default even
+  when the sovereign is excluded. Whether the form counts them is the
+  person's call.
+
+**3. Never fill an open edge.** "Entered between Mar 3 and Mar 9" stays a
+range. Do not ask "so, the 5th?" — that is rule 7, and a yes to a date you
+proposed is still your date. `bridged` days are labelled for the same reason:
+they are a reasonable reading of a same-country gap, not an observation, and
+the person should know which days are which.
+
+**4. Read the coverage line before saying "no".** `check` prints "no evidence
+in sources covering 2018 → 2026". If the question is about 2011 and the
+library starts in 2018, the honest answer is "the sources cannot see that", and
+you say so. A source that cannot see a year is not evidence of absence (§4).
+
+**5. Disagreement is a report.** When the profile and the photos give
+different dates for a trip, show both. Correcting the profile is a write and
+goes through §7 — it is not something to do on the way to a visa form.
+
+**6. Do not say "you're fine".** Tax residency, the 183-day test and absence
+limits for residence or citizenship are decided by law and by the authority.
+Report counts and margins — `days` prints "could reach 183: 175 counted + 12
+days with no data" for exactly this reason — and stop there.
+
+**7. Never type into the form and never submit it.** The output is a draft the
+person reads and copies. They sign the declaration.
+
+**8. The output stays here.** `history/` is a dated record of where somebody
+slept. Do not paste it into another model, a gist, an issue or a message, and
+do not move it out of the gitignored directory.
+
+---
+
 ## 7. The plan-then-apply protocol
 
 Produce a plan file. Show a summary table. Wait for a yes. Then apply.

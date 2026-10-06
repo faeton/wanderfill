@@ -30,3 +30,6 @@ share/
 # Your own account's work: tracks, caches, plans, logs, applied records.
 # Never goes to GitHub. See workspace/WORKSPACE.md.
 workspace/
+
+# `history` writes a dated movement history: where you were, day by day.
+history/

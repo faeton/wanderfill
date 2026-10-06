@@ -189,6 +189,55 @@ map; without it the card is numbers only. Fonts come from the machine — the
 faces macOS ships with, then the common Linux ones, then Pillow's built-in
 one — or pass `--font`.
 
+## Answering travel-history questions
+
+The same history answers questions other people ask you. A UK visa form wants
+"countries visited in the last ten years, excluding the EEA, Switzerland, the
+US…, with the date of the first trip". ESTA wants a yes or no on Iran since
+2011. A tax adviser wants days per country in a tax year.
+
+```bash
+# where was I?
+wanderfill history where 2024-03-01..2024-04-15 --track track.csv
+
+# a visa form: first trip to each country in ten years, excluding a list
+wanderfill history trips --since 10y --exclude uk-form,uk --first --track track.csv
+
+# ESTA: the VWP-restricted list since 1 March 2011
+wanderfill history check --countries vwp-restricted --since 2011-03-01
+
+# days present per country in the UK tax year 2025/26
+wanderfill history days --year 2025 --tax-year uk
+
+# absences from a home country, five years back
+wanderfill history absences --home ES --since 5y
+```
+
+It reads every visit on your profile *and* the photo library or track, and
+lists each trip with what each source says, so you can see where they
+disagree. Country groups mix with codes and subtract (`eea,ch,-ie`), and
+every run prints exactly which countries a group expanded to and as of when.
+
+It is built for a form that is a **legal declaration**, where leaving a
+country out is the dangerous mistake:
+
+- A profile visit with only a year, or no date at all, is listed as **CHECK**
+  — never dropped, never given an invented date.
+- A country seen only at aircraft speed goes on a separate
+  "overflight — you decide" list.
+- "No" is never bare: it is "no evidence in sources covering 2018 → 2026".
+- A short gap with the same country on both sides is filled and labelled
+  `bridged`; a gap between two countries is left open ("left between Mar 3
+  and Mar 9") rather than guessed.
+- Territories (Greenland, the Canaries, Hong Kong…) are listed on their own
+  by default and are not removed by excluding their sovereign — Greenland is
+  Danish and not in the EEA.
+
+Output lands in `history/` as Markdown, CSV and JSON. It is a dated record of
+where you sleep: it stays on your machine, and it is gitignored. It does not
+fill in or submit any form, and it does not decide what a form counts as a
+visit — you sign the declaration, not the tool.
+
 ## Risks — read this part
 
 - This uses NomadMania's **undocumented internal API**. It can break at any time,
@@ -283,6 +332,9 @@ wanderfill evidence --check-dates --out evidence
 
 # read-only: your UN / UN+ / NM numbers as a story, a square and a link card
 wanderfill share --size all --out share
+
+# read-only: travel history for a visa form, ESTA, a tax year or plain recall
+wanderfill history trips --since 10y --exclude uk-form,uk --first
 
 # see what each trip-segmentation setting produces before choosing one
 wanderfill sweep track.csv regions.json
