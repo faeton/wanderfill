@@ -180,9 +180,12 @@ the endpoints the site reads them from, never derived here. Files land in
 `share/` with a `stats.json` saying exactly what the picture claims. Nothing
 is posted anywhere; the command has no way to.
 
-UN is the 193 member states. UN+ is NomadMania's list of 196: the 193 plus
-Kosovo, Taiwan and Palestine, named in the code and checked against the
-list on every run, so a renamed row fails rather than shifting the count.
+UN is the 193 member states. UN+ is NomadMania's "UN countries and
+territories", 265 of them — Hong Kong, Gibraltar, Greenland and Abkhazia each
+count on their own. Every number on the card is `score_*` from
+`profile/get-profile-data`, the request the profile page itself makes. An
+earlier version counted UN+ from the 196-row SLOW/YES country list and put
+104 on the card of a profile showing 121; nothing here recomputes a score now.
 
 Needs Pillow (`pip install "wanderfill[share]"`), and the `geo` extra for the
 map; without it the card is numbers only. Fonts come from the machine — the
@@ -251,6 +254,37 @@ Output lands in `history/` as Markdown, CSV and JSON. It is a dated record of
 where you sleep: it stays on your machine, and it is gitignored. It does not
 fill in or submit any form, and it does not decide what a form counts as a
 visit — you sign the declaration, not the tool.
+
+## On a slow connection
+
+Nomads are routinely on hotel wifi and roaming data, so the read-only commands
+— `history`, `evidence`, `share` — are built to spend little and to say what
+they spent:
+
+- **Every request asks for gzip.** The region catalogue is 173 KB plain and
+  42 KB compressed; the country list 48 KB and 8 KB.
+- **A local cache** in `~/.local/share/wanderfill/cache` holds the region
+  catalogue for 30 days (NomadMania changes it a few times a year) and your
+  visit records per region. A region's records are reused only while its live
+  summary — visit count, first and last year, best quality — is unchanged, and
+  for at most 7 days. That summary misses some edits: a date moved, or a visit
+  deleted and another added in the same year. So the visit cache is **on for
+  `history where`** (recall) and **off for the form queries** — `trips`,
+  `check`, `days`, `absences`, `list` read every record live unless you pass
+  `--cached`. When it is used, the report says so in its header.
+- **Bulk reads go four at a time.** A slow link costs ~0.9 s of latency per
+  request whatever its size, and the history needs one per region you have
+  visited. Writes stay one at a time, at human pace, and are never retried.
+- **Progress every couple of seconds** on stderr, `-v` for every request, and a
+  closing `network: N requests, X KB` line.
+
+`plan`, `apply`, `check`, `delete` and `export` never use the cache: a drift
+check, a deletion read-back or a rollback reference read from a cache would
+pass for the wrong reason. A test fails if a cache reaches any of them.
+
+If the tiles name a region the cached catalogue does not have, the catalogue
+is treated as stale and read again, rather than filing those points as
+"unresolved".
 
 ## Risks — read this part
 
@@ -473,6 +507,9 @@ cost a wrong write or a wrong number the first time.
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |
 | `location/get-region` doubles as a live-location beacon | `share=0` is hardcoded, not a parameter |
+| UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
+| A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |
+| urllib asks for no compression, and the catalogue is 173 KB plain | Every request sends `Accept-Encoding: gzip`; `_inflate` also sniffs the magic bytes |
 
 ## KYE: the one list with no judgement call in the geometry
 

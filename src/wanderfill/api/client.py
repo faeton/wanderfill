@@ -22,12 +22,19 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
+from .cache import ReadCache, summary_of
 from .errors import ApiError, PrecisionLoss, VerificationFailed
 from .transport import Transport
+
+# Bulk reads run this many at a time. On a slow link the cost is round-trip
+# latency, not bandwidth, so four in flight is roughly four times faster.
+# Writes never go through this path: see ``_many``.
+READ_WORKERS = 4
 
 # What the server scores a country that is marked visited but carries no year.
 # The published rule only covers "never visited" (your age); this value was
@@ -202,8 +209,38 @@ class Visit:
 class NomadMania:
     """Thin, honest wrapper over both surfaces."""
 
-    def __init__(self, token: str, *, lang: str = "en", transport: Transport | None = None):
+    def __init__(
+        self,
+        token: str,
+        *,
+        lang: str = "en",
+        transport: Transport | None = None,
+        cache: ReadCache | None = None,
+    ):
         self.t = transport or Transport(token=token, lang=lang)
+        # Only the read-only commands pass one. See api/cache for why.
+        self.cache = cache
+        # ``progress(label, done, total)`` for bulk reads; the CLI throttles it.
+        self.progress: Callable[[str, int, int], None] | None = None
+
+    def _many(self, label: str, fn: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
+        """``fn`` over ``items`` on a small thread pool, in order, reporting progress.
+
+        Reads only. A write must never come through here: the write path is
+        sequential by design, so that a lost answer is one unknown outcome and
+        not four.
+        """
+        total = len(items)
+        out: list[Any] = [None] * total
+        if not total:
+            return out
+        with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
+            futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+            for done, fut in enumerate(as_completed(futures), 1):
+                out[futures[fut]] = fut.result()
+                if self.progress:
+                    self.progress(label, done, total)
+        return out
 
     # ------------------------------------------------------------------ who
 
@@ -221,6 +258,21 @@ class NomadMania:
     def settings(self) -> dict:
         """Account settings, including the user's declared home regions."""
         return self.t.webapi("user/get-settings")
+
+    def profile(self, profile_id: int) -> dict:
+        """A profile page's data, as ``nomadmania.com/profile/<id>`` draws it.
+
+        ``scores`` here are **the numbers on the profile**: ``score_un``,
+        ``score_unp`` (UN+), ``score_nm``, ``score_mqp`` (DARE), ``score_kye``,
+        ``score_tcc``, ``score_yes``, ``score_slow*``, ``rank_nm`` and
+        ``rank_country``. Quote these rather than recomputing them.
+
+        UN+ in particular cannot be recomputed from ``countries()``: that list
+        is the 196 SLOW/YES countries, while UN+ is NomadMania's 265 "UN
+        countries and territories". Counting visited rows of the 196 gave 104
+        on a profile whose page said 121, and that number went on a card.
+        """
+        return self.t.webapi("profile/get-profile-data", profile_id=int(profile_id))["data"]
 
     def account_id(self) -> int:
         """The uid a plan is bound to. Applying a plan under a different uid is refused."""
@@ -246,8 +298,12 @@ class NomadMania:
 
     def regions(self) -> dict[int, dict]:
         """The live catalogue. Any id absent from here is stale — see geo.resolve."""
-        data = self.t.webapi("regions/get-regions-list-2")
-        return {int(k): v for k, v in data["data"].items()}
+        data = self.cache.catalogue() if self.cache else None
+        if data is None:
+            data = self.t.webapi("regions/get-regions-list-2")["data"]
+            if self.cache:
+                self.cache.put_catalogue(data)
+        return {int(k): v for k, v in data.items()}
 
     def megaregions(self) -> Any:
         return self.t.webapi("regions/get-megaregions")
@@ -381,10 +437,13 @@ class NomadMania:
         The payload nests one level deeper than the sibling endpoints
         (``data.regions``, alongside ``data.dare`` and ``data.tcc``).
         """
-        out: dict[int, dict] = {}
-        for mega in range(29):
+        def one(mega: int) -> list[dict]:
             data = self.t.webapi("quickEnter/get-regions", megaregion=mega).get("data") or {}
-            for r in data.get("regions") or []:
+            return data.get("regions") or []
+
+        out: dict[int, dict] = {}
+        for rows in self._many("region summaries", one, list(range(29))):
+            for r in rows:
                 out[int(r["id"])] = r
         return out
 
@@ -397,6 +456,51 @@ class NomadMania:
         """
         data = self.t.webapi("quickEnter/get-visits-to-region", region=region)
         return [Visit.from_api(v, region) for v in data.get("data", [])]
+
+    def visits_for_regions(
+        self,
+        regions: Iterable[int],
+        *,
+        summaries: dict[int, dict] | None = None,
+        account: int | None = None,
+    ) -> dict[int, list[Visit]]:
+        """Every visit for many regions: from the cache where it still vouches, else live.
+
+        A cached region is reused only while its row in ``summaries`` (a
+        ``region_years()`` result) matches the row it was saved under. That
+        catches an added or removed visit and a change of year or quality. It
+        does **not** catch a date moved inside the same year, which is why the
+        cache also expires and why ``history`` prints its age into the report.
+        Without ``summaries``, ``account`` or a cache, everything is read live.
+        """
+        regions = sorted(set(regions))
+        sigs = {r: summary_of((summaries or {}).get(r)) for r in regions}
+        cached: dict[int, list[dict]] = {}
+        if self.cache and summaries is not None and account is not None:
+            cached = self.cache.visits(account, sigs)
+        todo = [r for r in regions if r not in cached]
+
+        def one(region: int) -> list[dict]:
+            # Strict: a reply without its list is an error, never "no visits".
+            # Read as empty, it would be cached and vouched for by the summary.
+            return self._strict("quickEnter/get-visits-to-region", "data", region=region)
+
+        fresh = dict(zip(todo, self._many("visit records", one, todo), strict=True))
+        if self.cache and summaries is not None and account is not None and fresh:
+            # Never cache an answer the summary contradicts: it says visits
+            # exist and the list came back empty. Use it this once; ask again.
+            keep = {
+                r: rows for r, rows in fresh.items()
+                if rows or not ((summaries.get(r) or {}).get("no_of_visits"))
+            }
+            self.cache.put_visits(account, keep, sigs)
+        if self.cache and cached:
+            self.cache.notes.append(
+                f"visit records: {len(cached)} of {len(regions)} regions from cache, "
+                f"{len(fresh)} read live"
+            )
+        raw = {**cached, **fresh}
+        return {r: [Visit.from_api(v, r) for v in raw[r]] for r in regions}
 
     # ----------------------------------------------------------- geocoding
 

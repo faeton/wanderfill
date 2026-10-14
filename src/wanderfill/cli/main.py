@@ -36,9 +36,11 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from .. import __version__
+from ..api.cache import VISITS_MAX_AGE
 from ..api.client import QUALITY, NomadMania, YearOnly, _iso
 from ..api.errors import ApiError, PrecisionLoss, VerificationFailed, WanderfillError
 from ..evidence import (
@@ -121,7 +123,36 @@ def find_token() -> tuple[str, str]:
     return "", ""
 
 
-def _client(args) -> NomadMania:
+_CLIENTS: list[NomadMania] = []
+
+
+def _progress_printer():
+    """A ``progress(label, done, total)`` that speaks every ~2 s, and once at the end.
+
+    Line-buffered to stderr so it shows even when stdout is piped somewhere.
+    """
+    last = {"t": 0.0}
+    started = time.monotonic()
+
+    def show(label: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if done < total and now - last["t"] < 2.0:
+            return
+        last["t"] = now
+        kb = sum(c.t.traffic.wire_bytes for c in _CLIENTS if hasattr(c.t, "traffic"))
+        print(f"  {label} {done}/{total} · {kb / 1024:,.0f} KB · {now - started:.0f}s",
+              file=sys.stderr, flush=True)
+
+    return show
+
+
+def _client(args, *, cached: bool = False) -> NomadMania:
+    """The one place clients are made, and so the one place a cache can be attached.
+
+    ``cached=True`` is for commands that only read and only report: ``history``,
+    ``evidence`` and ``share``. Anything that plans, applies, checks drift or
+    deletes must see the server, so it never passes it — see api/cache.
+    """
     token, source = find_token()
     if not token:
         sys.exit(
@@ -134,10 +165,20 @@ def _client(args) -> NomadMania:
         )
     if source != "NM_TOKEN in the environment" and not getattr(args, "quiet", False):
         print(f"token from {source}", file=sys.stderr)
-    return NomadMania(token)
+    cache = None
+    if cached:
+        from ..api.cache import ReadCache
+
+        cache = ReadCache(Path(getattr(args, "workdir", None) or DEFAULT_WORKDIR) / "cache",
+                          refresh=getattr(args, "refresh", False))
+    c = NomadMania(token, cache=cache)
+    c.t.traffic.verbose = getattr(args, "verbose_net", False)
+    c.progress = _progress_printer()
+    _CLIENTS.append(c)
+    return c
 
 
-def _resolve_coords(args, catalogue: dict, coords) -> dict:
+def _resolve_coords(args, catalogue: dict, coords, client: NomadMania | None = None):
     """Coordinates -> :class:`Resolution`, through the shared cache.
 
     ``evidence`` and ``history`` both resolve a library against the live
@@ -167,6 +208,10 @@ def _resolve_coords(args, catalogue: dict, coords) -> dict:
         known = {}
     # A cache outlives catalogues: regions get split and renumbered.
     known = valid_only(known, catalogue)
+    if getattr(args, "refresh", False):
+        # "Unresolved" may have been decided against a catalogue that was
+        # missing the region; --refresh asks the question again.
+        known = {k: r for k, r in known.items() if r.region is not None}
     todo = [c_ for c_ in coords if c_ not in known]
     if todo and not args.no_resolve:
         resolver = RegionResolver(catalogue, zoom=args.zoom, tolerance_deg=args.tolerance)
@@ -180,12 +225,29 @@ def _resolve_coords(args, catalogue: dict, coords) -> dict:
             if i % 200 == 0 or i == total:
                 print(f"  {i:,}/{total:,}", file=sys.stderr)
 
-        known.update(resolver.resolve_many(todo, on_progress=tick))
+        found = resolver.resolve_many(todo, on_progress=tick)
+        cache = client.cache if client else None
+        if resolver.unknown_ids - (cache.tile_only_ids() if cache else set()):
+            if cache and cache.served_catalogue:
+                # The cached catalogue predates the tiles. Read it live and ask
+                # again, rather than filing real regions as "unresolved".
+                cache.drop_catalogue()
+                catalogue = client.regions()
+                cache.note_tile_only(resolver.unknown_ids - set(catalogue))
+                resolver = RegionResolver(catalogue, zoom=args.zoom, tolerance_deg=args.tolerance)
+                found = resolver.resolve_many(todo, on_progress=tick)
+            else:
+                print(f"the tiles carry {len(resolver.unknown_ids)} region ids the live "
+                      "catalogue does not; points near them stay unresolved",
+                      file=sys.stderr)
+                if cache:
+                    cache.note_tile_only(resolver.unknown_ids)
+        known.update(found)
         save_coord_map(cache_path, known, settings)
         print(f"cache: {cache_path}", file=sys.stderr)
     elif todo:
         print(f"{len(todo):,} coordinates are unresolved and --no-resolve is set", file=sys.stderr)
-    return known
+    return known, catalogue
 
 
 # ---------------------------------------------------------------- commands
@@ -218,6 +280,7 @@ def cmd_export(args) -> int:
     }
     if args.full:
         print(f"reading visits for {len(visited)} regions...", file=sys.stderr)
+        # Live: an export is the rollback reference, and never comes from a cache.
         data["visits"] = {
             str(r): [
                 {
@@ -226,9 +289,9 @@ def cmd_export(args) -> int:
                     "to": v.date_to.isoformat() if v.date_to else None,
                     "quality": v.quality, "trip_id": v.trip_id,
                 }
-                for v in c.visits_for_region(r)
+                for v in vs
             ]
-            for r in visited
+            for r, vs in c.visits_for_regions(visited).items()
         }
     out = Path(args.out) if args.out else None
     text = json.dumps(data, indent=1, ensure_ascii=False, default=str)
@@ -328,7 +391,7 @@ def cmd_evidence(args) -> int:
         small_spots=args.min_small_spots,
     )
 
-    c = _client(args)
+    c = _client(args, cached=True)
     account = c.account_id()
     print(f"account {account}: reading catalogue and claimed regions...", file=sys.stderr)
     catalogue = c.regions()
@@ -343,7 +406,7 @@ def cmd_evidence(args) -> int:
     coords = sorted({a.key for a in assets})
     print(f"{len(assets):,} photos, {len(coords):,} distinct coordinates", file=sys.stderr)
 
-    known = _resolve_coords(args, catalogue, coords)
+    known, catalogue = _resolve_coords(args, catalogue, coords, c)
 
     shots_by_region: dict[int, list[Shot]] = {}
     unplaced = 0
@@ -365,6 +428,9 @@ def cmd_evidence(args) -> int:
     if args.check_dates:
         targets = sorted(r for r in shots_by_region if r in claimed)
         print(f"reading visit dates for {len(targets)} regions...", file=sys.stderr)
+        # Live, not cached: this compares dates, and a date moved within a year
+        # is exactly what the visit cache cannot see.
+        live = c.visits_for_regions(targets)
         for rid in targets:
             # An undated visit says nothing about when, so it cannot disagree
             # with a photo. It is still a visit, and still counts.
@@ -373,7 +439,7 @@ def cmd_evidence(args) -> int:
             # and dropping it instead would silently report a date conflict for
             # every photo in a year the profile does record.
             visits[rid] = [
-                w for w in (_visit_window(v) for v in c.visits_for_region(rid)) if w
+                w for w in (_visit_window(v) for v in live[rid]) if w
             ]
 
     # Which regions are too small to walk a kilometre across? Only regions whose
@@ -534,7 +600,10 @@ def cmd_history(args) -> int:
     if since and since > until:
         sys.exit(f"history: the window starts ({since}) after it ends ({until})")
 
-    c = _client(args)
+    if args.cached is None:
+        # Recall can tolerate a stale record; a form cannot. See AGENTS.md §6c.
+        args.cached = q == "where"
+    c = _client(args, cached=True)
     print("reading the country list and region catalogue...", file=sys.stderr)
     catalogue = c.regions()
     flags = c.region_years()
@@ -564,7 +633,17 @@ def cmd_history(args) -> int:
     if points:
         coords = sorted({(round(p_.lat, 3), round(p_.lon, 3)) for p_ in points})
         print(f"{len(points):,} points, {len(coords):,} distinct coordinates", file=sys.stderr)
-        known = _resolve_coords(args, catalogue, coords)
+        was = catalogue
+        known, catalogue = _resolve_coords(args, catalogue, coords, c)
+        if catalogue is not was:
+            # Re-read because the tiles showed it was stale: the country map
+            # must know the new regions too, or they print as unmapped.
+            rows = {rid: {**catalogue.get(rid, {}), **flags.get(rid, {})}
+                    for rid in {*catalogue, *flags}}
+            try:
+                cmap = build_country_map(c.countries(), rows)
+            except UnmappedCountries as exc:
+                sys.exit(f"history: {exc}")
 
         def region(p_):
             r = known.get((round(p_.lat, 3), round(p_.lon, 3)))
@@ -577,12 +656,25 @@ def cmd_history(args) -> int:
 
     visits = []
     if not args.no_profile:
-        claimed = sorted(c.visited_region_ids())
-        print(f"reading every visit record for {len(claimed)} regions...", file=sys.stderr)
-        for i, rid in enumerate(claimed, 1):
-            visits.extend(c.visits_for_region(rid))
-            if i % 100 == 0:
-                print(f"  {i}/{len(claimed)}", file=sys.stderr)
+        # Every region with a visit — not only the ones that count as visited:
+        # a transit (quality 1) is stored but leaves its region off that list,
+        # and a visa form asks about transits too.
+        claimed = sorted({*c.visited_region_ids(),
+                          *(r for r, row in flags.items() if row.get("no_of_visits"))})
+        # Every one of them, whatever the window. Neither a region's summary
+        # years nor a margin around the window can say a region is irrelevant:
+        # an undated visit hides behind dated ones, and a "lived here" can span
+        # years. Speed comes from the cache and from parallel reads instead.
+        print(f"reading visit records for {len(claimed)} regions...", file=sys.stderr)
+        before = len(c.cache.notes) if c.cache else 0
+        # The visit cache only when asked for, or for plain "where was I" —
+        # see the --cached help. A form answer reads every record live.
+        use = c.cache is not None and args.cached
+        for vs in c.visits_for_regions(
+            claimed, summaries=flags if use else None, account=c.account_id() if use else None
+        ).values():
+            visits.extend(vs)
+        from_cache = c.cache.notes[before:] if c.cache else []
 
     if not points and not visits:
         sys.exit("history: no sources — give --track, a Photos library, or drop --no-profile")
@@ -604,6 +696,15 @@ def cmd_history(args) -> int:
         since=since, until=until, territories=territories,
         groups=hi.describe_groups(dict.fromkeys(used)), today=today,
     )
+    if not args.no_profile and from_cache:
+        # In the report, not only on stderr: whoever copies from this file into
+        # a form has to see it. The cache cannot see a date moved within a year.
+        hdr["profile visits"] = (
+            f"{from_cache[-1]}, each at most {VISITS_MAX_AGE.days} days old. A visit "
+            "edited on the website since then shows here only if the edit changed the "
+            "region's visit count, first or last year, or best quality — re-run with "
+            "--refresh before copying anything into a form."
+        )
     if q == "days":
         start = None
         if args.tax_year_start:
@@ -810,7 +911,9 @@ def cmd_share(args) -> int:
     except ImportError:
         sys.exit("share needs Pillow: pip install 'wanderfill[share]'")
 
-    c = _client(args)
+    # The cache only ever supplies the catalogue here (its size, for "of 1,381");
+    # every number on the card is read live.
+    c = _client(args, cached=True)
     stats = sh.collect(c, name=args.name)
     if args.anonymous:
         stats.name = ""
@@ -1142,6 +1245,15 @@ def cmd_delete(args) -> int:
 # ------------------------------------------------------------------ parser
 
 
+def _net_flags(parser) -> None:
+    """``--refresh`` and ``--verbose`` for the commands that may read from the cache."""
+    parser.add_argument("--refresh", action="store_true",
+                        help="ignore the local cache and re-read everything from the server "
+                             "(do this before copying into a form)")
+    parser.add_argument("-v", "--verbose", dest="verbose_net", action="store_true",
+                        help="print every request with its size and time")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wanderfill",
@@ -1177,6 +1289,7 @@ def build_parser() -> argparse.ArgumentParser:
             "both sides, writes only local files."
         ),
     )
+    _net_flags(ev)
     ev.add_argument("--out", default="evidence", help="directory for the dossier")
     ev.add_argument("--library", help="path to a .photoslibrary (default: the standard one)")
     ev.add_argument("--since", help="YYYY-MM-DD, earliest photo to consider")
@@ -1241,6 +1354,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     common = argparse.ArgumentParser(add_help=False)
+    _net_flags(common)
+    common.add_argument(
+        "--cached", action=argparse.BooleanOptionalAction, default=None,
+        help="reuse visit records from the local cache. Much less traffic, but an edit "
+             "made on the website may not show. Default: on for `where`, off for the "
+             "form queries (trips, check, days, absences, list)")
     common.add_argument("--track", help="CSV/GPX/GeoJSON day-level track")
     common.add_argument("--library", help="path to a .photoslibrary (default: the standard one)")
     common.add_argument("--no-photos", action="store_true", help="do not read the Photos library")
@@ -1311,6 +1430,7 @@ def build_parser() -> argparse.ArgumentParser:
             "It never posts anything."
         ),
     )
+    _net_flags(shr)
     shr.add_argument("--out", default="share", help="directory for the images")
     shr.add_argument("--size", choices=("story", "square", "post", "all"), default="story",
                      help="story 1080x1920, square 1080x1080, post 1200x630, or all")
@@ -1372,6 +1492,15 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    finally:
+        # What the run cost on the wire, and what came from the cache instead.
+        # Printed even on failure: on a slow link "how far did it get" matters.
+        for c in _CLIENTS:
+            for note in (c.cache.notes if c.cache else []):
+                print(note, file=sys.stderr)
+            if hasattr(c.t, "traffic") and c.t.traffic.requests:
+                print(c.t.traffic.summary(), file=sys.stderr)
+        _CLIENTS.clear()
 
 
 if __name__ == "__main__":

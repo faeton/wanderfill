@@ -11,7 +11,10 @@ stdlib so the bare client installs anywhere.
 
 from __future__ import annotations
 
+import gzip
 import json
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -44,12 +47,58 @@ class RateLimiter:
 
     min_interval: float = 0.15
     _last: float = field(default=0.0, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def wait(self) -> None:
-        gap = time.monotonic() - self._last
-        if gap < self.min_interval:
-            time.sleep(self.min_interval - gap)
-        self._last = time.monotonic()
+        # Locked because bulk reads run on a small thread pool; without it two
+        # threads read the same ``_last`` and both go at once.
+        with self._lock:
+            gap = time.monotonic() - self._last
+            if gap < self.min_interval:
+                time.sleep(self.min_interval - gap)
+            self._last = time.monotonic()
+
+
+@dataclass
+class Traffic:
+    """What the network has cost so far: requests, bytes on the wire, seconds.
+
+    Nomads are routinely on hotel wifi and roaming data, so a read-only command
+    says what it spent. ``verbose`` prints every request as it completes.
+    """
+
+    requests: int = 0
+    wire_bytes: int = 0
+    seconds: float = 0.0
+    verbose: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, action: str, wire: int, took: float) -> None:
+        with self._lock:
+            self.requests += 1
+            self.wire_bytes += wire
+            self.seconds += took
+        if self.verbose:
+            print(f"  {action}  {wire / 1024:.1f} KB  {took:.1f}s", file=sys.stderr, flush=True)
+
+    def summary(self) -> str:
+        return (f"network: {self.requests} request{'s' * (self.requests != 1)}, "
+                f"{self.wire_bytes / 1024:,.0f} KB on the wire")
+
+
+def _inflate(raw: bytes, encoding: str | None = None) -> bytes:
+    """Undo gzip by the magic bytes, never by the header.
+
+    Both ways the header lies: the tile server sends gzip without saying so
+    (see geo/tiles), and a hotel proxy can decompress a body and leave
+    ``Content-Encoding: gzip`` on it. Trusting the header there makes a write
+    the server applied fail on our side, and an unknown write outcome blocks
+    the journal until a human reconciles it. ``encoding`` is accepted and
+    deliberately ignored.
+    """
+    if raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw)
+    return raw
 
 
 @dataclass
@@ -61,6 +110,11 @@ class Transport:
     timeout: float = 40.0
     retries: int = 3
     limiter: RateLimiter = field(default_factory=RateLimiter)
+    # Reads are not what gets an account suspended, and on a slow link the cost
+    # is latency per request, not bandwidth: 393 sequential visit reads at the
+    # write pace spent a minute asleep before the first byte of round-trip.
+    read_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(0.03))
+    traffic: Traffic = field(default_factory=Traffic)
 
     def __post_init__(self) -> None:
         if not self.token or len(self.token) < 8:
@@ -94,16 +148,24 @@ class Transport:
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "User-Agent": USER_AGENT,
+                # The catalogue is 173 KB plain and 42 KB gzipped; the country
+                # list 48 KB and 8 KB. urllib asks for neither unless told.
+                "Accept-Encoding": "gzip",
                 **headers,
             },
         )
         last: Exception | None = None
         attempts = (self.retries + 1) if idempotent else 1
+        limiter = self.read_limiter if idempotent else self.limiter
         for attempt in range(attempts):
-            self.limiter.wait()
+            limiter.wait()
+            started = time.monotonic()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return resp.read()
+                    raw = resp.read()
+                    label = url.removeprefix(WEBAPI).removeprefix(AJAX)
+                    self.traffic.add(label, len(raw), time.monotonic() - started)
+                    return _inflate(raw, resp.headers.get("Content-Encoding"))
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
                     raise AuthError(f"server rejected the token ({exc.code})") from exc

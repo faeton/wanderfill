@@ -20,52 +20,52 @@ from wanderfill.api.client import NomadMania
 from wanderfill.api.errors import ApiError
 
 
-def rows(visited_names=()):
-    """196 country rows: 193 stand-ins plus the three non-UN ones."""
-    names = [f"Country {i}" for i in range(193)] + sorted(share.NON_UN)
-    return [
-        {"country": n, "country_id": i, "visited": int(n in visited_names),
-         "slow11": 0, "slow31": 0, "slow101": 0, "yes_stored": 0}
-        for i, n in enumerate(names)
-    ]
-
-
-def test_un_excludes_the_three_extras_and_un_plus_includes_them():
-    un, un_plus, total = share.un_counts(rows({"Country 1", "Country 2", "Kosovo", "Taiwan"}))
-    assert (un, un_plus, total) == (2, 4, 196)
-
-
-def test_un_refuses_a_changed_country_list():
-    """A renamed row would silently move a number on the card; it must fail instead."""
-    bad = [r for r in rows() if r["country"] != "Taiwan"]
-    with pytest.raises(ApiError):
-        share.un_counts(bad)
-    with pytest.raises(ApiError):
-        share.un_counts([*rows(), {"country": "Atlantis", "country_id": 999, "visited": 1}])
-
-
 def test_collect_reads_and_never_writes():
     t = FakeTransport({
         "user/get-settings": {"user_id": 7, "first_name": "A", "last_name": "B",
-                              "rank": "12", "country_rank": "", "country": "X",
-                              "avatar": "7.webp"},
-        "slow/get-slow-app": {"slow": rows({"Country 0", "Kosovo"})},
+                              "country": "X", "avatar": "7.webp"},
+        "profile/get-profile-data": {"data": {"scores": {
+            "score_un": 1, "score_unp": 3, "score_nm": 2, "score_mqp": 1, "score_kye": 2,
+            "score_slow11": "4", "score_yes": 40, "rank_nm": 12, "rank_country": -1}}},
         "regions/get-regions-list-2": {"data": {"1": {"id": 1}, "2": {"id": 2}, "3": {"id": 3}}},
         "maps/get-visited-regions-ids-simple": {"ids": [1, 3]},
         "kye/get-kye": {"visited": [5, 6], "max": 434},
-        "maps/get-visited-dare-ids-simple": {"ids": [9]},
     })
     st = share.collect(NomadMania(token="fake", transport=t))
-    assert (st.un, st.un_plus, st.nm, st.nm_total) == (1, 2, 2, 3)
+    assert (st.un, st.un_plus, st.un_plus_total, st.nm, st.nm_total) == (1, 3, 265, 2, 3)
     assert st.name == "A B" and st.rank == 12 and st.country_rank is None
-    assert st.kye == 2 and st.kye_total == 434 and st.dare == 1
+    assert st.kye == 2 and st.kye_total == 434 and st.dare == 1 and st.slow11 == 4
     assert st.visited_regions == [1, 3]
-    reads = {"user/get-settings", "slow/get-slow-app", "regions/get-regions-list-2",
-             "maps/get-visited-regions-ids-simple", "kye/get-kye",
-             "maps/get-visited-dare-ids-simple", "user/status-quick"}
+    reads = {"user/get-settings", "profile/get-profile-data", "regions/get-regions-list-2",
+             "maps/get-visited-regions-ids-simple", "kye/get-kye", "user/status-quick"}
     for action, fields in t.sent:
         assert action in reads, f"{action} is not a read this command is allowed"
         assert not any(k in fields for k in ("lat", "lng", "visits", "qid")), action
+
+
+def test_un_plus_is_the_profiles_number_not_a_count_of_the_196():
+    """The incident: 104 on the card, 121 on the profile.
+
+    ``slow/get-slow-app`` lists 196 SLOW/YES countries; UN+ is 265 countries
+    and territories. The card must never go back to counting the former.
+    """
+    t = FakeTransport({
+        "user/get-settings": {"user_id": 7},
+        "profile/get-profile-data": {"data": {"scores": {
+            "score_un": 102, "score_unp": 121, "score_nm": 393}}},
+        "regions/get-regions-list-2": {"data": {}},
+        "maps/get-visited-regions-ids-simple": {"ids": []},
+    })
+    st = share.collect(NomadMania(token="fake", transport=t))
+    assert (st.un, st.un_plus, st.un_plus_total) == (102, 121, 265)
+    assert "slow/get-slow-app" not in {a for a, _ in t.sent}
+
+
+def test_collect_refuses_a_profile_without_its_scores():
+    t = FakeTransport({"user/get-settings": {"user_id": 7},
+                       "profile/get-profile-data": {"data": {"scores": {}}}})
+    with pytest.raises(ApiError):
+        share.collect(NomadMania(token="fake", transport=t))
 
 
 def square(lon, lat, size=10.0):
@@ -74,7 +74,7 @@ def square(lon, lat, size=10.0):
 
 @pytest.fixture
 def stats():
-    return share.Stats(uid=7, name="A B", un=101, un_plus=103, un_plus_total=196,
+    return share.Stats(uid=7, name="A B", un=101, un_plus=121, un_plus_total=265,
                        nm=391, nm_total=1381, rank=1418, country_rank=26, country="X",
                        dare=30, kye=100, kye_total=434, generated="2026-09-08",
                        visited_regions=[1])
@@ -113,7 +113,7 @@ def test_write_cards_records_the_claim_without_the_region_list(stats, tmp_path):
                                 polygons=None, avatar=None)
     assert (tmp_path / "nomadmania-7-square-paper.png").exists()
     claim = json.loads((tmp_path / "stats.json").read_text())
-    assert claim["un"] == 101 and claim["un_plus"] == 103 and claim["nm"] == 391
+    assert claim["un"] == 101 and claim["un_plus"] == 121 and claim["nm"] == 391
     assert claim["visited_regions"] == 1  # the count; the ids are not the claim
     assert written[-1].name == "stats.json"
 

@@ -13,17 +13,19 @@ The card shows the three figures people compare on NomadMania, read from the
 same endpoints the site's own pages use:
 
 - **UN** — countries visited among the 193 UN member states.
-- **UN+** — the same over NomadMania's list of 196, which is the 193 plus
-  Kosovo, Taiwan and Palestine. Those three are named in ``NON_UN``
-  rather than inferred, and the reader checks they are present, so a
-  renamed row fails loudly instead of quietly shifting the UN count.
+- **UN+** — NomadMania's "UN countries and territories", 265 of them: Hong
+  Kong, Gibraltar, Greenland, Abkhazia and the like count on their own.
 - **NM** — regions visited out of the live catalogue (1381 at the time of
   writing; read, not hardcoded).
 
-They are the server's own counts. This module never derives a visit from
-anything, so a card can only ever show what the profile already says.
-Rank, country rank and the name come from ``user/get-settings``; DARE and
-KYE from their own lists. The map paints every region the profile has
+All of them, with rank, DARE, KYE, SLOW and YES, come from
+``profile/get-profile-data`` — the request the profile page itself makes — so
+the card says exactly what the profile says. Nothing here recomputes a score.
+That is not caution for its own sake: an earlier version counted UN+ from the
+196-row SLOW/YES country list and printed 104 for a profile showing 121.
+
+The name and avatar come from ``user/get-settings``; the KYE denominator from
+``kye/get-kye``. The map paints every region the profile has
 marked, from the same polygon tiles the site draws.
 
 Why the map costs a first-run wait
@@ -59,10 +61,11 @@ from .api.errors import ApiError
 if TYPE_CHECKING:
     from PIL import ImageFont
 
-# NomadMania's country list is 196 long: the 193 UN member states plus these.
-# They are what makes "UN+" a plus. Named on purpose — see the module docstring.
-NON_UN = frozenset({"Kosovo", "Taiwan", "Palestinian Territory"})
 UN_MEMBERS = 193
+# The size of NomadMania's UN+ list ("UN countries and territories"). The API
+# returns the score but not the denominator; this is the figure the profile
+# page prints in its UN+ tooltip (wp_pages/profile), read 2026-10-14.
+UN_PLUS_TOTAL = 265
 
 AVATAR_URL = "https://nomadmania.com/img/avatars/{avatar}"
 PROFILE_URL = "nomadmania.com/profile/{uid}"
@@ -118,84 +121,62 @@ class Stats:
         return PROFILE_URL.format(uid=self.uid)
 
 
-def un_counts(rows: list[dict]) -> tuple[int, int, int]:
-    """(UN, UN+, UN+ total) from ``slow/get-slow-app`` rows.
-
-    Refuses rather than guesses if the three non-UN rows are not all present
-    by name: a list that has been renamed or extended would otherwise put a
-    wrong number in the biggest type on the card.
-    """
-    names = {r["country"] for r in rows}
-    missing = NON_UN - names
-    if missing:
-        raise ApiError(
-            "slow/get-slow-app",
-            f"expected non-UN rows not found: {sorted(missing)}; "
-            "the country list has changed and NON_UN in share.py needs a look",
-            {"count": len(rows)},
-        )
-    if len(rows) - len(NON_UN) != UN_MEMBERS:
-        raise ApiError(
-            "slow/get-slow-app",
-            f"{len(rows)} countries minus {len(NON_UN)} non-UN is not {UN_MEMBERS}",
-            {"count": len(rows)},
-        )
-    visited = [r for r in rows if r.get("visited")]
-    un_plus = len(visited)
-    un = sum(1 for r in visited if r["country"] not in NON_UN)
-    return un, un_plus, len(rows)
-
-
 def collect(c: NomadMania, *, name: str | None = None) -> Stats:
-    """Read everything the card needs. Reads only; no request carries a coordinate."""
+    """Read everything the card needs. Reads only; no request carries a coordinate.
+
+    Every number is the profile page's own (``profile/get-profile-data``). The
+    region list is read separately only to paint the map, and the catalogue
+    only for its size.
+    """
     settings = c.settings()
     uid = int(settings.get("user_id") or c.account_id())
-    rows = c.countries()
-    un, un_plus, total = un_counts(rows)
+    scores = c.profile(uid).get("scores") or {}
+
+    def score(key: str) -> int | None:
+        # Some arrive as strings ("54"), and a rank of -1 means "unranked".
+        v = scores.get(key)
+        try:
+            n = int(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+        return None if n is not None and n < 0 else n
+
+    for key in ("score_un", "score_unp", "score_nm"):
+        if score(key) is None:
+            raise ApiError("profile/get-profile-data", f"no {key} in scores", scores)
+
     catalogue = c.regions()
     visited = sorted(c.visited_region_ids())
 
-    kye_ticked = kye_total = None
+    kye_total = None
     try:
-        kye = c.kye()
-        kye_ticked, kye_total = len(kye.get("visited", [])), int(kye.get("max") or 0) or None
+        kye_total = int(c.kye().get("max") or 0) or None
     except ApiError:
         pass
-    try:
-        dare = len(c.visited_dare_ids())
-    except ApiError:
-        dare = None
 
     if name is None:
         name = " ".join(
             p for p in (settings.get("first_name"), settings.get("last_name")) if p
         ).strip()
 
-    def opt_int(key: str) -> int | None:
-        v = settings.get(key)
-        try:
-            return int(v) if v not in (None, "") else None
-        except (TypeError, ValueError):
-            return None
-
     return Stats(
         uid=uid,
         name=name or "",
-        un=un,
-        un_plus=un_plus,
-        un_plus_total=total,
-        nm=len(visited),
+        un=score("score_un"),
+        un_plus=score("score_unp"),
+        un_plus_total=UN_PLUS_TOTAL,
+        nm=score("score_nm"),
         nm_total=len(catalogue),
-        rank=opt_int("rank"),
-        country_rank=opt_int("country_rank"),
+        rank=score("rank_nm"),
+        country_rank=score("rank_country"),
         country=settings.get("country") or None,
-        dare=dare,
-        kye=kye_ticked,
+        dare=score("score_mqp"),
+        kye=score("score_kye"),
         kye_total=kye_total,
-        slow11=sum(int(r.get("slow11") or 0) for r in rows),
-        slow31=sum(int(r.get("slow31") or 0) for r in rows),
-        slow101=sum(int(r.get("slow101") or 0) for r in rows),
-        yes=sum(int(r.get("yes_stored") or 0) for r in rows),
+        slow11=score("score_slow11"),
+        slow31=score("score_slow31"),
+        slow101=score("score_slow101"),
+        yes=score("score_yes"),
         avatar=settings.get("avatar") or None,
         visited_regions=visited,
     )

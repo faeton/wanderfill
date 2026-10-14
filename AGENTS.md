@@ -111,7 +111,8 @@ maps/get-visited-dare-ids-simple         -> same for DARE (trust this one)
 regions/get-regions-list-2               -> the live 1381-region catalogue
 quickEnter/get-visits-to-region {region} -> EVERY visit record for one region
 trips/get-trips-for-year-app {year}      -> what trips already exist
-slow/get-slow-app                        -> 196 countries, visited flags, YES, SLOW
+slow/get-slow-app                        -> 196 SLOW/YES countries, visited flags (not UN+)
+profile/get-profile-data {profile_id}    -> the numbers the profile page shows: UN, UN+, NM, ranks
 user/get-settings                        -> incl. `homebase` / `homebase2`
 ```
 
@@ -434,9 +435,13 @@ Two things to hold to:
   that has not been applied, not from a draft count, not from "what it will
   be once the batch runs". A picture of an unapplied plan is a claim with no
   server behind it.
-- UN+ is 196 because NomadMania's list is 196: the 193 UN members plus
-  Kosovo, Taiwan and Palestine, named in `NON_UN` and checked on every run.
-  If the check fails, the list changed — read it before touching the constant.
+- **Quote the profile's own numbers; never recompute one.** Every figure on
+  the card is `score_*` from `profile/get-profile-data {profile_id}`, the
+  request the profile page makes. UN+ is NomadMania's 265 "UN countries and
+  territories" — not the 196 rows of `slow/get-slow-app`, which is the
+  SLOW/YES list. Counting visited rows of the 196 printed 104 for a profile
+  whose page said 121. The API returns no UN+ denominator; `UN_PLUS_TOTAL`
+  is the 265 the page's tooltip prints.
 
 ## 6c. Travel history — answering a form somebody else wrote
 
@@ -526,6 +531,13 @@ days with no data" for exactly this reason — and stop there.
 
 **7. Never type into the form and never submit it.** The output is a draft the
 person reads and copies. They sign the declaration.
+
+**A form reads the profile live.** The visit cache cannot see every website
+edit (a same-year delete-and-re-add leaves its fingerprint unchanged), so the
+form queries — `trips`, `check`, `days`, `absences`, `list` — ignore it unless
+`--cached` is passed, and only `where` uses it by default. A report that used
+it says so in its header; do not copy from one into a form. Never pass
+`--cached` to save traffic on a form question.
 
 **8. The output stays here.** `history/` is a dated record of where somebody
 slept. Do not paste it into another model, a gist, an issue or a message, and
@@ -662,8 +674,9 @@ Left to right, and the invariant is structural rather than a convention:
 | `geo/tiles.py` | gzip sniffing, polygons, the series harvest |
 | `grade.py` | is-this-coordinate-a-visit, by speed and time spread |
 | `evidence.py`, `share.py` | read-only leaves; nothing in the write path imports them |
+| `api/cache.py` | the slow-link cache for `history`, `evidence` and `share` only |
 
-### Five things that are load-bearing and do not look it
+### Six things that are load-bearing and do not look it
 
 - **`CLAUDE.md` is a symlink to `AGENTS.md`.** Writing one rewrites the other.
 - **`Transport.WRITE_HINTS` decides what may be retried**, by substring on the
@@ -677,6 +690,11 @@ Left to right, and the invariant is structural rather than a convention:
 - **The core is stdlib-only.** `shapely`, `mapbox_vector_tile`, `rich` and
   `PIL` are extras, and every one of their imports sits inside the function that
   needs it. Hoisting one to module level breaks the bare install.
+- **A cache reaches only `history`, `evidence` and `share`.** `_client(args,
+  cached=True)` is the one switch, and `test_only_reporting_commands_get_a_cache`
+  reads the source to check nobody else flips it. Planning, applying, checking,
+  deleting and exporting against a cache would verify against yesterday.
+  `client._many` runs reads four at a time; a write must never go through it.
 - **Two tests guard the ethos rather than a behaviour** —
   `test_the_undo_methods_are_exactly_these_five` and
   `test_deletions_are_not_plan_ops`. A sixth removing method on the client, or a

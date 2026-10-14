@@ -74,6 +74,10 @@ class RegionResolver:
         self.zoom = zoom
         self.tolerance = tolerance_deg
         self.layer = layer
+        # Ids the tiles carry that the catalogue does not. Non-empty means the
+        # catalogue is older than the tiles, and every point near such a region
+        # is being called unresolved for the wrong reason.
+        self.unknown_ids: set[int] = set()
 
     # ------------------------------------------------------------------
 
@@ -127,6 +131,7 @@ class RegionResolver:
                     continue
                 rid = int(rid)
                 if rid not in self.catalogue:
+                    self.unknown_ids.add(rid)
                     continue
                 if geom.covers(pt):
                     return Resolution(lat, lon, rid, "tile_interior", 0.0)

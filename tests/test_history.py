@@ -583,11 +583,12 @@ def test_cli_end_to_end_reads_only(tmp_path, monkeypatch):
         },
     }
     t = FakeTransport(replies)
-    monkeypatch.setattr(cli, "_client", lambda args: NomadMania(token="fake", transport=t))
+    monkeypatch.setattr(cli, "_client", lambda args, **kw: NomadMania(token="fake", transport=t))
     monkeypatch.setattr(
         cli,
         "_resolve_coords",
-        lambda args, cat, coords: {k: type("R", (), {"region": 1})() for k in coords},
+        lambda args, cat, coords, c=None: (
+            {k: type("R", (), {"region": 1})() for k in coords}, cat),
     )
     out = tmp_path / "out"
     rc = cli.main(

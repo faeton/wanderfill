@@ -57,6 +57,22 @@ So status codes tell you almost nothing. Parse the body.
 | `regions/get-megaregions` | 28 mega-regions the map is organised by. |
 | `quickEnter/get-regions` `{megaregion}` | Regions within one mega-region. |
 
+### On a slow link
+
+Measured 2026-10-14 from a poor connection:
+
+| request | plain | gzip | time |
+|---|---|---|---|
+| `regions/get-regions-list-2` | 173 KB | 42 KB | 1.4–1.7 s |
+| `slow/get-slow-app` | 48 KB | 8 KB | 1.3–1.9 s |
+| `quickEnter/get-visits-to-region` | 25 B | 45 B | 0.9 s |
+
+The server compresses when asked and urllib does not ask. The bigger cost is
+latency: a per-region read is tiny and still ~0.9 s, so reading every visit on
+a 393-region profile sequentially is six minutes. The transport therefore asks
+for gzip, paces reads at 0.03 s rather than the writes' 0.15 s, and the client
+runs bulk reads four at a time.
+
 ### Reading your own state
 
 | Endpoint | Returns |
@@ -67,7 +83,8 @@ So status codes tell you almost nothing. Parse the body.
 | `quickEnter/get-visits-to-region` `{region}` | every visit record for one region |
 | `trips/get-trips-for-year-app` `{year}` | trip index by year |
 | `trips/get-trip` `{trip_id}` | one trip with its regions |
-| `slow/get-slow-app` | 196 countries: visited flag, `visited_regions`, `slow11/31/101`, per-country `yes` |
+| `slow/get-slow-app` | 196 SLOW/YES countries: visited flag, `visited_regions`, `slow11/31/101`, per-country `yes`. **Not** the UN+ list. |
+| `profile/get-profile-data` `{profile_id}` | what the profile page draws: `scores.score_un`, `score_unp` (UN+), `score_nm`, `score_mqp` (DARE), `score_kye`, `score_tcc`, `score_yes`, `score_slow*`, `score_deep`, `score_whs`, `rank_nm`, `rank_country`; plus `user_data`, `friends`, `series`. Missing `profile_id` answers `Missing params: profile_id.` |
 | `user/status` | `{result, status, admin}` — **no account id** |
 | `user/status-quick` | the same plus `uid`, `messages`. Use this for identity. |
 | `user/get-settings` | `user_id`, `homebase`, `homebase2`, and the rest of the profile |
@@ -424,7 +441,15 @@ has enumerated them. If you are relying on the recomputation, do that first.
 ## Derived scores
 
 Countries, UN, UN+, SLOW and YES are all computed from marked regions. There is
-nothing to write.
+nothing to write. To *read* them, use `profile/get-profile-data` — they are its
+`scores` — rather than recomputing.
+
+- **UN+** is NomadMania's "UN countries and territories", 265 of them (the
+  figure is in the profile page's tooltip; the API returns no denominator).
+  It is not the 196-row `slow/get-slow-app` list. On one profile: 102 UN,
+  104 visited rows of the 196, 108 ids from `get-visited-countries-ids-simple`,
+  114 distinct region flags — and 121 UN+ on the page. None of the first four
+  reproduces the fifth, so quote `score_unp`.
 
 - **YES** — "Years Elapsed Since". Per country: 0 if visited this calendar year,
   0 if visited last calendar year (an explicit "gift"), otherwise the years
