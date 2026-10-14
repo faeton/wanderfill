@@ -67,11 +67,15 @@ Measured 2026-10-14 from a poor connection:
 | `slow/get-slow-app` | 48 KB | 8 KB | 1.3–1.9 s |
 | `quickEnter/get-visits-to-region` | 25 B | 45 B | 0.9 s |
 
+Ten sequential visit reads: 7.2 s on fresh connections, 2.8 s on one kept
+alive.
+
 The server compresses when asked and urllib does not ask. The bigger cost is
 latency: a per-region read is tiny and still ~0.9 s, so reading every visit on
 a 393-region profile sequentially is six minutes. The transport therefore asks
-for gzip, paces reads at 0.03 s rather than the writes' 0.15 s, and the client
-runs bulk reads four at a time.
+for gzip, paces reads at 0.03 s rather than the writes' 0.15 s, keeps one
+connection per thread open for reads (never for writes), and the client runs
+bulk reads four at a time.
 
 ### Reading your own state
 

@@ -272,9 +272,14 @@ they spent:
   `history where`** (recall) and **off for the form queries** — `trips`,
   `check`, `days`, `absences`, `list` read every record live unless you pass
   `--cached`. When it is used, the report says so in its header.
-- **Bulk reads go four at a time.** A slow link costs ~0.9 s of latency per
-  request whatever its size, and the history needs one per region you have
-  visited. Writes stay one at a time, at human pace, and are never retried.
+- **Bulk reads go four at a time, over kept-alive connections.** A slow link
+  costs ~0.9 s of latency per request whatever its size, and a fresh HTTPS
+  connection adds a TLS handshake and a few KB of certificates on top: ten
+  small reads took 7.2 s fresh and 2.8 s kept alive. Writes stay one at a
+  time, at human pace, on a fresh connection each, and are never retried — a
+  write sent down a connection the server had already closed would have an
+  unknown outcome. With `HTTPS_PROXY` set, everything goes through urllib so
+  the proxy is not bypassed.
 - **Progress every couple of seconds** on stderr, `-v` for every request, and a
   closing `network: N requests, X KB` line.
 

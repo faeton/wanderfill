@@ -50,7 +50,7 @@ def test_requests_ask_for_gzip_and_inflate_it(monkeypatch):
         return _Resp(gzip.compress(payload), "gzip")
 
     monkeypatch.setattr(tr.urllib.request, "urlopen", fake_urlopen)
-    t = tr.Transport(token="x" * 36)
+    t = tr.Transport(token="x" * 36, keep_alive=False)
     assert t.webapi("regions/get-regions-list-2")["data"] == {"1": {"id": 1}}
     assert seen.get("Accept-encoding") == "gzip"
     assert t.traffic.requests == 1 and t.traffic.wire_bytes == len(gzip.compress(payload))
@@ -90,9 +90,92 @@ def test_writes_still_get_exactly_one_attempt(monkeypatch):
     assert len(calls) == 1
 
 
+class _Conn:
+    """A stand-in for HTTPSConnection. ``script`` is what each request does."""
+
+    made: list = []  # noqa: RUF012 - reset per test by the fixture
+
+    def __init__(self, host, timeout=None):
+        self.host, self.sock, self.sent = host, None, []
+        _Conn.made.append(self)
+
+    def request(self, method, path, body=None, headers=None):
+        action = _Conn.script.pop(0)
+        if isinstance(action, Exception):
+            raise action
+        self.sent.append(path)
+        self.sock = object()
+        self._body = action
+
+    def getresponse(self):
+        body = self._body
+
+        class R:
+            status, reason, headers = 200, "OK", {}
+
+            def read(self):
+                return body
+
+            def getheader(self, name):
+                return None
+
+        return R()
+
+    def close(self):
+        self.sock = None
+
+
+@pytest.fixture
+def conns(monkeypatch):
+    _Conn.made, _Conn.script = [], []
+    monkeypatch.setattr(tr.http.client, "HTTPSConnection", _Conn)
+    monkeypatch.setattr(tr.urllib.request, "getproxies", lambda: {})
+    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    return _Conn
+
+
+def test_reads_reuse_one_connection(conns):
+    conns.script = [b"{}", b"{}", b"{}"]
+    t = tr.Transport(token="x" * 36)
+    for _ in range(3):
+        t.webapi("quickEnter/get-visits-to-region", region=1)
+    assert len(conns.made) == 1 and len(conns.made[0].sent) == 3
+
+
+def test_a_read_on_a_connection_the_server_closed_goes_again_on_a_fresh_one(conns):
+    import http.client
+
+    conns.script = [b"{}", http.client.RemoteDisconnected("idle"), b'{"ok":1}']
+    t = tr.Transport(token="x" * 36)
+    t.webapi("maps/get-visited-regions-ids-simple")
+    assert t.webapi("maps/get-visited-regions-ids-simple") == {"ok": 1}
+    assert len(conns.made) == 2
+
+
+def test_writes_never_use_the_kept_alive_connection(conns, monkeypatch):
+    """A write sent down a connection the server already closed has an unknown
+    outcome. Writes open their own, exactly as before."""
+    opened = []
+    monkeypatch.setattr(tr.urllib.request, "urlopen",
+                        lambda req, timeout: opened.append(req) or _Resp(b"{}", None))
+    t = tr.Transport(token="x" * 36)
+    t.webapi("quickEnter/add-visit", region=1)
+    t.ajax_text("my_series/", action="toggle", item=1, state=1, series=22)
+    assert len(opened) == 2 and conns.made == []
+
+
+def test_a_configured_proxy_is_not_bypassed(conns, monkeypatch):
+    monkeypatch.setattr(tr.urllib.request, "getproxies", lambda: {"https": "http://p:3128"})
+    opened = []
+    monkeypatch.setattr(tr.urllib.request, "urlopen",
+                        lambda req, timeout: opened.append(req) or _Resp(b"{}", None))
+    tr.Transport(token="x" * 36).webapi("maps/get-visited-regions-ids-simple")
+    assert len(opened) == 1 and conns.made == []
+
+
 def test_reads_and_writes_are_paced_by_different_limiters(monkeypatch):
     monkeypatch.setattr(tr.urllib.request, "urlopen", lambda req, timeout: _Resp(b"{}", None))
-    t = tr.Transport(token="x" * 36)
+    t = tr.Transport(token="x" * 36, keep_alive=False)
     calls = []
     t.limiter.wait = lambda: calls.append("write")
     t.read_limiter.wait = lambda: calls.append("read")

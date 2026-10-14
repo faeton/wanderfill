@@ -12,6 +12,7 @@ stdlib so the bare client installs anywhere.
 from __future__ import annotations
 
 import gzip
+import http.client
 import json
 import sys
 import threading
@@ -115,10 +116,61 @@ class Transport:
     # write pace spent a minute asleep before the first byte of round-trip.
     read_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(0.03))
     traffic: Traffic = field(default_factory=Traffic)
+    # Keep one connection per thread open for reads. Every fresh HTTPS request
+    # pays a TCP and TLS handshake — several round trips and a few KB of
+    # certificates — before the first byte of a 25-byte answer.
+    keep_alive: bool = True
+    _local: threading.local = field(default_factory=threading.local, repr=False)
 
     def __post_init__(self) -> None:
         if not self.token or len(self.token) < 8:
             raise AuthError("no usable token; set NM_TOKEN")
+
+    # -- the read connection pool -------------------------------------------
+
+    def _pooled(self) -> bool:
+        # urllib honours HTTPS_PROXY and friends; http.client does not. With a
+        # proxy configured, go through urllib rather than around the proxy.
+        return self.keep_alive and not urllib.request.getproxies().get("https")
+
+    def _drop(self, host: str) -> None:
+        conns = self._local.__dict__.setdefault("conns", {})
+        if host in conns:
+            conns.pop(host).close()
+
+    def _conn(self, host: str, *, fresh: bool = False) -> http.client.HTTPSConnection:
+        conns = self._local.__dict__.setdefault("conns", {})
+        if fresh:
+            self._drop(host)
+        if host not in conns:
+            conns[host] = http.client.HTTPSConnection(host, timeout=self.timeout)
+        return conns[host]
+
+    def _read_pooled(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[bytes, str]:
+        """A read over this thread's kept-alive connection. Never used for writes.
+
+        A server may close an idle connection at any time, and the next request
+        on it then fails before it is read. For a read that is harmless: try once
+        more on a fresh connection. For a write it would be an unknown outcome,
+        which is why writes never come here.
+        """
+        parts = urllib.parse.urlsplit(url)
+        for fresh in (False, True):
+            conn = self._conn(parts.netloc, fresh=fresh)
+            reused = getattr(conn, "sock", None) is not None
+            try:
+                conn.request("POST", parts.path, body=body, headers=headers)
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (http.client.HTTPException, OSError):
+                self._drop(parts.netloc)
+                if reused and not fresh:
+                    continue
+                raise
+            if resp.status >= 400:
+                raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+            return raw, resp.getheader("Content-Encoding") or ""
+        raise AssertionError("unreachable")
 
     # -- low level ---------------------------------------------------------
 
@@ -142,30 +194,32 @@ class Transport:
         body = urllib.parse.urlencode(
             {k: v for k, v in fields.items() if v is not None}
         ).encode()
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": USER_AGENT,
-                # The catalogue is 173 KB plain and 42 KB gzipped; the country
-                # list 48 KB and 8 KB. urllib asks for neither unless told.
-                "Accept-Encoding": "gzip",
-                **headers,
-            },
-        )
+        all_headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+            # The catalogue is 173 KB plain and 42 KB gzipped; the country
+            # list 48 KB and 8 KB. urllib asks for neither unless told.
+            "Accept-Encoding": "gzip",
+            **headers,
+        }
+        req = urllib.request.Request(url, data=body, headers=all_headers)
+        # Writes always open a fresh connection: see _read_pooled.
+        pooled = idempotent and self._pooled()
         last: Exception | None = None
         attempts = (self.retries + 1) if idempotent else 1
         limiter = self.read_limiter if idempotent else self.limiter
         for attempt in range(attempts):
             limiter.wait()
             started = time.monotonic()
+            label = url.removeprefix(WEBAPI).removeprefix(AJAX)
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    raw = resp.read()
-                    label = url.removeprefix(WEBAPI).removeprefix(AJAX)
-                    self.traffic.add(label, len(raw), time.monotonic() - started)
-                    return _inflate(raw, resp.headers.get("Content-Encoding"))
+                if pooled:
+                    raw, _ = self._read_pooled(url, body, all_headers)
+                else:
+                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                        raw = resp.read()
+                self.traffic.add(label, len(raw), time.monotonic() - started)
+                return _inflate(raw)
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
                     raise AuthError(f"server rejected the token ({exc.code})") from exc
