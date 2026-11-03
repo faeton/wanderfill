@@ -17,7 +17,7 @@ project's legitimacy sits.
 | Surface | Base | Auth | Carries |
 |---|---|---|---|
 | Modern API | `nomadmania.com/webapi/<module>/<action>` | `NMTOKEN` header | regions, visits, trips, DARE, countries, geocoding |
-| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series — WHS, TCC, and the rest. **Not KYE**, which has its own module |
+| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series — WHS, capitals and the rest. **Not KYE** or **TCC**, which have their own endpoints |
 | Tiles | `maps.nomadmania.travel/tiles/<layer>/{z}/{x}/{y}.pbf` | none | current polygons, and every series object's coordinate |
 
 Every API call is a `POST` with an `application/x-www-form-urlencoded` body.
@@ -113,6 +113,7 @@ lived here, travelguru.
 | `quickEnter/add-visit` | `region, quality, year_from…day_to` | **auto-creates a trip** — see traps |
 | `quickEnter/update-visit` | `id, region, quality, year_from…day_to` | **full replacement** — see traps |
 | `quickEnter/updateMQP` | `region, visits` | binary DARE mark; `visits: 0` un-marks (the "Mark as not visited" button on `/dare/`). Client: `mark_dare` sends 1 only, `unmark_dare` sends 0 only |
+| `quickEnter/updateTCC` | `region, visits` | ticks one of the 16 TCC destinations no region covers; `region` holds the **TCC id** (from `data.tcc` in `quickEnter/get-regions`), not a region id. Found as `markTCC` on `/regions/`; the page un-ticks with `visits: -1`. Client: `mark_tcc` sends 1 only and refuses ids outside the TCC list |
 | `trips/new-trip` | `description, date_from, date_to, regions, regions_json` | needs **both** region fields |
 | `trips/update-trip` | as above plus `trip_id` | |
 | `trips/delete-trip` | `trip_id` | removes the trip *and* the visits it owns. Afterwards `get-trip` answers `Unauthorised.` — the same as for a trip that never existed, so read before you write. Client: `delete_trip` |

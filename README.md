@@ -505,6 +505,7 @@ cost a wrong write or a wrong number the first time.
 | `slow/get-slow-app`'s `yes` is batch-computed and lags, so one reading looks broken | Renamed `yes_stored`; `yes_scores()` recomputes the published rule |
 | A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |
 | Nothing fills KYE in from your visits, and a photo from a plane window sits in a cell like a week on the ground | `mark_kye` only ever sends `1`; `grade.py` scores candidates by implied speed, not point count |
+| `quickEnter/updateTCC` names its id field `region` but takes a TCC id, and region and TCC ids overlap | `mark_tcc` carries the id in `item` and refuses any id not in `tcc()`'s list of 16 |
 | A write retried after a lost response duplicates it | Reads retry, writes do not; an unanswered write raises `UnknownWriteOutcome` and leaves the journal open |
 | `OK` is not evidence that the profile changed as intended | `apply` re-reads every visit and every trip region, prints mismatches and anything it could not prove, and writes a `verify-*.json` |
 | A transit-quality visit is stored but does **not** mark the region, so "two regions added" moves the count by one | `MARKS_REGION_FROM`; `verify` reports the visit as `not_counted` |

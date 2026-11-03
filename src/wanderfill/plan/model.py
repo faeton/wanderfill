@@ -31,7 +31,7 @@ from typing import Any, Literal
 SCHEMA = 1
 
 OpKind = Literal["add_visit", "update_visit", "create_trip", "mark_dare",
-                 "mark_kye", "tick_series"]
+                 "mark_kye", "mark_tcc", "tick_series"]
 Bucket = Literal["apply", "review", "reject"]
 
 
@@ -134,8 +134,9 @@ def regions_touched(ops: Iterable[Op]) -> set[int]:
     regions outside the drift check — the exact regions the trip is about to
     write visits into.
 
-    ``mark_kye`` and ``tick_series`` contribute nothing: their ids live in
-    ``item`` and are a different namespace that merely overlaps numerically.
+    ``mark_kye``, ``mark_tcc`` and ``tick_series`` contribute nothing: their
+    ids live in ``item`` and are a different namespace that merely overlaps
+    numerically.
     """
     out: set[int] = set()
     for op in ops:
@@ -163,7 +164,7 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
     elsewhere while a plan sat on disk is not a reason to refuse it.
     """
     visits = snapshot.get("visits", {})
-    return {
+    basis = {
         "visited": sorted(snapshot.get("visited_regions", [])),
         "dare": sorted(snapshot.get("visited_dare", [])),
         "visits": {
@@ -174,3 +175,8 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
             for r in sorted(set(regions))
         },
     }
+    # Only in a snapshot taken for a TCC plan, so every other plan's fingerprint
+    # is what it was before TCC existed.
+    if "visited_tcc" in snapshot:
+        basis["tcc"] = sorted(snapshot["visited_tcc"])
+    return basis

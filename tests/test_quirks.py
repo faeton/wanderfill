@@ -1115,6 +1115,117 @@ def test_mark_kye_never_unticks():
 
 
 # --------------------------------------------------------------------------
+# TCC: the field is called `region`, the id is not one
+# --------------------------------------------------------------------------
+
+TCC_ROWS = {"quickEnter/get-regions": {"result": "OK", "data": {"regions": [], "dare": [], "tcc": [
+    {"id": 64, "name": "Cyprus – Sovereign BBA (UK) – Akrotiri and Dhekelia", "visited": 0},
+    {"id": 325, "name": "Antarctica - British Antarctic Territory", "visited": 1},
+]}}}
+
+
+def test_mark_tcc_sends_one_and_the_tcc_id():
+    """Found as markTCC on /regions/: {region: <tcc id>, visits: 1}; the page un-ticks with -1."""
+    c, t = client(TCC_ROWS)
+    c.mark_tcc(64)
+    action, fields = t.sent[-1]
+    assert action == "quickEnter/updateTCC"
+    assert fields == {"region": 64, "visits": 1}
+
+
+def test_mark_tcc_refuses_an_id_that_is_not_a_tcc_destination():
+    """`region` invites a region id; region 493 is Kuwait, and no TCC row is 493."""
+    c, t = client(TCC_ROWS)
+    with pytest.raises(PrecisionLoss):
+        c.mark_tcc(493)
+    assert not [a for a, _ in t.sent if a == "quickEnter/updateTCC"]
+
+
+def test_tcc_visited_reads_the_flag_not_presence():
+    c, _ = client(TCC_ROWS)
+    assert c.visited_tcc_ids() == {325}
+
+
+def test_tcc_costs_one_list_read_per_run_not_one_per_op():
+    """The first live apply of four ticks spent 636 requests re-reading the list."""
+    from wanderfill.plan.apply import verify
+    c, t = client(TCC_ROWS)
+    c.mark_tcc(64)
+    c.mark_tcc(325)
+    lists = [a for a, _ in t.sent if a == "quickEnter/get-regions"]
+    assert len(lists) == 29
+    t.sent.clear()
+    report = verify(c, [Op(kind="mark_tcc", item=64), Op(kind="mark_tcc", item=325)])
+    assert len([a for a, _ in t.sent if a == "quickEnter/get-regions"]) == 29
+    assert report["checked"] == 2
+    assert report["mismatches"] == ["TCC destination 64 did not stick"]
+
+
+def test_tcc_verify_reads_the_server_after_the_writes_not_the_catalogue():
+    """The id cache must never answer "is it ticked": that would pass every write."""
+    from wanderfill.plan.apply import verify
+    c, t = client(dict(TCC_ROWS))  # a copy: this test changes the server's answer
+    c.mark_tcc(325)
+    t.replies["quickEnter/get-regions"] = {"result": "OK", "data": {"tcc": [
+        {"id": 64, "visited": 0}, {"id": 325, "visited": 0},
+    ]}}
+    report = verify(c, [Op(kind="mark_tcc", item=325)])
+    assert report["mismatches"] == ["TCC destination 325 did not stick"]
+
+
+def test_tcc_list_with_a_field_dropped_is_an_error_not_unticked():
+    """`{"result": "OK"}` read as an empty list would report a good write as failed."""
+    c, _ = client()
+    with pytest.raises(VerificationFailed):
+        c.tcc()
+    c, _ = client({"quickEnter/get-regions": {"result": "OK", "data": {"tcc": [{"id": 64}]}}})
+    with pytest.raises(VerificationFailed):
+        c.visited_tcc_ids()
+
+
+def test_tcc_list_may_be_empty_most_megaregions_have_none():
+    c, _ = client({"quickEnter/get-regions": {"result": "OK", "data": {"tcc": []}}})
+    assert c.tcc() == {}
+
+
+def test_verify_says_unproven_when_the_tcc_list_cannot_be_read():
+    from wanderfill.plan.apply import verify
+    c, t = client()
+    report = verify(c, [Op(kind="mark_tcc", item=64), Op(kind="mark_tcc", item=325)])
+    assert report["mismatches"] == []
+    assert len(report["unproven"]) == 2
+    assert len([a for a, _ in t.sent if a == "quickEnter/get-regions"]) <= 29
+
+
+def test_tcc_plan_drifts_when_a_tick_changes_and_other_plans_do_not_notice():
+    from wanderfill.plan.model import basis_of, fingerprint
+    base = {"visited_regions": [1], "visited_dare": [], "visits": {}}
+    before = fingerprint(basis_of(base | {"visited_tcc": [64]}, []))
+    after = fingerprint(basis_of(base | {"visited_tcc": []}, []))
+    assert before != after
+    assert basis_of(base, []).keys() == {"visited", "dare", "visits"}
+
+
+def test_snapshot_reads_tcc_only_when_asked():
+    c, t = client(TCC_ROWS | {"maps/get-visited-regions-ids-simple": {"ids": []},
+                              "maps/get-visited-dare-ids-simple": {"ids": []},
+                              "user/status-quick": {"uid": 7}})
+    assert "visited_tcc" not in c.snapshot([])
+    assert not [a for a, _ in t.sent if a == "quickEnter/get-regions"]
+    assert c.snapshot([], tcc=True)["visited_tcc"] == [325]
+
+
+def test_tcc_op_carries_its_id_in_item_and_touches_no_region():
+    from wanderfill.plan.apply import _execute
+    from wanderfill.plan.model import regions_touched
+    c, t = client(TCC_ROWS)
+    op = Op(kind="mark_tcc", item=64)
+    assert regions_touched([op]) == set()
+    _execute(c, op)
+    assert t.sent[-1] == ("quickEnter/updateTCC", {"region": 64, "visits": 1})
+
+
+# --------------------------------------------------------------------------
 # YES: undated is 8, not the age — and the rule of thumb is not a rule
 # --------------------------------------------------------------------------
 
@@ -1210,6 +1321,7 @@ def test_writes_are_not_retried():
     assert Transport._is_write("quickEnter/update-visit")
     assert Transport._is_write("trips/new-trip")
     assert Transport._is_write("kye/set-kye")
+    assert Transport._is_write("quickEnter/updateTCC")
     assert not Transport._is_write("quickEnter/get-visits-to-region")
     assert not Transport._is_write("slow/get-slow-app")
     assert not Transport._is_write("regions/get-regions-list-2")

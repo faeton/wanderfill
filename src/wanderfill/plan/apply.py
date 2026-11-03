@@ -186,7 +186,8 @@ def apply_plan(
     # namespace that merely overlaps numerically. Snapshotting one as a region
     # fetches an unrelated region's visits and fails drift for the wrong reason.
     regions = sorted(regions_touched(ops))
-    snapshot = client.snapshot(regions or None)
+    wants_tcc = any(o.kind == "mark_tcc" for o in ops)
+    snapshot = client.snapshot(regions or None, tcc=wants_tcc)
     (workdir / f"snapshot-{stamp}.json").write_text(
         json.dumps(snapshot, indent=1, default=str), encoding="utf-8"
     )
@@ -294,6 +295,8 @@ def verify(
     answered by resemblance. ``unproven`` is for anything the read-back could
     not establish either way. It is not a pass.
     """
+    tcc_ticked: set[int] | None = None
+    tcc_unread: str | None = None
     out: dict[str, Any] = {
         "checked": 0, "mismatches": [], "phantom_trips": [], "not_counted": [], "unproven": [],
     }
@@ -438,6 +441,21 @@ def verify(
             if op.item not in set(client.kye().get("visited", [])):
                 out["mismatches"].append(f"KYE quadrant {op.item} did not stick")
 
+        elif op.kind == "mark_tcc":
+            out["checked"] += 1
+            # 29 requests, so once per verify. Every write has run by now.
+            if tcc_ticked is None and tcc_unread is None:
+                try:
+                    tcc_ticked = client.visited_tcc_ids()
+                except VerificationFailed as exc:
+                    tcc_unread = str(exc)
+            if tcc_ticked is None:
+                out["unproven"].append(
+                    f"TCC destination {op.item}: the list could not be read back ({tcc_unread})"
+                )
+            elif op.item not in tcc_ticked:
+                out["mismatches"].append(f"TCC destination {op.item} did not stick")
+
         elif op.kind == "mark_dare":
             out["checked"] += 1
             if op.region not in client.visited_dare_ids():
@@ -536,6 +554,10 @@ def _execute(client: NomadMania, op: Op):
         # `region`: a qid and an NM region id are different namespaces that
         # overlap numerically, and conflating them is silent and expensive.
         return client.mark_kye(op.item)
+
+    if op.kind == "mark_tcc":
+        # `item`, like KYE: TCC 64 is Akrotiri and Dhekelia, region 64 is not.
+        return client.mark_tcc(op.item)
 
     if op.kind == "tick_series":
         if not client.tick_series_item(op.series, op.item):

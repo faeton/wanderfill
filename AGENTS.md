@@ -26,7 +26,8 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
    it into a file that gets committed, never paste it into an issue, a gist, or a
    message to another model. Read it from the environment and keep it there.
 5. **Ask before the first write of each kind.** Adding visits, creating trips,
-   ticking series, marking DARE and marking KYE are five different blast radii.
+   ticking series, marking DARE, marking KYE and ticking TCC are six different
+   blast radii.
    Approval for one is not approval for the next. Series are not one kind either:
    World Capitals and Art Museums are different questions.
 6. **Open every source that covers the year before you write a date.** Not the
@@ -87,7 +88,7 @@ a plan has to be bound to.
 | Surface | Base | Auth | What lives there |
 |---|---|---|---|
 | Modern API | `nomadmania.com/webapi/<module>/<action>` | `NMTOKEN` header | regions, visits, trips, DARE, countries, geocoding |
-| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series: WHS, TCC, … — **not KYE**, which has its own module |
+| Legacy AJAX | `nomadmania.com/ajax/V2/`, `/ajax/my_series/` | `token` **form field** | all 69 series: WHS, capitals, … — **not KYE** or **TCC**, which have their own |
 | Tiles | `maps.nomadmania.travel/tiles/<layer>/{z}/{x}/{y}.pbf` | none | current polygons and every series object's coordinates |
 
 All API calls are `POST` with `application/x-www-form-urlencoded`. Tiles are
@@ -281,7 +282,7 @@ Match areas by point-in-polygon against `tiles/dare/`. Beware:
 boolean — `"1142"` means visited, `"0"` means not. Use
 `maps/get-visited-dare-ids-simple` instead.
 
-**Series** (69 of them, including UNESCO WHS = id 22, Know Your Earth, TCC) live
+**Series** (69 of them, including UNESCO WHS = id 22 and World Capitals = id 1) live
 on the legacy surface:
 
 ```
@@ -330,6 +331,22 @@ km/h as an aircraft. On the first run this caught two mid-Pacific boxes 1,100 km
 apart 2.5 hours apart, a flight over Yemen at 305 km/h, and two airport layovers
 that a point-count test would have waved through. Hold those for the user; do
 not reject them, and do not mark them.
+
+**TCC is not a series either.** The Travelers' Century Club list has 330
+destinations and NomadMania derives almost all of them from your regions — no
+endpoint lists those, only `score_tcc` on the profile. The exceptions are the
+16 that no region covers (seven Antarctic claims, Akrotiri and Dhekelia,
+Lampedusa, Midway, Wake, Lord Howe…), which ride along in
+`quickEnter/get-regions` as `data.tcc` rows and are ticked by hand:
+`quickEnter/updateTCC {region: <tcc_id>, visits: 1}`. The field says `region`
+and holds a TCC id; `mark_tcc` refuses anything not in that list of 16. The page
+un-ticks with `visits: -1`, which is a deletion and is not in the client: a wrong
+tick has to be undone by the owner on `/regions/`, so ask first. A TCC plan's drift
+basis includes the ticked ids, and an unreadable list goes under `unproven`.
+
+Antarctic claims overlap: Argentina 25–74°W, the UK 20–80°W, Chile 53–90°W. A
+landing at 64°W is inside all three. Which ones the person ticks is their call;
+say where the photos are, not which flags to plant.
 
 **Countries are derived, not stored.** Marking regions updates the country
 counts, UN, UN+, SLOW and YES automatically. There is nothing to write.
@@ -564,6 +581,7 @@ while the snapshot and drift record describe something else entirely.
 | `create_trip` | `regions` (a list of dicts) | region ids — **not** `region` |
 | `mark_dare` | `region` | DARE area id |
 | `mark_kye` | `item` | 10°×10° quadrant id |
+| `mark_tcc` | `item` | TCC destination id (one of the 16 hand-entered) |
 | `tick_series` | `series` + `item` | series id + object id |
 
 Region 570 and quadrant 570 are both valid and unrelated. Copy an existing op of

@@ -820,7 +820,7 @@ def cmd_check(args) -> int:
         problems.append("the plan contains the same write twice")
 
     regions = sorted(regions_touched(ops))
-    snap = c.snapshot(regions or None)
+    snap = c.snapshot(regions or None, tcc=any(o.kind == "mark_tcc" for o in ops))
     expected = plan.basis.get("fingerprint")
     if not expected:
         problems.append("no basis fingerprint — apply will refuse this plan")
@@ -864,6 +864,18 @@ def cmd_state(args) -> int:
         print(f"KYE           {ticked:>4} / {total}   ({100 * ticked / total:.0f}%)")
     else:
         print("KYE           unavailable")
+
+    # Only the TCC destinations no region covers; the rest of the 330 follow
+    # from regions and are not listed by any endpoint. See NomadMania.tcc().
+    try:
+        tcc = c.tcc()
+    except VerificationFailed:
+        print("TCC by hand   unavailable")
+    else:
+        hand = sorted(r["name"] for r in tcc.values() if r["visited"] == 1)
+        print(f"TCC by hand   {len(hand):>4} / {len(tcc)}   (the rest of TCC follows from regions)")
+        for name in hand:
+            print(f"                {name}")
 
     if args.series:
         s = c.series(args.series)

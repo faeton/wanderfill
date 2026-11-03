@@ -222,6 +222,8 @@ class NomadMania:
         self.cache = cache
         # ``progress(label, done, total)`` for bulk reads; the CLI throttles it.
         self.progress: Callable[[str, int, int], None] | None = None
+        # Which ids are TCC destinations, not which are ticked. See mark_tcc.
+        self._tcc_ids: set[int] | None = None
 
     def _many(self, label: str, fn: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
         """``fn`` over ``items`` on a small thread pool, in order, reporting progress.
@@ -868,6 +870,75 @@ class NomadMania:
         """
         return self.t.webapi("quickEnter/updateMQP", region=dare_id, visits=1)
 
+    # ------------------------------------------------------------------ TCC
+
+    def tcc(self) -> dict[int, dict]:
+        """The TCC destinations that **no NomadMania region covers**, by id.
+
+        TCC is the Travelers' Century Club's list of 330. NomadMania derives
+        almost all of it from your regions, and there is no endpoint that lists
+        those derived 314 — ``profile`` only gives ``score_tcc``. What *is*
+        listed are the 16 that no region covers (the seven Antarctic claims,
+        Akrotiri and Dhekelia, Lampedusa, Midway, Wake…): ``quickEnter/
+        get-regions`` carries them beside the regions and DARE, as
+        ``data.tcc`` rows ``{id, name, visited: 0|1}``, scattered across the 29
+        megaregions. These are ticked by hand, and only these.
+
+        The ids are their own namespace: TCC 64 is Akrotiri and Dhekelia, region
+        64 is something else. 29 reads.
+
+        Strict, because the answer is used as proof: a response without the list,
+        or a row without its flag, raises :class:`VerificationFailed` instead of
+        reading as "not ticked". An empty list is a real answer: most megaregions
+        have none.
+        """
+        def one(mega: int) -> list[dict]:
+            action = "quickEnter/get-regions"
+            reply = self.t.webapi(action, megaregion=mega)
+            data = reply.get("data") if isinstance(reply, dict) else None
+            rows = data.get("tcc") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise VerificationFailed(
+                    action, f"megaregion {mega} answered with no 'tcc' list", reply
+                )
+            if any(not isinstance(r, dict) or r.get("visited") not in (0, 1) for r in rows):
+                raise VerificationFailed(
+                    action, f"megaregion {mega} has a TCC row with no 0/1 'visited'", reply
+                )
+            return rows
+
+        out: dict[int, dict] = {}
+        for rows in self._many("TCC lists", one, list(range(29))):
+            for r in rows:
+                out[int(r["id"])] = r
+        return out
+
+    def visited_tcc_ids(self) -> set[int]:
+        return {i for i, r in self.tcc().items() if r["visited"] == 1}
+
+    def mark_tcc(self, tcc_id: int) -> dict:
+        """Tick one hand-entered TCC destination: ``quickEnter/updateTCC {region, visits: 1}``.
+
+        That is the "visited" button in the TCC block on ``/regions/``
+        (``markTCC`` in the page script); the field is called ``region`` but it
+        carries the TCC id. Only ever sends 1 — the page un-ticks with
+        ``visits: -1``, not 0, and that would be a deletion, which this method
+        does not do.
+
+        Refuses an id that is not in :meth:`tcc`, because the field name invites
+        passing a region id, and region ids and TCC ids overlap. The list of ids
+        is read once per client: it is a catalogue, 29 requests, and it does not
+        change between two ticks. Whether one is *ticked* is never remembered.
+        """
+        if self._tcc_ids is None:
+            self._tcc_ids = set(self.tcc())
+        if int(tcc_id) not in self._tcc_ids:
+            raise PrecisionLoss(
+                f"{tcc_id} is not a hand-entered TCC destination; the {len(self._tcc_ids)} "
+                "that exist are listed by tcc(). A region id here would tick something else."
+            )
+        return self.t.webapi("quickEnter/updateTCC", region=int(tcc_id), visits=1)
+
     def create_trip(
         self, date_from: dt.date, date_to: dt.date, regions: Sequence[dict], description: str = ""
     ) -> dict:
@@ -923,14 +994,17 @@ class NomadMania:
 
     # ------------------------------------------------------------- helpers
 
-    def snapshot(self, regions: Iterable[int] | None = None) -> dict:
+    def snapshot(self, regions: Iterable[int] | None = None, *, tcc: bool = False) -> dict:
         """Everything needed to tell later whether a write did what was intended.
 
         Taken before any apply. If this fails, the apply must not start.
+
+        ``tcc=True`` adds the ticked TCC ids, 29 more reads, for a plan that
+        writes them. It is opt-in so that plans without TCC keep their fingerprint.
         """
         ids = self.visited_region_ids()
         targets = sorted(set(regions) if regions is not None else ids)
-        return {
+        snap = {
             "account": self.account_id(),
             "taken_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "visited_regions": sorted(ids),
@@ -942,3 +1016,6 @@ class NomadMania:
                 for r in targets
             },
         }
+        if tcc:
+            snap["visited_tcc"] = sorted(self.visited_tcc_ids())
+        return snap
