@@ -1402,3 +1402,81 @@ def test_trip_region_dates_as_the_wire_carries_them():
               regions=[{"id": 7, "quality": 3}])
     assert verify(_readback([_stored()], marked=[7]), [bare],
                   {bare.key: {"trip_id": 900}})["mismatches"] == []
+
+
+# ------------------------------------------- the Photos date window
+
+
+def _photos_library(tmp_path, shots):
+    """A minimal Photos.sqlite: (utc datetime, offset seconds, lat, lon) per photo."""
+    import sqlite3
+
+    from wanderfill.sources.photos_app import APPLE_EPOCH_OFFSET
+
+    db = tmp_path / "lib.photoslibrary" / "database" / "Photos.sqlite"
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(db)
+    con.executescript("""
+        CREATE TABLE ZASSET (Z_PK INTEGER PRIMARY KEY, ZUUID, ZDATECREATED, ZLATITUDE,
+            ZLONGITUDE, ZDIRECTORY, ZFILENAME, ZFAVORITE, ZKIND, ZKINDSUBTYPE,
+            ZTRASHEDSTATE, ZSAVEDASSETTYPE, ZMOMENT);
+        CREATE TABLE ZADDITIONALASSETATTRIBUTES (ZASSET, ZTIMEZONEOFFSET,
+            ZORIGINALFILENAME, ZCAMERACAPTUREDEVICE);
+        CREATE TABLE ZMOMENT (Z_PK INTEGER PRIMARY KEY, ZTITLE);
+    """)
+    for pk, (utc, offset, lat, lon) in enumerate(shots, 1):
+        ts = utc.replace(tzinfo=dt.timezone.utc).timestamp() - APPLE_EPOCH_OFFSET
+        con.execute("INSERT INTO ZASSET VALUES (?,?,?,?,?,'d','f.jpg',0,0,0,0,0,NULL)",
+                    (pk, f"u{pk}", ts, lat, lon))
+        con.execute("INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (?,?,'f.jpg',0)",
+                    (pk, offset))
+    con.commit()
+    con.close()
+    return db.parents[1]
+
+
+@pytest.fixture
+def mac_on_tahiti_time(monkeypatch):
+    import time
+
+    monkeypatch.setenv("TZ", "Pacific/Tahiti")
+    time.tzset()
+    # a no-op tzset would let the test pass without testing anything
+    assert time.timezone == 10 * 3600
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_since_is_the_photos_date_not_the_macs(tmp_path, mac_on_tahiti_time):
+    """2 Nov 2026: with the Mac on UTC-10, `since=29 Oct` cut at 10:00 UTC and
+    dropped the morning of 29 Oct in Sydney (UTC+11) whole, so a plan could not
+    see the first day of the stay it was extending."""
+    from wanderfill.sources.photos_app import PhotosAppSource
+
+    sydney = 11 * 3600
+    lib = _photos_library(tmp_path, [
+        (dt.datetime(2026, 10, 28, 12, 30), sydney, -33.86, 151.21),  # 28 Oct 23:30 local
+        (dt.datetime(2026, 10, 29, 1, 43), sydney, -33.92, 151.17),   # 29 Oct 12:43 local
+        (dt.datetime(2026, 10, 30, 10, 55), sydney, -33.94, 151.17),  # 30 Oct 21:55 local
+        (dt.datetime(2026, 10, 30, 13, 30), sydney, -33.86, 151.21),  # 31 Oct 00:30 local
+    ])
+    src = PhotosAppSource(library=lib, since=dt.date(2026, 10, 29),
+                          until=dt.date(2026, 10, 30))
+    days = sorted({p.date for p in src.points()})
+    assert days == [dt.date(2026, 10, 29), dt.date(2026, 10, 30)]
+    taken = [a.taken for a in src.assets()]
+    assert taken == [dt.datetime(2026, 10, 29, 12, 43), dt.datetime(2026, 10, 30, 21, 55)]
+
+
+def test_unset_bounds_are_open(tmp_path, mac_on_tahiti_time):
+    """No `since` reaches a scanned 1965 print; no `until` reaches a photo whose
+    own clock is already tomorrow by this Mac's."""
+    from wanderfill.sources.photos_app import PhotosAppSource
+
+    tomorrow = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(minutes=5)
+    lib = _photos_library(tmp_path, [
+        (dt.datetime(1965, 6, 1, 12, 0), 0, 51.5, -0.12),
+        (tomorrow, 14 * 3600, 1.87, -157.4),  # Kiritimati, UTC+14
+    ])
+    assert len(list(PhotosAppSource(library=lib).assets())) == 2

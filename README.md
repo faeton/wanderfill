@@ -515,6 +515,7 @@ cost a wrong write or a wrong number the first time.
 | UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
 | A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |
 | urllib asks for no compression, and the catalogue is 173 KB plain | Every request sends `Accept-Encoding: gzip`; `_inflate` also sniffs the magic bytes |
+| Photos stores absolute time and the offset apart, so a date window cut at the Mac's midnight trims or pads the edge days when the Mac and the camera are in different zones | `WINDOW` cuts on the photo's own wall clock; `test_since_is_the_photos_date_not_the_macs` |
 
 ## KYE: the one list with no judgement call in the geometry
 

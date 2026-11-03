@@ -93,7 +93,7 @@ five other countries somebody may well be claiming. Only Null Island — exactly
 (0, 0), the classic bad fix — is dropped.
 """
 
-LOCAL = "a.ZDATECREATED + ? + COALESCE(aa.ZTIMEZONEOFFSET, 0)"
+LOCAL = "a.ZDATECREATED + :epoch + COALESCE(aa.ZTIMEZONEOFFSET, 0)"
 """Wall-clock time where the photo was taken.
 
 ``ZDATECREATED`` is absolute; the offset that made it a clock reading is stored
@@ -104,17 +104,33 @@ a rounding detail. It also has to match between ``points()`` and ``assets()``,
 or the importer and the dossier disagree about which day a border was crossed.
 """
 
+WINDOW = f"""
+  AND a.ZDATECREATED >= :coarse_lo
+  AND a.ZDATECREATED < :coarse_hi
+  AND {LOCAL} >= :lo
+  AND {LOCAL} < :hi
+"""
+"""``since`` / ``until`` are dates on the photo's own clock, so the cut is too.
+
+The days are labelled in the photo's wall-clock time (``LOCAL``), so the window
+has to be drawn in it as well. Cutting the absolute ``ZDATECREATED`` at *this
+Mac's* midnight instead trims or pads the edge days by the gap between the two
+zones: on 2 Nov 2026, with the Mac on Tahiti time (UTC-10), ``since=29 Oct``
+cut at 10:00 UTC and dropped that morning's Sydney photos (UTC+11) whole. The
+``coarse_*`` pair is the same window widened by a day each way on the absolute
+column, there only so the index still narrows the scan; offsets never exceed
+14 hours, so it cannot exclude anything the exact test would keep.
+"""
+
 QUERY = f"""
 SELECT date({LOCAL}, 'unixepoch')                 AS day,
-       ROUND(a.ZLATITUDE, ?)                      AS lat,
-       ROUND(a.ZLONGITUDE, ?)                     AS lon,
+       ROUND(a.ZLATITUDE, :precision)                      AS lat,
+       ROUND(a.ZLONGITUDE, :precision)                     AS lon,
        COUNT(*)                                   AS assets
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 WHERE {MINE}
-  AND a.ZDATECREATED >= ?
-  AND a.ZDATECREATED < ?
-GROUP BY day, lat, lon
+{WINDOW}GROUP BY day, lat, lon
 ORDER BY day, lat, lon
 """
 
@@ -134,9 +150,7 @@ FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
 WHERE {MINE}
-  AND a.ZDATECREATED >= ?
-  AND a.ZDATECREATED < ?
-ORDER BY ts
+{WINDOW}ORDER BY ts
 """
 
 
@@ -230,7 +244,7 @@ class PhotosAppSource:
                 shutil.copy2(side, dst.with_name(dst.name + suffix))
         return dst
 
-    def _read(self, sql: str, params: tuple) -> list[tuple]:
+    def _read(self, sql: str, params: dict) -> list[tuple]:
         with tempfile.TemporaryDirectory(prefix="wanderfill-photos-") as tmp:
             db = self._copy_database(Path(tmp))
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -239,15 +253,25 @@ class PhotosAppSource:
             finally:
                 con.close()
 
-    def _bounds(self) -> tuple[float, float]:
-        lo = _apple_ts(self.since or dt.date(1970, 1, 1))
-        hi = _apple_ts((self.until or dt.date.today()) + dt.timedelta(days=1))
-        return lo, hi
+    def _bounds(self) -> dict[str, float]:
+        """Named parameters for ``WINDOW``; see its docstring for why two pairs."""
+        day = dt.timedelta(days=1)
+        # Unset bounds are open. `date.today()` is this Mac's today, which can be
+        # a day behind the clock of the place being photographed, and a scanned
+        # print can carry a date before 1970.
+        lo = _wall_clock(self.since) if self.since else float("-inf")
+        hi = _wall_clock(self.until + day) if self.until else float("inf")
+        return {
+            "epoch": APPLE_EPOCH_OFFSET,
+            "lo": lo,
+            "hi": hi,
+            "coarse_lo": lo - APPLE_EPOCH_OFFSET - day.total_seconds(),
+            "coarse_hi": hi - APPLE_EPOCH_OFFSET + day.total_seconds(),
+        }
 
     def assets(self) -> Iterator[PhotoAsset]:
         """Every qualifying photo, one row each, with its identity intact."""
-        lo, hi = self._bounds()
-        rows = self._read(ASSET_QUERY, (APPLE_EPOCH_OFFSET, lo, hi))
+        rows = self._read(ASSET_QUERY, self._bounds())
         for (
             uuid, ts, lat, lon, directory, filename,
             original_name, capture_device, favorite, kind, place,
@@ -274,8 +298,7 @@ class PhotosAppSource:
             )
 
     def points(self) -> Iterator[DayPoint]:
-        lo, hi = self._bounds()
-        rows = self._read(QUERY, (APPLE_EPOCH_OFFSET, self.precision, self.precision, lo, hi))
+        rows = self._read(QUERY, {**self._bounds(), "precision": self.precision})
         for day, lat, lon, assets in rows:
             yield DayPoint(
                 date=dt.date.fromisoformat(day),
@@ -286,7 +309,18 @@ class PhotosAppSource:
             )
 
 
+def _wall_clock(day: dt.date) -> float:
+    """Midnight starting ``day`` on a wall clock, in the units ``LOCAL`` yields."""
+    return dt.datetime.combine(day, dt.time.min, dt.timezone.utc).timestamp()
+
+
 def _apple_ts(day: dt.date) -> float:
+    """This Mac's midnight as an absolute Photos timestamp.
+
+    Not used by the package any more: it compares an absolute time against a
+    machine-local midnight, which is the bug ``WINDOW`` fixes. Kept for the
+    one-off scripts in ``workspace/`` that still import it.
+    """
     return dt.datetime.combine(day, dt.time.min).timestamp() - APPLE_EPOCH_OFFSET
 
 
