@@ -13,6 +13,7 @@ import pytest
 
 from wanderfill.api.client import NomadMania, Visit, YearOnly
 from wanderfill.api.errors import ApiError, DriftError, PrecisionLoss, VerificationFailed
+from wanderfill.api.transport import Transport
 from wanderfill.plan.model import Op, Plan
 from wanderfill.plan.segment import (
     MULTI_REGION_FLOOR,
@@ -1592,3 +1593,185 @@ def test_unset_bounds_are_open(tmp_path, mac_on_tahiti_time):
         (tomorrow, 14 * 3600, 1.87, -157.4),  # Kiritimati, UTC+14
     ])
     assert len(list(PhotosAppSource(library=lib).assets())) == 2
+
+# trip headers: update-visit moves the visit, never the trip around it
+# --------------------------------------------------------------------------
+
+def _row(rid=1266, quality=5, a="2026-10-31", b="2026-11-12", hidden=0):
+    y1, m1, d1 = map(int, a.split("-"))
+    y2, m2, d2 = map(int, b.split("-"))
+    return {"id": rid, "quality": quality, "hidden": hidden, "date_from": a, "date_to": b,
+            "year_from": y1, "month_from": m1, "day_from": d1,
+            "year_to": y2, "month_to": m2, "day_to": d2}
+
+
+def _trip(trip_id, date_from, date_to, rows=None, description="kept"):
+    return {"result": "OK", "trip": {
+        "id": trip_id, "date_from": date_from, "date_to": date_to, "year": None,
+        "description": description, "regions": rows or [_row()]}}
+
+
+def _visits(*rows):
+    """rows: (visit_id, trip_id, quality, date_from, date_to)"""
+    out = []
+    for vid, tid, q, a, b in rows:
+        y1, m1, d1 = map(int, a.split("-"))
+        y2, m2, d2 = map(int, b.split("-"))
+        out.append({"id": vid, "trip_id": tid, "quality": q, "year_from": y1, "month_from": m1,
+                    "day_from": d1, "year_to": y2, "month_to": m2, "day_to": d2})
+    return {"result": "OK", "data": out}
+
+
+def _listing(*trips):
+    return {"result": "OK", "trips": [
+        {"id": tid, "date_from": a, "date_to": b, "regions": [{"id": r} for r in regs]}
+        for tid, a, b, regs in trips]}
+
+
+OLD = _visits((100, 7, 5, "2026-10-31", "2026-11-12"), (50, None, 3, "2025-10-22", "2025-10-30"))
+NOT_FOUND = {"result": "ERROR", "result_description": "Trip not found."}
+STALE = (7, "2026-10-31", "2026-11-02", [1266])
+FIXED = ("2026-10-31", "2026-11-12")
+
+
+def _sync(get_trip, visits, listings):
+    t = SequencedTransport({"trips/get-trip": get_trip,
+                            "quickEnter/get-visits-to-region": visits,
+                            "trips/get-trips-for-year-app": listings})
+    return NomadMania(token="fake", transport=t), t
+
+
+def _posts(t):
+    return [f for a, f in t.sent if a == "trips/update-trip"]
+
+
+def test_trip_header_lags_update_visit_and_is_resynced_like_the_site():
+    """Society Islands trip 501536 read 31 Oct - 2 Nov around a 31 Oct - 12 Nov visit."""
+    c, t = _sync([_trip(7, "2026-10-31", "2026-11-02"), _trip(7, *FIXED)],
+                 [OLD, OLD], [_listing(STALE)])
+    out = c.sync_trip_header(7)
+    (fields,) = _posts(t)
+    assert fields["trip_id"] == 7
+    assert (fields["date_from"], fields["date_to"]) == FIXED
+    assert fields["regions"] == "[object Object]"
+    assert fields["description"] == "kept"
+    assert json.loads(fields["regions_json"])[0]["quality"] == 5, "the site would send 3"
+    assert out["now"] == FIXED and out["visits"] == {1266: 100}
+
+
+def test_update_trip_501536_came_back_as_a_new_trip_and_a_new_visit():
+    """The first live save deleted trip 501536 + visit 14138557 and created
+    547375 + 14213716. The read-back must follow the new id, not call it lost."""
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                 [OLD, new],
+                 [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
+    out = c.sync_trip_header(7)
+    assert (out["trip_id"], out["old_trip_id"], out["visits"]) == (8, 7, {1266: 101})
+
+
+def test_update_trip_a_preexisting_twin_is_not_the_replacement():
+    """Trip 9 already had this span and region; it must not pose as the new trip."""
+    twin = (9, *FIXED, [1266])
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND],
+                 [OLD], [_listing(STALE, twin), _listing(twin), _listing(twin)])
+    with pytest.raises(VerificationFailed, match="0 NEW trip"):
+        c.sync_trip_header(7)
+
+
+def test_update_trip_old_visit_left_standalone_beside_the_new_one():
+    orphan = _visits((101, 8, 5, *FIXED), (100, None, 5, *FIXED),
+                     (50, None, 3, "2025-10-22", "2025-10-30"))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                 [OLD, orphan], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
+    with pytest.raises(VerificationFailed, match="outside the trip changed"):
+        c.sync_trip_header(7)
+
+
+def test_update_trip_unrelated_visit_lost():
+    lost = _visits((101, 8, 5, *FIXED))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                 [OLD, lost], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
+    with pytest.raises(VerificationFailed, match="outside the trip changed"):
+        c.sync_trip_header(7)
+
+
+def test_update_trip_replacement_visit_downgraded():
+    worse = _visits((101, 8, 3, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                 [OLD, worse], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
+    with pytest.raises(VerificationFailed, match="visit 101 reads"):
+        c.sync_trip_header(7)
+
+
+def test_update_trip_hidden_or_description_change_is_caught():
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"),
+                  _trip(7, *FIXED, rows=[_row(hidden=1)])], [OLD, OLD], [_listing(STALE)])
+    with pytest.raises(VerificationFailed, match="regions changed"):
+        c.sync_trip_header(7)
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), _trip(7, *FIXED, description="")],
+                 [OLD, OLD], [_listing(STALE)])
+    with pytest.raises(VerificationFailed, match="description changed"):
+        c.sync_trip_header(7)
+
+
+def test_update_trip_refuses_when_trip_row_and_visit_disagree_on_quality():
+    """The body carries the row's quality; sending it would rewrite the visit."""
+    c, t = _sync([_trip(7, "2026-10-31", "2026-11-02", rows=[_row(quality=3)])],
+                 [OLD], [_listing(STALE)])
+    with pytest.raises(ApiError, match="trip row says q3"):
+        c.sync_trip_header(7)
+    assert not _posts(t)
+
+
+def test_update_trip_refusals_send_nothing():
+    c, t = _sync([_trip(7, *FIXED)], [], [])
+    with pytest.raises(ApiError, match="already spans"):
+        c.sync_trip_header(7)
+    year_only = {**_row(), "date_from": None, "date_to": None}
+    c2, t2 = _sync([_trip(7, None, None, rows=[year_only])], [], [])
+    with pytest.raises(ApiError, match="year-only"):
+        c2.sync_trip_header(7)
+    assert not _posts(t) and not _posts(t2)
+
+
+def test_update_trip_write_error_is_not_resent_and_reports_candidates():
+    class Boom(SequencedTransport):
+        def webapi(self, action, **fields):
+            if action == "trips/update-trip":
+                self.sent.append((action, fields))
+                raise ApiError(action, "no answer", {})
+            return super().webapi(action, **fields)
+
+    t = Boom({"trips/get-trip": [_trip(7, "2026-10-31", "2026-11-02")],
+              "quickEnter/get-visits-to-region": [OLD],
+              "trips/get-trips-for-year-app": [_listing(STALE), _listing((8, *FIXED, [1266]))]})
+    with pytest.raises(ApiError) as info:
+        NomadMania(token="fake", transport=t).sync_trip_header(7)
+    assert len(_posts(t)) == 1
+    assert info.value.replacement_candidates == [8]
+
+
+def test_update_trip_gone_answering_unauthorised_is_followed():
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"),
+                  {"result": "ERROR", "result_description": "Unauthorised. "}, _trip(8, *FIXED)],
+                 [OLD, new], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
+    assert c.sync_trip_header(7)["trip_id"] == 8
+
+
+def test_update_trip_two_regions_span_min_to_max():
+    rows = [_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 3, "2026-10-25", "2026-10-27")]
+    v1390 = _visits((200, 7, 3, "2026-10-27", "2026-10-30"))
+    v1232 = _visits((201, 7, 3, "2026-10-25", "2026-10-27"))
+    c, t = _sync([_trip(7, "2026-10-27", "2026-10-29", rows=rows),
+                  _trip(7, "2026-10-25", "2026-10-30", rows=rows)],
+                 [v1390, v1232, v1390, v1232], [_listing((7, "2026-10-27", "2026-10-29",
+                                                          [1390, 1232]))])
+    c.sync_trip_header(7)
+    (fields,) = _posts(t)
+    assert (fields["date_from"], fields["date_to"]) == ("2026-10-25", "2026-10-30")
+
+
+def test_update_trip_is_a_single_attempt_write():
+    assert Transport._is_write("trips/update-trip")

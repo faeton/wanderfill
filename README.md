@@ -501,6 +501,7 @@ cost a wrong write or a wrong number the first time.
 | A visit counts whether standalone **or** trip-owned, so naive trips double-count | `visits_for_region` returns both kinds; `split_first_and_repeat` keeps totals honest |
 | `trips/new-trip` requires a junk `regions` field before it will read `regions_json` | `create_trip` sends both, reproducing the site's own bug deliberately |
 | `update-visit` replaces the whole record and silently downgrades `quality` | `quality` is keyword-only, required, and raised to `max()` of the live value |
+| `update-visit` moves a trip-owned visit but not the trip's own dates, so the trip reads shorter than its region | `sync_trip_header` re-saves the trip as the site's Save does, rebuilt from the server's rows with their qualities kept, and reads back one visit per region. The server does not edit in place: it deletes the trip and its visits and creates new ones, so the method follows and returns the **new** trip id |
 | A visit can carry a **year with no month or day**, and reading that as undated erases it on write-back | `YearOnly`; `update_visit` refuses to make a date vaguer without `allow_vaguer` |
 | `slow/get-slow-app`'s `yes` is batch-computed and lags, so one reading looks broken | Renamed `yes_stored`; `yes_scores()` recomputes the published rule |
 | A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |

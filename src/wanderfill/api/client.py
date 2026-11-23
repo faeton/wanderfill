@@ -959,6 +959,167 @@ class NomadMania:
             regions_json=json.dumps(list(regions)),
         )
 
+    def sync_trip_header(self, trip_id: int) -> dict:
+        """Move a trip's own dates to span its regions. Touches nothing else.
+
+        ``update-visit`` moves a trip-owned visit but leaves the trip's header
+        (``date_from``/``date_to``) where it was, so a trip extended visit by
+        visit reads "31 Oct – 2 Nov" around a region row saying "31 Oct –
+        12 Nov". This re-saves the trip the way the site's Save button does
+        (``saveTrip()`` on ``/my-trip/<id>/``, 2026-11-22): ``trip_id``,
+        ``description``, the header as min/max of the region dates, the junk
+        ``regions`` field ``new-trip`` also needs, and ``regions_json``.
+
+        The region rows are rebuilt from the server's own read, not from any
+        plan, and each keeps its quality — the site's page would send 3 or 1
+        and so downgrade a "lived here"; this does not. Region rows carry no
+        visit id, and the server does not edit in place: the first live save
+        (trip 501536, 2026-11-22) **deleted the trip and its visit and created
+        a new trip and a new visit** — same dates and quality, new ids
+        (547375 / 14213716), the old id answering ``Trip not found.``. So the
+        read-back follows the replacement. Before the write it records which
+        trips exist and every visit in every region; afterwards the
+        replacement must be a trip that did not exist before, with the same
+        header, rows (quality, hidden, dates) and description, one visit per
+        region with the old visit's dates and quality, and every other visit
+        in those regions exactly as it was. It refuses a trip whose row and
+        visit disagree on quality, since the body would rewrite the visit. A
+        failed or unanswered write is never resent; the exception carries
+        ``replacement_candidates`` from a read. The returned ``trip_id`` is the one to
+        record; any id noted for the old trip or its visits is dead. It
+        refuses a trip with a year-only region (the site sends ``year``
+        instead, a different shape) and a trip whose header is already right.
+        One attempt, never retried.
+        """
+        def rows(trip: dict) -> list[tuple]:
+            return sorted((int(r["id"]), int(r["quality"]), int(r.get("hidden") or 0),
+                           r.get("date_from"), r.get("date_to")) for r in trip["regions"])
+
+        def inventory(region: int) -> dict[int, tuple]:
+            return {v.id: (v.date_from, v.date_to, int(v.quality), v.trip_id)
+                    for v in self._visits_strict(region)}
+
+        def fail(msg: str) -> VerificationFailed:
+            return VerificationFailed("trips/update-trip", f"server answered {resp!r}; {msg}",
+                                      resp)
+
+        before = self.trip(trip_id)["trip"]
+        regions = before.get("regions") or []
+        if not regions:
+            raise ApiError("trips/update-trip", f"trip {trip_id} has no regions to span", before)
+        if any(not (r.get("date_from") and r.get("date_to")) for r in regions):
+            raise ApiError("trips/update-trip", f"trip {trip_id} has a year-only region; "
+                           "the site saves those as `year`, which this does not send", before)
+        date_from = min(r["date_from"] for r in regions)
+        date_to = max(r["date_to"] for r in regions)
+        if (before.get("date_from"), before.get("date_to")) == (date_from, date_to):
+            raise ApiError("trips/update-trip",
+                           f"trip {trip_id} already spans {date_from}..{date_to}", before)
+        body = [{
+            "id": int(r["id"]), "quality": int(r["quality"]), "hidden": int(r.get("hidden") or 0),
+            "year_from": int(r["year_from"]), "month_from": int(r["month_from"]),
+            "day_from": int(r["day_from"]), "year_to": int(r["year_to"]),
+            "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
+        } for r in regions]
+        description = before.get("description") or ""
+        years = sorted({int(date_from[:4]), int(date_to[:4])})
+
+        def listing() -> list[dict]:
+            return [t for y in years
+                    for t in self._strict("trips/get-trips-for-year-app", "trips", year=y)]
+
+        def region_ids(t: dict) -> set[int]:
+            return {int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
+        # Everything the read-back compares against is read BEFORE the write:
+        # which trips already exist (so an old look-alike cannot pose as the
+        # replacement), and every visit in every region (so a duplicate, a
+        # surviving old visit or a lost unrelated one cannot pass).
+        listed_before = {int(t["id"]) for t in listing()}
+        inv_before = {r["id"]: inventory(r["id"]) for r in body}
+        mine_before = {rid: [k for k, v in inv.items() if v[3] == trip_id]
+                       for rid, inv in inv_before.items()}
+        if any(len(ids) != 1 for ids in mine_before.values()):
+            raise ApiError("trips/update-trip", f"trip {trip_id} does not own exactly one visit "
+                           f"per region before the save: {mine_before}", before)
+        for r in body:
+            (vid,) = mine_before[r["id"]]
+            if inv_before[r["id"]][vid][2] != r["quality"]:
+                # the body carries the trip row's quality; a visit that says
+                # otherwise would be rewritten to it. Not this method's call.
+                raise ApiError("trips/update-trip", f"region {r['id']}: trip row says q"
+                               f"{r['quality']}, visit {vid} says q{inv_before[r['id']][vid][2]}",
+                               before)
+        ids = {r["id"] for r in body}
+
+        def candidates() -> list[int]:
+            return [int(t["id"]) for t in listing()
+                    if int(t["id"]) not in listed_before
+                    and (t.get("date_from"), t.get("date_to")) == (date_from, date_to)
+                    and region_ids(t) == ids]
+
+        try:
+            resp = self.t.webapi(
+                "trips/update-trip",
+                trip_id=trip_id,
+                description=description,
+                date_from=date_from,
+                date_to=date_to,
+                regions=",".join("[object Object]" for _ in body),
+                regions_json=json.dumps(body),
+            )
+        except Exception as exc:
+            # Refused, or no answer at all. Never resend: read what is there,
+            # and hand the caller any replacement so it is not orphaned.
+            try:
+                exc.replacement_candidates = candidates()
+            except Exception as read_exc:  # the write's error wins
+                exc.replacement_candidates = f"unreadable: {read_exc}"
+            raise
+
+        new_id = trip_id
+        try:
+            after = self.trip(trip_id)["trip"]
+        except ApiError as exc:
+            if (exc.description or "").strip() not in ("Trip not found.", "Unauthorised."):
+                raise
+            if trip_id in {int(t["id"]) for t in listing()}:
+                raise fail(f"get-trip says {trip_id} is gone but the listing still has it"
+                           ) from exc
+            found = candidates()
+            if len(found) != 1:
+                raise fail(f"trip {trip_id} is gone and {len(found)} NEW trip(s) {found} match "
+                           f"{date_from}..{date_to} {sorted(ids)}") from exc
+            new_id = found[0]
+            after = self.trip(new_id)["trip"]
+        if (after.get("date_from"), after.get("date_to")) != (date_from, date_to):
+            raise fail(f"trip {new_id} reads {after.get('date_from')}..{after.get('date_to')}")
+        if rows(after) != rows(before):
+            raise fail(f"trip {new_id} regions changed: {rows(before)} -> {rows(after)}")
+        if (after.get("description") or "") != description:
+            raise fail(f"trip {new_id} description changed: {description!r} -> "
+                       f"{after.get('description')!r}")
+        visits = {}
+        for rid in (r["id"] for r in body):
+            was, now = inv_before[rid], inventory(rid)
+            (old_visit,) = mine_before[rid]
+            others_was = {k: v for k, v in was.items() if k != old_visit}
+            others_now = {k: v for k, v in now.items() if v[3] != new_id}
+            if new_id == trip_id:
+                others_now = {k: v for k, v in now.items() if k != old_visit}
+            if others_now != others_was:
+                raise fail(f"region {rid}: visits outside the trip changed: {others_was} -> "
+                           f"{others_now}")
+            owned = [k for k, v in now.items() if v[3] == new_id]
+            if len(owned) != 1:
+                raise fail(f"region {rid} has {len(owned)} visit(s) in trip {new_id}")
+            if now[owned[0]][:3] != was[old_visit][:3]:
+                raise fail(f"region {rid}: visit {owned[0]} reads {now[owned[0]][:3]}, was "
+                           f"{was[old_visit][:3]}")
+            visits[rid] = owned[0]
+        return {"trip_id": new_id, "old_trip_id": trip_id, "visits": visits,
+                "was": (before.get("date_from"), before.get("date_to")),
+                "now": (date_from, date_to), "response": resp}
+
     def trips_for_year(self, year: int) -> Any:
         return self.t.webapi("trips/get-trips-for-year-app", year=year)
 
