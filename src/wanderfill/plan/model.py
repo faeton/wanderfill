@@ -233,6 +233,10 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
 
 _PARTS = ("year", "month", "day")
 _DIGITS = frozenset("0123456789")
+# Everything a trip region may carry. Region dicts are sent as they stand, and this
+# is also what the key is made of, so nothing reaches the server outside the key.
+TRIP_REGION_FIELDS = ("id", "quality", "hidden",
+                      *(f"{p}_{which}" for which in ("from", "to") for p in _PARTS))
 
 
 def _r(value: object) -> str:
@@ -334,12 +338,9 @@ def _part(value: object) -> object:
 
 def _region_row(r: dict) -> list:
     """What one trip region puts in the trip's key, however its dict was spelled."""
-    hidden = _part(r.get("hidden"))
-    return [
-        _part(r.get("id", 0)), _part(r.get("quality")),
-        int(hidden or 0) if hidden is None or type(hidden) is bool else hidden,
-        *(_part(r.get(f"{p}_{which}")) for which in ("from", "to") for p in _PARTS),
-    ]
+    row = {f: _part(r.get(f)) for f in TRIP_REGION_FIELDS}
+    row["hidden"] = row["hidden"] or 0
+    return list(row.values())
 
 
 def _side_of(region: dict, which: str) -> tuple[tuple[str, Any] | None, str | None]:
@@ -389,6 +390,11 @@ def _trip_problems(op: Op) -> list[str]:
             out.append(f"{at}: region {_r(r['id'])} is listed twice")
         else:
             seen.add(r["id"])
+        out += [f"{at} has a field {_r(f)}; a trip region may carry only "
+                f"{', '.join(TRIP_REGION_FIELDS)}" for f in r if f not in TRIP_REGION_FIELDS]
+        h = r.get("hidden")
+        if not (h is None or h in ("0", "1") or (_is_id(h) and h in (0, 1))):
+            out.append(f"{at}: hidden must be 0, 1 or absent, not {_r(h)}")
         q = r.get("quality")
         if not _is_id(q) or not 1 <= q <= 6:
             out.append(f"{at} needs a quality from 1 to 6, not {_r(q)}")

@@ -588,7 +588,10 @@ while the snapshot and drift record describe something else entirely.
 
 Region 570 and quadrant 570 are both valid and unrelated. Copy an existing op of
 the same kind rather than inventing the fields; `regions_touched()` in
-`plan/model.py` is the one place that knows this mapping.
+`plan/model.py` is the one place that knows this mapping. A region in a trip's
+`regions` may carry only `id`, `quality`, `hidden` (0 or 1), and
+`year_from`/`month_from`/`day_from`, `year_to`/`month_to`/`day_to`: any other
+field would be sent without being in the trip's key, so `validate` refuses it.
 
 At apply time:
 
@@ -606,7 +609,10 @@ At apply time:
 - Refuse if live state has drifted since planning — re-plan instead.
 - Refuse a trip this plan's journal has done only under the key older versions
   gave it, which left out the regions' dates (`Op.legacy_key`). Neither send it
-  nor skip it: read the server back and rebuild the plan. `check` lists it too.
+  nor skip it: read the server back, then rebuild the plan from the live profile,
+  without that trip if it is already there. A rebuilt plan whose basis records
+  when it was taken has its own journal, and drift compares with what that plan
+  saw, so neither would stop a second copy. `check` lists the refusal too.
 - Snapshot everything first, and refuse to start if the snapshot fails.
 - Cap the number of writes per run.
 - Journal every request and its response, including the id of any phantom trip

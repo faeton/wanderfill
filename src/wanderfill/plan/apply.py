@@ -208,9 +208,10 @@ def trips_under_old_keys(journal: Journal, plan: Plan) -> list[str]:
     return [
         f"{journal.path}: ops[{i}] {op.kind} {op.label!r}: a trip with these regions was "
         f"written under the older key {op.legacy_key}, which leaves out the regions' dates, "
-        "so whether it is this trip is not known. Read the server back and rebuild the plan; "
-        "if the new one is refused for the same key, the profile is as it was before that "
-        "trip was sent, and a person has to settle the journal."
+        "so whether it is this trip is not known. Read the server back, then "
+        "rebuild the plan from the live profile, without this trip if it is already there: "
+        "a rebuilt plan whose basis records when it was taken has its own journal, and "
+        "drift compares with what that plan saw, so neither would stop a second copy."
         for i, op in enumerate(plan.ops)
         if op.bucket == "apply" and op.legacy_key in done and op.key not in done
     ]

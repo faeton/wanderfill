@@ -2707,7 +2707,8 @@ NESTED = [10**30, 10**5000, "9" * 5000, "\u0662\u0660\u0662\u0664", 2024.0, floa
 
 
 @pytest.mark.parametrize("field", [
-    "id", "quality", "year_from", "month_from", "day_from", "year_to", "month_to", "day_to"])
+    "id", "quality", "hidden", "year_from", "month_from", "day_from", "year_to", "month_to",
+    "day_to"])
 def test_validate_never_raises_on_a_wrong_typed_trip_region_field(field):
     from wanderfill.plan.model import validate
 
@@ -2798,22 +2799,50 @@ def test_trip_key_reads_text_digits_as_the_number(field):
 def test_trip_key_has_one_spelling_of_absent():
     plain = {k: v for k, v in TRIP_REGION.items() if k not in ("hidden", *JAN)}
     want = _jan(plain).key
-    for same in ({"hidden": h} for h in (0, "0", "", None, False)):
+    for same in ({"hidden": h} for h in (0, "0", None)):
         assert _jan(plain | same).key == want, same
     for empty in (None, ""):
         assert _jan(plain | dict.fromkeys(JAN, empty)).key == want, repr(empty)
-    shown = _jan(plain | {"hidden": 1}).key
-    assert shown == _jan(plain | {"hidden": "1"}).key == _jan(plain | {"hidden": True}).key != want
+    assert _jan(plain | {"hidden": 1}).key == _jan(plain | {"hidden": "1"}).key != want
 
 
-@pytest.mark.parametrize("hidden", [
-    None, "", "x", 1.5, float("nan"), True, [1], [[]], {"a": 1}, 10**30, "9" * 5000, "\ud83d"])
-def test_a_trip_key_never_raises_for_a_plan_validation_accepts(hidden):
+@pytest.mark.parametrize("hidden", [None, 0, 1, "0", "1"])
+def test_a_trip_region_may_be_hidden_or_not(hidden):
     from wanderfill.plan.model import validate
 
     op = _jan(TRIP_REGION | {"hidden": hidden}, {"id": 12, "quality": 3})
     assert validate(_vplan(op)) == []
     assert len(op.key) == len(op.legacy_key) == 16
+
+
+def test_a_trip_region_hidden_by_anything_else_is_refused():
+    """It went to the server as it stood, and the key could not say what it meant there."""
+    from wanderfill.plan.model import validate
+
+    for hidden in (True, False, "", "x", "01", "true", 2, -1, 0.0, 1.0, 1.5, float("nan"), [],
+                   [1], {"a": 1}, 10**30, 10**5000, "9" * 5000, "\u0661", "\ud83d"):
+        (why,) = validate(_vplan(_jan(TRIP_REGION | {"hidden": hidden})))
+        assert "ops[0]" in why and "regions[0]" in why and "hidden" in why
+
+
+@pytest.mark.parametrize("field", ["year", "dates", "Hidden", "visit_id", "year_from ", "name", 5])
+def test_a_trip_region_field_outside_the_key_is_refused(field):
+    """Region dicts are sent as they stand, so two trips could differ in what reached the
+    server and share a key."""
+    from wanderfill.plan.model import validate
+
+    for value in (None, 2026):
+        (why,) = validate(_vplan(_jan({"id": 12, "quality": 3}, TRIP_REGION | {field: value})))
+        assert "ops[0]" in why and "regions[1]" in why and repr(field) in why
+
+
+def test_every_field_a_trip_region_may_carry_is_in_the_key():
+    from wanderfill.plan.model import TRIP_REGION_FIELDS, validate
+
+    assert set(TRIP_REGION_FIELDS) == set(TRIP_REGION)
+    assert validate(_vplan(_jan())) == []
+    for field in TRIP_REGION_FIELDS:
+        assert _jan(TRIP_REGION | {field: 5}).key != _jan().key, field
 
 
 GOLDEN = {
@@ -2876,9 +2905,23 @@ def test_a_trip_done_under_the_old_key_is_refused_not_resent(tmp_path, change):
     before = path.read_bytes()
     with pytest.raises(DriftError) as info:
         apply_plan(c, plan, workdir=tmp_path, confirm=True)
-    for wanted in (str(path), trip.legacy_key, "the op", "ops[1]", "older", "ebuil"):
+    for wanted in (str(path), trip.legacy_key, "the op", "ops[1]", "older",
+                   "rebuild the plan from the live profile", "without this trip"):
         assert wanted in str(info.value)
     assert _writes(t) == [] and path.read_bytes() == before
+
+
+def test_a_rebuilt_plan_that_records_when_it_was_taken_has_its_own_journal(tmp_path):
+    """The way out of the refusal, so its journal cannot stop a second copy of the trip."""
+    from wanderfill.plan.apply import apply_plan
+
+    trip = _jan()
+    plan, _, c, t = _done_before(tmp_path, trip.legacy_key)
+    with pytest.raises(DriftError, match="older"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    rebuilt = Plan(account=7, ops=plan.ops, basis=plan.basis | {"taken_at": "2026-11-24"})
+    assert apply_plan(c, rebuilt, workdir=tmp_path, confirm=True).succeeded == 1
+    assert _writes(t) == ["trips/new-trip"]
 
 
 def test_a_trip_done_under_its_own_key_is_skipped_whatever_the_old_key_says(tmp_path):
