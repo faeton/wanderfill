@@ -101,7 +101,7 @@ class YearOnly:
     NomadMania stores this natively: ``year_from`` is set while ``month_from``
     and ``day_from`` are null. It is not an edge case — an audit of one profile
     found 13 such records among 892 — and it is the honest representation of
-    "Myanmar, some time in 2013". YES reads only the year anyway, so a remembered
+    "that country, some time in 2013". YES reads only the year anyway, so a remembered
     year costs nothing in score against a manufactured day.
 
     It exists as a type rather than a bare ``int`` so that a caller cannot pass a
@@ -1370,8 +1370,8 @@ class NomadMania:
 
         ``update-visit`` moves a trip-owned visit but leaves the trip's header
         (``date_from``/``date_to``) where it was, so a trip extended visit by
-        visit reads "31 Oct – 2 Nov" around a region row saying "31 Oct –
-        12 Nov". This re-saves the trip the way the site's Save button does
+        visit reads "1 May – 3 May" around a region row saying "1 May –
+        12 May". This re-saves the trip the way the site's Save button does
         (``saveTrip()`` on ``/my-trip/<id>/``, 2026-11-22): ``trip_id``,
         ``description``, the header as min/max of the region dates, the junk
         ``regions`` field ``new-trip`` also needs, and ``regions_json``.
@@ -1380,9 +1380,9 @@ class NomadMania:
         plan, and each keeps its quality — the site's page would send 3 or 1
         and so downgrade a "lived here"; this does not. Region rows carry no
         visit id, and the server does not edit in place: the first live save
-        (trip 501536, 2026-11-22) **deleted the trip and its visit and created
+        (2026-11-22) **deleted the trip and its visit and created
         a new trip and a new visit** — same dates and quality, new ids
-        (547375 / 14213716), the old id answering ``Trip not found.``. So the
+        for both, the old id answering ``Trip not found.``. So the
         read-back follows the replacement. Before the write it records which
         trips exist and every visit in every region; afterwards the
         replacement must be a trip that did not exist before, with the same

@@ -14,7 +14,7 @@ person was. The four ways that goes wrong, in the order they were met:
   * **Aircraft.** A photo from seat 27A lands in a cell exactly like a week on
     the ground. Two mid-Pacific quadrants 1,100 km apart 2.5 hours apart were
     one flight.
-  * **Airside transit.** Twenty-six minutes in Houston Terminal E is slow, so
+  * **Airside transit.** Half an hour in a terminal is slow, so
     speed says nothing. Time spread is what catches it.
   * **A single stray point.** One undated day-level row on the far side of an
     island is not evidence of the capital.
@@ -171,8 +171,8 @@ def grade(
 
     ``ok`` means the evidence stands on its own. ``not ok`` means **hold it for
     the user**, which is not the same as rejecting it: on one profile the held
-    pile included St Petersburg, sitting genuinely inside its quadrant by
-    0.002° of latitude on a single undated row.
+    pile included a real city, inside its quadrant by a few
+    hundred metres, on a single undated row.
 
     Days, points and span are counted with each run of one repeated coordinate
     taken once, at its first photo. If what is left still stands, so does the

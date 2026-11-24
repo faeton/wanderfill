@@ -143,8 +143,8 @@ WINDOW = f"""
 The days are labelled in the photo's wall-clock time (``LOCAL``), so the window
 has to be drawn in it as well. Cutting the absolute ``ZDATECREATED`` at *this
 Mac's* midnight instead trims or pads the edge days by the gap between the two
-zones: on 2 Nov 2026, with the Mac on Tahiti time (UTC-10), ``since=29 Oct``
-cut at 10:00 UTC and dropped that morning's Sydney photos (UTC+11) whole. The
+zones: with the Mac at UTC-10, ``since=29 Mar`` cut at 10:00 UTC and dropped
+that morning's photos at UTC+11 whole. The
 ``coarse_*`` pair is the same window widened by a day each way on the absolute
 column, there only so the index still narrows the scan; offsets never exceed
 14 hours, so it cannot exclude anything the exact test would keep.

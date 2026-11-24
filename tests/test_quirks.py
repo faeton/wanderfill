@@ -246,7 +246,7 @@ def writes(t, action):
     return [(a, f) for a, f in t.sent if a == action]
 
 
-ROW = {"id": 13450095, "quality": 3, "year_from": None, "month_from": None, "day_from": None,
+ROW = {"id": 1000001, "quality": 3, "year_from": None, "month_from": None, "day_from": None,
        "year_to": None, "month_to": None, "day_to": None, "trip_id": None}
 READ = "quickEnter/get-visits-to-region"
 
@@ -255,9 +255,9 @@ def test_delete_visit_sends_only_the_id_and_verifies():
     """The site sends {id}; OK is not evidence, so the region is read back."""
     t = SequencedTransport({READ: [visits(ROW), visits()]})
     c = NomadMania(token="fake", transport=t)
-    gone = c.delete_visit(13450095, 791)
-    assert gone.id == 13450095 and gone.region == 791 and gone.quality == 3
-    assert writes(t, "quickEnter/delete-visit") == [("quickEnter/delete-visit", {"id": 13450095})]
+    gone = c.delete_visit(1000001, 791)
+    assert gone.id == 1000001 and gone.region == 791 and gone.quality == 3
+    assert writes(t, "quickEnter/delete-visit") == [("quickEnter/delete-visit", {"id": 1000001})]
     assert [a for a, _ in t.sent] == [READ, "quickEnter/delete-visit", READ]
 
 
@@ -276,11 +276,11 @@ def test_delete_visit_refuses_trip_owned_unless_told():
     t = SequencedTransport({READ: [visits(owned)]})
     c = NomadMania(token="fake", transport=t)
     with pytest.raises(PrecisionLoss):
-        c.delete_visit(13450095, 791)
+        c.delete_visit(1000001, 791)
     assert not writes(t, "quickEnter/delete-visit")
     t = SequencedTransport({READ: [visits(owned), visits()]})
     c = NomadMania(token="fake", transport=t)
-    assert c.delete_visit(13450095, 791, allow_trip_owned=True).trip_id == 55
+    assert c.delete_visit(1000001, 791, allow_trip_owned=True).trip_id == 55
 
 
 def test_delete_visit_raises_when_ok_but_record_remains():
@@ -288,7 +288,7 @@ def test_delete_visit_raises_when_ok_but_record_remains():
     t = SequencedTransport({READ: [visits(ROW), visits(ROW)]})
     c = NomadMania(token="fake", transport=t)
     with pytest.raises(ApiError):
-        c.delete_visit(13450095, 791)
+        c.delete_visit(1000001, 791)
 
 
 def test_clear_region_sends_region_returns_all_visits_and_verifies():
@@ -297,7 +297,7 @@ def test_clear_region_sends_region_returns_all_visits_and_verifies():
     t = SequencedTransport({READ: [visits(ROW, second), visits()]})
     c = NomadMania(token="fake", transport=t)
     gone = c.clear_region(791)
-    assert [v.id for v in gone] == [13450095, 2] and gone[1].quality == 5
+    assert [v.id for v in gone] == [1000001, 2] and gone[1].quality == 5
     assert writes(t, "quickEnter/set-not-visited") == [
         ("quickEnter/set-not-visited", {"region": 791})
     ]
@@ -318,7 +318,7 @@ def test_clear_region_refuses_empty_and_trip_owned_and_leftovers():
         NomadMania(token="fake", transport=t).clear_region(791)
 
 
-TRIP = {"result": "OK", "trip": {"id": 305716, "date_from": "2024-12-27", "date_to": "2025-01-09",
+TRIP = {"result": "OK", "trip": {"id": 2001, "date_from": "2020-12-29", "date_to": "2021-01-08",
                                  "description": "", "regions": [{"region": 211, "quality": 3}]}}
 GONE = {"result": "ERROR", "result_description": "Unauthorised."}
 YEAR = "trips/get-trips-for-year-app"
@@ -329,10 +329,10 @@ def test_delete_trip_reads_first_sends_trip_id_and_proves_absence_twice():
     listing no longer carrying the id. The trip is returned for re-creation."""
     t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [{"trips": [{"id": 1}]}]})
     c = NomadMania(token="fake", transport=t)
-    before = c.delete_trip(305716)
+    before = c.delete_trip(2001)
     assert before["regions"][0]["region"] == 211
-    assert writes(t, "trips/delete-trip") == [("trips/delete-trip", {"trip_id": 305716})]
-    assert writes(t, YEAR) == [(YEAR, {"year": 2024})]
+    assert writes(t, "trips/delete-trip") == [("trips/delete-trip", {"trip_id": 2001})]
+    assert writes(t, YEAR) == [(YEAR, {"year": 2020})]
 
 
 def test_delete_trip_refuses_unknown_trip_and_a_trip_that_survives():
@@ -343,7 +343,7 @@ def test_delete_trip_refuses_unknown_trip_and_a_trip_that_survives():
     assert not writes(t, "trips/delete-trip")
     t = SequencedTransport({"trips/get-trip": [TRIP, TRIP]})
     with pytest.raises(VerificationFailed):
-        NomadMania(token="fake", transport=t).delete_trip(305716)
+        NomadMania(token="fake", transport=t).delete_trip(2001)
 
 
 def test_delete_trip_does_not_take_any_error_as_proof():
@@ -352,17 +352,17 @@ def test_delete_trip_does_not_take_any_error_as_proof():
     other = {"result": "ERROR", "result_description": "Internal error."}
     t = SequencedTransport({"trips/get-trip": [TRIP, other]})
     with pytest.raises(VerificationFailed):
-        NomadMania(token="fake", transport=t).delete_trip(305716)
+        NomadMania(token="fake", transport=t).delete_trip(2001)
     # 'Unauthorised.' alone is not enough either if the listing still has it
-    t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [{"trips": [{"id": 305716}]}]})
+    t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [{"trips": [{"id": 2001}]}]})
     with pytest.raises(VerificationFailed):
-        NomadMania(token="fake", transport=t).delete_trip(305716)
+        NomadMania(token="fake", transport=t).delete_trip(2001)
 
 
 def test_delete_trip_is_bound_to_the_previewed_regions():
     t = SequencedTransport({"trips/get-trip": [TRIP]})
     with pytest.raises(PrecisionLoss):
-        NomadMania(token="fake", transport=t).delete_trip(305716, expect_regions=[211, 176])
+        NomadMania(token="fake", transport=t).delete_trip(2001, expect_regions=[211, 176])
     assert not writes(t, "trips/delete-trip")
 
 
@@ -371,7 +371,7 @@ def test_clear_region_is_bound_to_the_previewed_visit_ids():
     second = {**ROW, "id": 2}
     t = SequencedTransport({READ: [visits(ROW, second)]})
     with pytest.raises(PrecisionLoss):
-        NomadMania(token="fake", transport=t).clear_region(791, expect_ids=[13450095])
+        NomadMania(token="fake", transport=t).clear_region(791, expect_ids=[1000001])
     assert not writes(t, "quickEnter/set-not-visited")
 
 
@@ -380,7 +380,7 @@ def test_undo_read_backs_reject_a_response_missing_the_list():
     bare = {"result": "OK"}
     t = SequencedTransport({READ: [visits(ROW), bare]})
     with pytest.raises(VerificationFailed):
-        NomadMania(token="fake", transport=t).delete_visit(13450095, 791)
+        NomadMania(token="fake", transport=t).delete_visit(1000001, 791)
     t = SequencedTransport({"maps/get-visited-dare-ids-simple": [{"ids": [1142]}, bare]})
     with pytest.raises(VerificationFailed):
         NomadMania(token="fake", transport=t).unmark_dare(1142)
@@ -456,7 +456,7 @@ class FakeClient:
         self.calls = []
 
     def account_id(self):
-        return 79597
+        return 4242
 
     def visited_dare_ids(self):
         return {1142}
@@ -964,7 +964,7 @@ def test_an_open_write_blocks_a_delete_and_the_reverse(monkeypatch, tmp_path, ca
     assert t.sent == ACCOUNT_READ and str(stuck) in capsys.readouterr().err
 
     # An open apply in the default directory, a deletion run elsewhere.
-    stuck = _open_line(default / "journal-79597-aaaaaaaaaaaa.ndjson")
+    stuck = _open_line(default / "journal-4242-aaaaaaaaaaaa.ndjson")
     fake = FakeClient()
     rc = _run_delete(monkeypatch, work, fake, "dare", "1142", "--confirm", "--reason", "x")
     assert rc == 2 and fake.calls == [] and _journal_lines(work) == []
@@ -1049,11 +1049,11 @@ def test_a_second_apply_is_refused_while_the_first_holds_the_lock(monkeypatch, t
         dry = tmp_path / "dry"
         assert apply_plan(c, _dare_plan(), workdir=dry, also=(default,)).skipped == 1
         assert t.sent == [] and not dry.exists(), "a dry run takes no lock and creates nothing"
-    with account_lock([tmp_path], 79597):
+    with account_lock([tmp_path], 4242):
         fake = FakeClient()
         rc = _run_delete(monkeypatch, work, fake, "dare", "1142", "--confirm", "--reason", "x")
         assert rc == 2 and fake.calls == [] and _journal_lines(work) == []
-        assert ".lock-79597" in capsys.readouterr().err
+        assert ".lock-4242" in capsys.readouterr().err
     with account_lock([default], 8):
         report, _ = _apply(work, also=(default,))
     assert report.succeeded == 1, "another account's lock is not ours"
@@ -1135,9 +1135,9 @@ def test_a_journal_entry_says_what_was_sent_and_what_came_back(tmp_path):
 def _undo_calls():
     """method call, the read it verifies with, and that read's answer beforehand."""
     return {
-        "delete_visit": (lambda c: c.delete_visit(13450095, 791), READ, visits(ROW)),
+        "delete_visit": (lambda c: c.delete_visit(1000001, 791), READ, visits(ROW)),
         "clear_region": (lambda c: c.clear_region(791), READ, visits(ROW)),
-        "delete_trip": (lambda c: c.delete_trip(305716), "trips/get-trip", TRIP),
+        "delete_trip": (lambda c: c.delete_trip(2001), "trips/get-trip", TRIP),
         "unmark_dare": (lambda c: c.unmark_dare(1142), DARE_READ, {"ids": [1142]}),
         "unmark_kye": (lambda c: c.unmark_kye(570), "kye/get-kye", {"visited": [570]}),
     }
@@ -1189,7 +1189,7 @@ def test_a_delete_trip_whose_listing_errors_stays_open():
     error = {"result": "ERROR", "result_description": "Internal error."}
     t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [error]})
     with pytest.raises(VerificationFailed):
-        NomadMania(token="fake", transport=t).delete_trip(305716)
+        NomadMania(token="fake", transport=t).delete_trip(2001)
 
 
 # --------------------------------------------------------------------------
@@ -1904,7 +1904,7 @@ def test_yes_delta_is_a_gain_for_recent_years_and_a_loss_for_old_ones():
     assert yes_delta(8, 2025, today=today) == -8   # the "gift" year
     assert yes_delta(8, 2019, today=today) == -1   # still a gain
     assert yes_delta(8, 2018, today=today) == 0    # break-even, exactly
-    assert yes_delta(8, 2013, today=today) == 5    # Myanmar: a real loss
+    assert yes_delta(8, 2013, today=today) == 5    # a real loss
 
 
 # --------------------------------------------------------------------------
@@ -1920,16 +1920,16 @@ def _fix(lat, lon, day, hh=None, mm=0, ss=0):
 def test_grade_rejects_a_flight():
     """Two mid-Pacific points 1,100 km and 2.5 hours apart were one flight."""
     from wanderfill.grade import grade
-    d = dt.date(2025, 10, 22)
-    v = grade([_fix(-18.265, -173.905, d, 12, 59), _fix(-18.318, -163.413, d, 15, 28)])
+    d = dt.date(2020, 5, 22)
+    v = grade([_fix(-18.265, -133.905, d, 12, 59), _fix(-18.318, -123.413, d, 15, 28)])
     assert not v.ok and "km/h" in v.reason
 
 
 def test_grade_rejects_an_airport_layover_on_time_not_speed():
-    """Sitting in Terminal E is slow; it is the span that catches it."""
+    """Sitting in a terminal is slow; it is the span that catches it."""
     from wanderfill.grade import grade
-    d = dt.date(2023, 4, 27)
-    v = grade([_fix(29.984, -95.333, d, 17, m) for m in (27, 39, 53)])
+    d = dt.date(2020, 4, 27)
+    v = grade([_fix(20.984, 30.333, d, 17, m) for m in (27, 39, 53)])
     assert not v.ok and "min" in v.reason
 
 
@@ -1941,30 +1941,30 @@ def test_grade_accepts_two_distinct_days():
 
 def test_grade_accepts_one_dense_day_at_ground_speed():
     from wanderfill.grade import grade
-    d = dt.date(2024, 3, 3)
-    v = grade([_fix(-33.4 + i * 0.001, -70.79, d, 3 + i // 4, (i * 13) % 60) for i in range(12)])
+    d = dt.date(2020, 3, 3)
+    v = grade([_fix(-20.4 + i * 0.001, 30.79, d, 3 + i // 4, (i * 13) % 60) for i in range(12)])
     assert v.ok and "one day" in v.reason
 
 
 def test_grade_never_infers_speed_between_untimed_rows():
     """Day-level rows have no intra-day clock; pairing them invents a speed."""
     from wanderfill.grade import looks_airborne
-    d = dt.date(2013, 7, 1)
-    fast, legs = looks_airborne([_fix(50.4, 30.5, d), _fix(16.8, 96.1, d)])
+    d = dt.date(2012, 3, 1)
+    fast, legs = looks_airborne([_fix(40.4, 10.5, d), _fix(16.8, 80.1, d)])
     assert (fast, legs) == (0, 0)
 
 
 def test_grade_holds_rather_than_rejects():
-    """St Petersburg was in the held pile and was real. Held is not rejected."""
+    """A real city was in the held pile. Held is not rejected."""
     from wanderfill.grade import grade
-    v = grade([_fix(60.002, 30.299, dt.date(2014, 6, 17))])
+    v = grade([_fix(50.002, 10.299, dt.date(2015, 5, 5))])
     assert not v.ok and "single day" in v.reason
 
 
 def _frozen():
     """12 photos over 2 h 45 min in the air, every one stamped with the same coordinate."""
-    d = dt.date(2025, 10, 22)
-    return [_fix(-17.553412, -149.606731, d, 9 + i * 15 // 60, i * 15 % 60) for i in range(12)]
+    d = dt.date(2020, 5, 22)
+    return [_fix(5.123412, 20.606731, d, 9 + i * 15 // 60, i * 15 % 60) for i in range(12)]
 
 
 def test_grade_holds_a_frozen_fix():
@@ -1984,8 +1984,8 @@ def test_grade_sees_the_jump_after_a_frozen_fix():
     """Eleven legs of 0 km/h outvoted the one that showed the aircraft."""
     from wanderfill.grade import grade, looks_airborne
 
-    d = dt.date(2025, 10, 22)
-    v = grade([*_frozen(), _fix(33.942512, -118.408134, d, 12, 5)])
+    d = dt.date(2020, 5, 22)
+    v = grade([*_frozen(), _fix(56.142512, 52.408134, d, 12, 5)])
     assert not v.ok and "km/h" in v.reason and "airborne" in v.reason
     assert (v.fast_legs, v.timed_legs, v.repeated) == (1, 1, 11)
     # 500 km in the 20 minutes since the last photo, not in the 3 hours since the first.
@@ -2000,7 +2000,7 @@ def test_grade_survives_a_jump_in_the_second_a_frozen_fix_ended():
     """No time passed, so no speed was measured: the leg is skipped, as it always was."""
     from wanderfill.grade import grade
 
-    v = grade([*_frozen(), _fix(33.942512, -118.408134, dt.date(2025, 10, 22), 11, 45)])
+    v = grade([*_frozen(), _fix(56.142512, 52.408134, dt.date(2020, 5, 22), 11, 45)])
     assert not v.ok and (v.points, v.fast_legs, v.timed_legs, v.repeated) == (2, 0, 0, 11)
 
 
@@ -2008,13 +2008,13 @@ def test_grade_holds_one_coordinate_on_two_dates():
     """Two photos with one coordinate either side of midnight were two distinct days."""
     from wanderfill.grade import grade
 
-    a = _fix(-17.553412, -149.606731, dt.date(2025, 10, 22), 23, 50)
-    b = _fix(-17.553412, -149.606731, dt.date(2025, 10, 23), 0, 10)
+    a = _fix(5.123412, 20.606731, dt.date(2020, 5, 22), 23, 50)
+    b = _fix(5.123412, 20.606731, dt.date(2020, 5, 23), 0, 10)
     v = grade([a, b])
     assert not v.ok and v.days == 1 and v.repeated == 1
     assert "one coordinate repeated" in v.reason
     # A day that stands without the repeat still stands.
-    v = grade([a, b, _fix(-17.553, -149.607, dt.date(2025, 10, 24))])
+    v = grade([a, b, _fix(-10.553, -150.607, dt.date(2020, 5, 24))])
     assert v.ok and v.reason == "2 distinct days" and v.repeated == 1
 
 
@@ -2038,18 +2038,18 @@ def test_standing_still_at_a_rounded_coordinate_does_not_outvote_a_flight():
     legs at 0 km/h: those outvoted the 6,600 km in the next twenty minutes."""
     from wanderfill.grade import grade, looks_airborne
 
-    d = dt.date(2025, 10, 22)
-    still = [_fix(-17.553, -149.607, d, f.at.hour, f.at.minute) for f in _frozen()]
-    jump = [*still, _fix(33.943, -118.408, d, 12, 5)]
+    d = dt.date(2020, 5, 22)
+    still = [_fix(-10.553, -150.607, d, f.at.hour, f.at.minute) for f in _frozen()]
+    jump = [*still, _fix(46.943, -119.408, d, 12, 5)]
     for fixes in (jump, jump[::-1]):
         assert looks_airborne(fixes) == (1, 1)
         v = grade(fixes)
         assert not v.ok and "airborne" in v.reason and "repeated" not in v.reason
         assert (v.points, v.fast_legs, v.timed_legs, v.repeated) == (13, 1, 1, 0)
     # 500 km in the 20 minutes since the last photo, not in the 3 hours since the first.
-    assert looks_airborne([*still, _fix(-22.05, -149.607, d, 12, 5)]) == (1, 1)
+    assert looks_airborne([*still, _fix(-15.05, -150.607, d, 12, 5)]) == (1, 1)
     # A slow leg between two places is still a leg, beside any number of still ones.
-    walk = [*still, _fix(-17.563, -149.607, d, 12, 5), _fix(33.943, -118.408, d, 12, 25)]
+    walk = [*still, _fix(-10.563, -150.607, d, 12, 5), _fix(46.943, -119.408, d, 12, 25)]
     assert looks_airborne(walk) == (1, 2)
 
 
@@ -2080,8 +2080,8 @@ def test_grade_collapses_past_four_decimals_however_the_float_prints():
 def test_an_untimed_row_neither_joins_nor_breaks_a_run():
     from wanderfill.grade import grade
 
-    d = dt.date(2025, 10, 22)
-    row = _fix(-17.553412, -149.606731, d)
+    d = dt.date(2020, 5, 22)
+    row = _fix(5.123412, 20.606731, d)
     run = _frozen()
     v = grade([*run[:6], row, *run[6:]])
     assert (v.repeated, v.points, v.ok) == (11, 2, False)
@@ -2101,7 +2101,7 @@ def test_grade_accepts_a_stay_that_moves_a_little():
     """A phone that is awake jitters by metres; that is what a real stay looks like."""
     from wanderfill.grade import grade
 
-    d = dt.date(2025, 10, 22)
+    d = dt.date(2020, 5, 22)
     v = grade([_fix(-17.553412 + i % 3 * 1e-5, -149.606731 + i % 2 * 1e-5, d,
                     9 + i // 5, i % 5 * 12) for i in range(12)])
     assert v.ok and "ground speed" in v.reason and v.repeated == 0
@@ -2430,7 +2430,7 @@ def _photos_library(tmp_path, shots, importers=None):
 
 
 @pytest.fixture
-def mac_on_tahiti_time(monkeypatch):
+def mac_on_utc_minus_10(monkeypatch):
     import time
 
     monkeypatch.setenv("TZ", "Pacific/Tahiti")
@@ -2442,28 +2442,28 @@ def mac_on_tahiti_time(monkeypatch):
     time.tzset()
 
 
-def test_since_is_the_photos_date_not_the_macs(tmp_path, mac_on_tahiti_time):
-    """2 Nov 2026: with the Mac on UTC-10, `since=29 Oct` cut at 10:00 UTC and
-    dropped the morning of 29 Oct in Sydney (UTC+11) whole, so a plan could not
+def test_since_is_the_photos_date_not_the_macs(tmp_path, mac_on_utc_minus_10):
+    """With the Mac on UTC-10, `since=29 Mar` cut at 10:00 UTC and
+    dropped the morning of 29 Mar at UTC+11 whole, so a plan could not
     see the first day of the stay it was extending."""
     from wanderfill.sources.photos_app import PhotosAppSource
 
-    sydney = 11 * 3600
+    east = 11 * 3600
     lib = _photos_library(tmp_path, [
-        (dt.datetime(2026, 10, 28, 12, 30), sydney, -33.86, 151.21),  # 28 Oct 23:30 local
-        (dt.datetime(2026, 10, 29, 1, 43), sydney, -33.92, 151.17),   # 29 Oct 12:43 local
-        (dt.datetime(2026, 10, 30, 10, 55), sydney, -33.94, 151.17),  # 30 Oct 21:55 local
-        (dt.datetime(2026, 10, 30, 13, 30), sydney, -33.86, 151.21),  # 31 Oct 00:30 local
+        (dt.datetime(2026, 3, 28, 12, 30), east, -20.86, 160.21),  # 28 Mar 23:30 local
+        (dt.datetime(2026, 3, 29, 1, 43), east, -20.92, 160.17),   # 29 Mar 12:43 local
+        (dt.datetime(2026, 3, 30, 10, 55), east, -20.94, 160.17),  # 30 Mar 21:55 local
+        (dt.datetime(2026, 3, 30, 13, 30), east, -20.86, 160.21),  # 31 Mar 00:30 local
     ])
-    src = PhotosAppSource(library=lib, since=dt.date(2026, 10, 29),
-                          until=dt.date(2026, 10, 30))
+    src = PhotosAppSource(library=lib, since=dt.date(2026, 3, 29),
+                          until=dt.date(2026, 3, 30))
     days = sorted({p.date for p in src.points()})
-    assert days == [dt.date(2026, 10, 29), dt.date(2026, 10, 30)]
+    assert days == [dt.date(2026, 3, 29), dt.date(2026, 3, 30)]
     taken = [a.taken for a in src.assets()]
-    assert taken == [dt.datetime(2026, 10, 29, 12, 43), dt.datetime(2026, 10, 30, 21, 55)]
+    assert taken == [dt.datetime(2026, 3, 29, 12, 43), dt.datetime(2026, 3, 30, 21, 55)]
 
 
-def test_unset_bounds_are_open(tmp_path, mac_on_tahiti_time):
+def test_unset_bounds_are_open(tmp_path, mac_on_utc_minus_10):
     """No `since` reaches a scanned 1965 print; no `until` reaches a photo whose
     own clock is already tomorrow by this Mac's."""
     from wanderfill.sources.photos_app import PhotosAppSource
@@ -2587,7 +2587,7 @@ def test_an_unknown_origin_name_is_refused(tmp_path):
                 list(read())
 
 
-def test_no_filter_reads_exactly_what_it_read_before(tmp_path, mac_on_tahiti_time):
+def test_no_filter_reads_exactly_what_it_read_before(tmp_path, mac_on_utc_minus_10):
     """Every plan and dossier so far was built from the unfiltered reading."""
     from wanderfill.sources import DayPoint, PhotosAppSource
 
@@ -2605,23 +2605,23 @@ def test_no_filter_reads_exactly_what_it_read_before(tmp_path, mac_on_tahiti_tim
         assert [tuple(getattr(a, f) for f in old) for a in src.assets()] == rows, name
 
 
-def test_taken_utc_orders_photos_across_a_date_line_flight(tmp_path, mac_on_tahiti_time):
-    """Auckland at 10:00 on the 2nd is before Tahiti at 16:00 on the 1st. The wall
+def test_taken_utc_orders_photos_across_a_date_line_flight(tmp_path, mac_on_utc_minus_10):
+    """10:00 on the 2nd at UTC+13 is before 16:00 on the 1st at UTC-10. The wall
     clock, which dates both correctly, puts them in the wrong order."""
     from wanderfill.sources import PhotosAppSource
 
     lib = _photos_library(tmp_path, [
-        (dt.datetime(2026, 11, 1, 21, 0), 13 * 3600, -37.008, 174.785),   # 2 Nov 10:00
-        (dt.datetime(2026, 11, 2, 2, 0), -10 * 3600, -17.553, -149.607),  # 1 Nov 16:00
+        (dt.datetime(2026, 4, 1, 21, 0), 13 * 3600, -30.008, 175.785),   # 2 Apr 10:00
+        (dt.datetime(2026, 4, 2, 2, 0), -10 * 3600, -10.553, -150.607),  # 1 Apr 16:00
     ])
     assets = list(PhotosAppSource(library=lib).assets())
     assert [a.uuid for a in sorted(assets, key=lambda a: a.taken)] == ["u2", "u1"]
     flown = sorted(assets, key=lambda a: a.taken_utc)
     assert [a.uuid for a in flown] == ["u1", "u2"]
-    assert flown[0].taken_utc == dt.datetime(2026, 11, 1, 21, 0, tzinfo=dt.timezone.utc)
+    assert flown[0].taken_utc == dt.datetime(2026, 4, 1, 21, 0, tzinfo=dt.timezone.utc)
     assert flown[0].taken_utc.utcoffset() == dt.timedelta(0)
     assert flown[1].taken_utc - flown[0].taken_utc == dt.timedelta(hours=5)
-    assert [a.taken for a in flown] == [dt.datetime(2026, 11, 2, 10), dt.datetime(2026, 11, 1, 16)]
+    assert [a.taken for a in flown] == [dt.datetime(2026, 4, 2, 10), dt.datetime(2026, 4, 1, 16)]
     assert all(a.taken.tzinfo is None for a in flown)
 
 
@@ -2636,7 +2636,7 @@ def test_a_photo_asset_still_builds_from_its_old_positions():
 # trip headers: update-visit moves the visit, never the trip around it
 # --------------------------------------------------------------------------
 
-def _row(rid=1266, quality=5, a="2026-10-31", b="2026-11-12", hidden=0):
+def _row(rid=1266, quality=5, a="2026-03-31", b="2026-04-12", hidden=0):
     y1, m1, d1 = map(int, a.split("-"))
     y2, m2, d2 = map(int, b.split("-"))
     return {"id": rid, "quality": quality, "hidden": hidden, "date_from": a, "date_to": b,
@@ -2667,10 +2667,10 @@ def _listing(*trips):
         for tid, a, b, regs in trips]}
 
 
-OLD = _visits((100, 7, 5, "2026-10-31", "2026-11-12"), (50, None, 3, "2025-10-22", "2025-10-30"))
+OLD = _visits((100, 7, 5, "2026-03-31", "2026-04-12"), (50, None, 3, "2025-05-22", "2025-05-30"))
 NOT_FOUND = {"result": "ERROR", "result_description": "Trip not found."}
-STALE = (7, "2026-10-31", "2026-11-02", [1266])
-FIXED = ("2026-10-31", "2026-11-12")
+STALE = (7, "2026-03-31", "2026-04-02", [1266])
+FIXED = ("2026-03-31", "2026-04-12")
 
 
 def _sync(get_trip, visits, listings):
@@ -2685,8 +2685,8 @@ def _posts(t):
 
 
 def test_trip_header_lags_update_visit_and_is_resynced_like_the_site():
-    """Society Islands trip 501536 read 31 Oct - 2 Nov around a 31 Oct - 12 Nov visit."""
-    c, t = _sync([_trip(7, "2026-10-31", "2026-11-02"), _trip(7, *FIXED)],
+    """A trip read 31 Mar - 2 Apr around a 31 Mar - 12 Apr visit."""
+    c, t = _sync([_trip(7, "2026-03-31", "2026-04-02"), _trip(7, *FIXED)],
                  [OLD, OLD], [_listing(STALE), _listing((7, *FIXED, [1266]))])
     out = c.sync_trip_header(7)
     (fields,) = _posts(t)
@@ -2698,11 +2698,11 @@ def test_trip_header_lags_update_visit_and_is_resynced_like_the_site():
     assert out["now"] == FIXED and out["visits"] == {1266: 100}
 
 
-def test_update_trip_501536_came_back_as_a_new_trip_and_a_new_visit():
-    """The first live save deleted trip 501536 + visit 14138557 and created
-    547375 + 14213716. The read-back must follow the new id, not call it lost."""
-    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+def test_update_trip_came_back_as_a_new_trip_and_a_new_visit():
+    """The first live save deleted the trip and its visit and created a new trip
+    and a new visit. The read-back must follow the new id, not call it lost."""
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-05-22", "2025-05-30"))
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND, _trip(8, *FIXED)],
                  [OLD, new],
                  [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
     out = c.sync_trip_header(7)
@@ -2712,7 +2712,7 @@ def test_update_trip_501536_came_back_as_a_new_trip_and_a_new_visit():
 def test_update_trip_a_preexisting_twin_is_not_the_replacement():
     """Trip 9 already had this span and region; it must not pose as the new trip."""
     twin = (9, *FIXED, [1266])
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND],
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND],
                  [OLD], [_listing(STALE, twin), _listing(twin), _listing(twin)])
     with pytest.raises(VerificationFailed, match="0 NEW trip"):
         c.sync_trip_header(7)
@@ -2720,8 +2720,8 @@ def test_update_trip_a_preexisting_twin_is_not_the_replacement():
 
 def test_update_trip_old_visit_left_standalone_beside_the_new_one():
     orphan = _visits((101, 8, 5, *FIXED), (100, None, 5, *FIXED),
-                     (50, None, 3, "2025-10-22", "2025-10-30"))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                     (50, None, 3, "2025-05-22", "2025-05-30"))
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND, _trip(8, *FIXED)],
                  [OLD, orphan], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
     with pytest.raises(VerificationFailed, match="outside the trip changed"):
         c.sync_trip_header(7)
@@ -2729,26 +2729,26 @@ def test_update_trip_old_visit_left_standalone_beside_the_new_one():
 
 def test_update_trip_unrelated_visit_lost():
     lost = _visits((101, 8, 5, *FIXED))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND, _trip(8, *FIXED)],
                  [OLD, lost], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
     with pytest.raises(VerificationFailed, match="outside the trip changed"):
         c.sync_trip_header(7)
 
 
 def test_update_trip_replacement_visit_downgraded():
-    worse = _visits((101, 8, 3, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+    worse = _visits((101, 8, 3, *FIXED), (50, None, 3, "2025-05-22", "2025-05-30"))
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND, _trip(8, *FIXED)],
                  [OLD, worse], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
     with pytest.raises(VerificationFailed, match="visit 101 reads"):
         c.sync_trip_header(7)
 
 
 def test_update_trip_hidden_or_description_change_is_caught():
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"),
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"),
                   _trip(7, *FIXED, rows=[_row(hidden=1)])], [OLD, OLD], [_listing(STALE)])
     with pytest.raises(VerificationFailed, match="regions changed"):
         c.sync_trip_header(7)
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), _trip(7, *FIXED, description="")],
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), _trip(7, *FIXED, description="")],
                  [OLD, OLD], [_listing(STALE)])
     with pytest.raises(VerificationFailed, match="description changed"):
         c.sync_trip_header(7)
@@ -2756,7 +2756,7 @@ def test_update_trip_hidden_or_description_change_is_caught():
 
 def test_update_trip_refuses_when_trip_row_and_visit_disagree_on_quality():
     """The body carries the row's quality; sending it would rewrite the visit."""
-    c, t = _sync([_trip(7, "2026-10-31", "2026-11-02", rows=[_row(quality=3)])],
+    c, t = _sync([_trip(7, "2026-03-31", "2026-04-02", rows=[_row(quality=3)])],
                  [OLD], [_listing(STALE)])
     with pytest.raises(ApiError, match="trip row says q3"):
         c.sync_trip_header(7)
@@ -2778,11 +2778,11 @@ def test_sync_header_refuses_to_shorten_either_end():
     """Two trips were found longer than their regions (2026-11-23). The save deletes
     the trip, so a re-span would have thrown the longer header away for good."""
     for header in (
-        ("2026-10-30", "2026-11-12"),  # starts before its region
-        ("2026-10-31", "2026-11-14"),  # ends after it
-        ("2026-10-30", "2026-11-14"),
-        ("2026-10-30", "2026-11-02"),  # would shorten the start, lengthen the end
-        ("2026-11-02", "2026-11-14"),  # would lengthen the start, shorten the end
+        ("2026-03-30", "2026-04-12"),  # starts before its region
+        ("2026-03-31", "2026-04-14"),  # ends after it
+        ("2026-03-30", "2026-04-14"),
+        ("2026-03-30", "2026-04-02"),  # would shorten the start, lengthen the end
+        ("2026-04-02", "2026-04-14"),  # would lengthen the start, shorten the end
     ):
         c, t = _sync([_trip(7, *header)], [OLD], [_listing((7, *header, [1266]))])
         with pytest.raises(ApiError, match=r"trip 7 .*shorten") as info:
@@ -2797,37 +2797,37 @@ def test_sync_header_refuses_when_a_row_and_its_visit_disagree_on_dates():
     """The body is built from the trip's rows; a stale row would overwrite the visit,
     and the read-back that compares them runs after the old visit is gone."""
     def one(**over):
-        row = {"id": 100, "trip_id": 7, "quality": 5, "year_from": 2026, "month_from": 10,
-               "day_from": 31, "year_to": 2026, "month_to": 11, "day_to": 12}
+        row = {"id": 100, "trip_id": 7, "quality": 5, "year_from": 2026, "month_from": 3,
+               "day_from": 31, "year_to": 2026, "month_to": 4, "day_to": 12}
         return {"result": "OK", "data": [row | over]}
 
     no_from = {"year_from": None, "month_from": None, "day_from": None}
     no_to = {"year_to": None, "month_to": None, "day_to": None}
     for visits_, says in (
-        (one(day_from=30), "2026-10-30"),
-        (one(day_to=13), "2026-11-13"),
-        (one(day_to=11), "2026-11-11"),
+        (one(day_from=30), "2026-03-30"),
+        (one(day_to=13), "2026-04-13"),
+        (one(day_to=11), "2026-04-11"),
         (one(month_from=None, day_from=None), "2026"),  # year only
         (one(**no_from), "None"),
         (one(**no_to), "None"),
         (one(**no_from, **no_to), "None"),
     ):
-        c, t = _sync([_trip(7, "2026-10-31", "2026-11-02")], [visits_], [_listing(STALE)])
-        with pytest.raises(ApiError, match="trip 7, region 1266: trip row says 2026-1") as info:
+        c, t = _sync([_trip(7, "2026-03-31", "2026-04-02")], [visits_], [_listing(STALE)])
+        with pytest.raises(ApiError, match="trip 7, region 1266: trip row says 2026-0") as info:
             c.sync_trip_header(7)
         assert type(info.value) is ApiError and info.value.action == "trips/update-trip"
-        assert "says 2026-10-31..2026-11-12, visit 100 says " in str(info.value)
+        assert "says 2026-03-31..2026-04-12, visit 100 says " in str(info.value)
         assert says in str(info.value).split("visit 100 says ")[1]
         assert not _posts(t)
 
 
 def test_sync_header_reads_every_region_before_it_decides():
     """The stale row may be the second one."""
-    rows = [_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 3, "2026-10-25", "2026-10-27")]
-    c, t = _sync([_trip(7, "2026-10-27", "2026-10-29", rows=rows)],
-                 [_visits((200, 7, 3, "2026-10-27", "2026-10-30")),
-                  _visits((201, 7, 3, "2026-10-24", "2026-10-27"))],
-                 [_listing((7, "2026-10-27", "2026-10-29", [1390, 1232]))])
+    rows = [_row(1390, 3, "2026-03-27", "2026-03-30"), _row(1232, 3, "2026-03-25", "2026-03-27")]
+    c, t = _sync([_trip(7, "2026-03-27", "2026-03-29", rows=rows)],
+                 [_visits((200, 7, 3, "2026-03-27", "2026-03-30")),
+                  _visits((201, 7, 3, "2026-03-24", "2026-03-27"))],
+                 [_listing((7, "2026-03-27", "2026-03-29", [1390, 1232]))])
     with pytest.raises(ApiError, match="region 1232"):
         c.sync_trip_header(7)
     assert not _posts(t)
@@ -2835,19 +2835,19 @@ def test_sync_header_reads_every_region_before_it_decides():
 
 def test_sync_header_refuses_a_header_or_a_row_it_cannot_read():
     """The header goes out from the ISO dates, the rows from year/month/day."""
-    start = ("2026-10-31", "2026-11-02")
+    start = ("2026-03-31", "2026-04-02")
     for trip in (
         _trip(7, None, None),
-        _trip(7, None, "2026-11-02"),
-        _trip(7, "2026-10-31", None),
-        _trip(7, "2026-10-31", ""),
-        _trip(7, "20261031", "2026-11-02"),
-        _trip(7, "2026-W44-6", "2026-11-02"),
-        _trip(7, "2026-10-31", "2026-11-02T00:00:00"),
-        _trip(7, 2026, "2026-11-02"),
-        _trip(7, "2026-10-31", "2026-02-30"),
+        _trip(7, None, "2026-04-02"),
+        _trip(7, "2026-03-31", None),
+        _trip(7, "2026-03-31", ""),
+        _trip(7, "20260331", "2026-04-02"),
+        _trip(7, "2026-W14-2", "2026-04-02"),
+        _trip(7, "2026-03-31", "2026-04-02T00:00:00"),
+        _trip(7, 2026, "2026-04-02"),
+        _trip(7, "2026-03-31", "2026-02-30"),
         _trip(7, *start, rows=[_row() | {"date_to": "20261112"}]),
-        _trip(7, *start, rows=[_row() | {"date_to": "12 Nov 2026"}]),
+        _trip(7, *start, rows=[_row() | {"date_to": "12 Apr 2026"}]),
         _trip(7, *start, rows=[_row() | {"date_to": 20261112}]),
         _trip(7, *start, rows=[_row() | {"day_to": 11}]),
         _trip(7, *start, rows=[_row() | {"year_from": 2025}]),
@@ -2941,7 +2941,7 @@ def test_update_trip_write_error_is_not_resent_and_reports_candidates():
                 raise ApiError(action, "no answer", {})
             return super().webapi(action, **fields)
 
-    t = Boom({"trips/get-trip": [_trip(7, "2026-10-31", "2026-11-02")],
+    t = Boom({"trips/get-trip": [_trip(7, "2026-03-31", "2026-04-02")],
               "quickEnter/get-visits-to-region": [OLD],
               "trips/get-trips-for-year-app": [_listing(STALE), _listing((8, *FIXED, [1266]))]})
     with pytest.raises(ApiError) as info:
@@ -2953,7 +2953,7 @@ def test_update_trip_write_error_is_not_resent_and_reports_candidates():
 def test_update_trip_whose_readback_errors_is_a_failed_verification():
     """The trip may already be gone and re-created; "the server refused" is wrong."""
     error = {"result": "ERROR", "result_description": "Internal error."}
-    start = _trip(7, "2026-10-31", "2026-11-02")
+    start = _trip(7, "2026-03-31", "2026-04-02")
     for get_trip, visits_, listings in (
         ([start, error], [OLD], [_listing(STALE)]),
         ([start, {"result": "OK"}], [OLD], [_listing(STALE)]),
@@ -2971,25 +2971,25 @@ def test_update_trip_whose_readback_errors_is_a_failed_verification():
 
 
 def test_update_trip_gone_answering_unauthorised_is_followed():
-    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"),
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-05-22", "2025-05-30"))
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"),
                   {"result": "ERROR", "result_description": "Unauthorised. "}, _trip(8, *FIXED)],
                  [OLD, new], [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2)
     assert c.sync_trip_header(7)["trip_id"] == 8
 
 
 def test_update_trip_two_regions_span_min_to_max():
-    rows = [_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 3, "2026-10-25", "2026-10-27")]
-    v1390 = _visits((200, 7, 3, "2026-10-27", "2026-10-30"))
-    v1232 = _visits((201, 7, 3, "2026-10-25", "2026-10-27"))
-    c, t = _sync([_trip(7, "2026-10-27", "2026-10-29", rows=rows),
-                  _trip(7, "2026-10-25", "2026-10-30", rows=rows)],
+    rows = [_row(1390, 3, "2026-03-27", "2026-03-30"), _row(1232, 3, "2026-03-25", "2026-03-27")]
+    v1390 = _visits((200, 7, 3, "2026-03-27", "2026-03-30"))
+    v1232 = _visits((201, 7, 3, "2026-03-25", "2026-03-27"))
+    c, t = _sync([_trip(7, "2026-03-27", "2026-03-29", rows=rows),
+                  _trip(7, "2026-03-25", "2026-03-30", rows=rows)],
                  [v1390, v1232, v1390, v1232],
-                 [_listing((7, "2026-10-27", "2026-10-29", [1390, 1232])),
-                  _listing((7, "2026-10-25", "2026-10-30", [1390, 1232]))])
+                 [_listing((7, "2026-03-27", "2026-03-29", [1390, 1232])),
+                  _listing((7, "2026-03-25", "2026-03-30", [1390, 1232]))])
     c.sync_trip_header(7)
     (fields,) = _posts(t)
-    assert (fields["date_from"], fields["date_to"]) == ("2026-10-25", "2026-10-30")
+    assert (fields["date_from"], fields["date_to"]) == ("2026-03-25", "2026-03-30")
 
 
 def test_update_trip_is_a_single_attempt_write():
@@ -3000,18 +3000,18 @@ class TripServer(FakeTransport):
     """Holds trip 7 and its visits, and answers update-trip the way the server did:
     the trip and its visits are gone, and new ones with new ids are there."""
 
-    def __init__(self, rows=None, header=("2026-10-31", "2026-11-02"), description="kept",
+    def __init__(self, rows=None, header=("2026-03-31", "2026-04-02"), description="kept",
                  on_save=None, on_read=None):
-        super().__init__({"user/status-quick": {"result": "OK", "uid": 79597}})
+        super().__init__({"user/status-quick": {"result": "OK", "uid": 4242}})
         rows = rows or [_row()]
         for r in rows:
             r.setdefault("region_name", f"Region number {r['id']}")
         self.trips = {7: _trip(7, *header, rows=rows, description=description)["trip"]}
         self.visits = {}
         for n, r in enumerate(rows):
-            mine = (100 + n, 7, r["quality"], r["date_from"] or "2026-10-31",
-                    r["date_to"] or "2026-11-12")
-            other = (50 + n, None, 3, "2025-10-22", "2025-10-30")
+            mine = (100 + n, 7, r["quality"], r["date_from"] or "2026-03-31",
+                    r["date_to"] or "2026-04-12")
+            other = (50 + n, None, 3, "2025-05-22", "2025-05-30")
             self.visits[r["id"]] = _visits(mine, other)["data"]
         self.trips[3] = _trip(3, "2026-03-01", "2026-03-04", rows=[_row(4)])["trip"]
         self.on_save, self.on_read = on_save, on_read
@@ -3059,11 +3059,11 @@ def _sync_cli(monkeypatch, tmp_path, t, *argv, trip="7"):
 
 
 SYNC = ("--confirm", "--reason", "owner asked for trip 7")
-TWO = (_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 4, "2026-10-25", "2026-10-27"))
+TWO = (_row(1390, 3, "2026-03-27", "2026-03-30"), _row(1232, 4, "2026-03-25", "2026-03-27"))
 
 
 def _two():
-    return TripServer([dict(r) for r in TWO], ("2026-10-27", "2026-10-29"))
+    return TripServer([dict(r) for r in TWO], ("2026-03-27", "2026-03-29"))
 
 
 def test_sync_header_refuses_when_the_trip_changed_since_the_preview():
@@ -3072,7 +3072,7 @@ def test_sync_header_refuses_when_the_trip_changed_since_the_preview():
         return lambda t: t.trips[7]["regions"][0].update(over)
 
     def both(t, **over):  # row and visit agree with each other, not with the preview
-        t.trips[7]["regions"][0].update(over, date_to=f"2026-11-{over.get('day_to', 12):02}")
+        t.trips[7]["regions"][0].update(over, date_to=f"2026-04-{over.get('day_to', 12):02}")
         t.visits[1266][0].update({k: v for k, v in over.items() if k != "date_to"})
 
     def another_region(t):
@@ -3080,10 +3080,10 @@ def test_sync_header_refuses_when_the_trip_changed_since_the_preview():
         t.visits[5] = _visits((105, 7, 5, *FIXED))["data"]
 
     for change in (
-        lambda t: t.trips[7].update(date_to="2026-11-03"),
-        lambda t: t.trips[7].update(date_from="2026-11-01"),
-        lambda t: t.trips[7].update(date_to="2026-11-12"),    # already right by now
-        lambda t: t.trips[7].update(date_to="2026-11-30"),    # longer than its region by now
+        lambda t: t.trips[7].update(date_to="2026-04-03"),
+        lambda t: t.trips[7].update(date_from="2026-04-01"),
+        lambda t: t.trips[7].update(date_to="2026-04-12"),    # already right by now
+        lambda t: t.trips[7].update(date_to="2026-04-30"),    # longer than its region by now
         lambda t: t.trips[7].update(date_to=None),
         lambda t: t.trips[7].update(description="rewritten"),
         lambda t: t.trips[7].update(regions=[]),
@@ -3116,9 +3116,9 @@ def test_sync_header_expect_rows_is_the_trip_and_then_every_region_with_its_visi
     t = _two()
     c = NomadMania(token="fake", transport=t)
     assert c.preview_trip_header(7).expect_rows == [
-        ("2026-10-27", "2026-10-29", "kept"),
-        (1232, 4, 0, "2026-10-25", "2026-10-27", 101),
-        (1390, 3, 0, "2026-10-27", "2026-10-30", 100),
+        ("2026-03-27", "2026-03-29", "kept"),
+        (1232, 4, 0, "2026-03-25", "2026-03-27", 101),
+        (1390, 3, 0, "2026-03-27", "2026-03-30", 100),
     ]
     # an empty or cut-short one is a trip that does not match, never "no check"
     for wrong in ([], c.preview_trip_header(7).expect_rows[:-1]):
@@ -3131,9 +3131,9 @@ def test_sync_header_dry_run_prints_that_every_id_will_change(monkeypatch, tmp_p
     t = _two()
     assert _sync_cli(monkeypatch, tmp_path, t) == 0
     said = capsys.readouterr().out
-    assert "2026-10-27 → 2026-10-29" in said and "2026-10-25 → 2026-10-30" in said
+    assert "2026-03-27 → 2026-03-29" in said and "2026-03-25 → 2026-03-30" in said
     for part in ("trip 7", "visit 100", "visit 101", "1390", "1232", "Region number 1390",
-                 "2026-10-27 → 2026-10-30", "2026-10-25 → 2026-10-27", "quality 3", "quality 4",
+                 "2026-03-27 → 2026-03-30", "2026-03-25 → 2026-03-27", "quality 3", "quality 4",
                  "deletes", "EVERY trip and visit id", "rebuilt", "Dry run. Nothing was sent"):
         assert part in said, part
     assert "visit 50" not in said, "visits outside the trip keep their ids"
@@ -3154,7 +3154,7 @@ def _with(change, *args, **kw):
 @pytest.mark.parametrize("confirm", [(), SYNC], ids=["preview", "confirmed"])
 @pytest.mark.parametrize("make, says", [
     (lambda: TripServer(header=FIXED), "already spans"),
-    (lambda: TripServer(header=("2026-10-30", "2026-11-12")), "shorten"),
+    (lambda: TripServer(header=("2026-03-30", "2026-04-12")), "shorten"),
     (_year_only, "year-only"),
     (lambda: _with(lambda t: t.trips[7].update(regions=[])), "no regions"),
     (lambda: _with(lambda t: t.visits[1266][0].update(quality=3)), "trip row says q5"),
@@ -3204,10 +3204,10 @@ def test_sync_header_journals_the_whole_trip_before_the_write(monkeypatch, tmp_p
     assert opened["snapshot"]["trip"] == was, "header, description and every row as read"
     assert sorted((v["id"], v["region"], v["quality"], v["date_from"], v["date_to"], v["trip_id"])
                   for v in opened["snapshot"]["visits"]) == [
-        (50, 1390, 3, "2025-10-22", "2025-10-30", None),
-        (51, 1232, 3, "2025-10-22", "2025-10-30", None),
-        (100, 1390, 3, "2026-10-27", "2026-10-30", 7),
-        (101, 1232, 4, "2026-10-25", "2026-10-27", 7),
+        (50, 1390, 3, "2025-05-22", "2025-05-30", None),
+        (51, 1232, 3, "2025-05-22", "2025-05-30", None),
+        (100, 1390, 3, "2026-03-27", "2026-03-30", 7),
+        (101, 1232, 4, "2026-03-25", "2026-03-27", 7),
     ]
     _, done = _journal_lines(tmp_path)
     assert done["phase"] == "done" and done["error"] == "" and done["key"] == opened["key"]
@@ -3215,7 +3215,7 @@ def test_sync_header_journals_the_whole_trip_before_the_write(monkeypatch, tmp_p
     assert sorted(map(tuple, (v.values() for v in done["result"]["visits"]))) == [
         (1232, 101, 1101), (1390, 100, 1100)]
     assert [sorted(v) for v in done["result"]["visits"]] == [["new", "old", "region"]] * 2
-    for part in ("trip 7 → 8", "visit 100 → 1100", "visit 101 → 1101", "record", "deletes-79597"):
+    for part in ("trip 7 → 8", "visit 100 → 1100", "visit 101 → 1101", "record", "deletes-4242"):
         assert part in said.lower(), part
     assert len(_posts(t)) == 1
 
@@ -3294,7 +3294,7 @@ def test_sync_header_that_cannot_prove_the_save_stays_open_and_says_what_is_know
     (line,) = [x for x in said.splitlines() if "replacement" in x]
     assert found in line
     assert CLOSE_BY_HAND in said and "snapshot" in said
-    assert str(tmp_path / "deletes-79597.ndjson") in said
+    assert str(tmp_path / "deletes-4242.ndjson") in said
     assert "done; server confirms" not in said
     assert [a for a, _ in t.sent if Transport._is_write(a)] == ["trips/update-trip"]
     # and nothing more is sent for the account until it is closed by hand
@@ -3355,7 +3355,7 @@ AS_IT_WAS = (
     ("another trip's header", lambda t: t.trips[3].update(date_to="2026-03-09"), False),
     ("another trip's regions", lambda t: t.trips[3].update(regions=[_row(5)]), False),
     ("another trip gone", lambda t: t.trips.pop(3), False),
-    ("header", lambda t: t.trips[7].update(date_to="2026-11-03"), False),
+    ("header", lambda t: t.trips[7].update(date_to="2026-04-03"), False),
     ("description", lambda t: t.trips[7].update(description=""), False),
     ("row quality", lambda t: t.trips[7]["regions"][0].update(quality=3), False),
     ("row date parts", lambda t: t.trips[7]["regions"][0].update(day_to=11), False),
@@ -3413,7 +3413,7 @@ def test_sync_header_names_what_a_refused_save_left_behind(monkeypatch, tmp_path
     t = TripServer(on_save=save)
     assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
     said = capsys.readouterr().out
-    for part in ("trip 7 is gone", "2026: new trip 8 2026-10-31..None, regions []",
+    for part in ("trip 7 is gone", "2026: new trip 8 2026-03-31..None, regions []",
                  "region 1266: visit 100 is gone", "replacement: none found"):
         assert part in said, part
     assert "not known" not in said
@@ -3526,7 +3526,7 @@ def test_sync_header_is_not_stopped_by_regions_or_trips_in_another_order(
             trip["regions"].reverse()
 
     def server(save):
-        t = TripServer([dict(r) for r in TWO], ("2026-10-27", "2026-10-29"), on_save=save)
+        t = TripServer([dict(r) for r in TWO], ("2026-03-27", "2026-03-29"), on_save=save)
         t.trips[3]["regions"] = [_row(4), _row(5), _row(6)]
         t.visits = {k: list(reversed(v)) for k, v in t.visits.items()}
         return t
@@ -3552,8 +3552,8 @@ def test_sync_header_is_not_stopped_by_regions_or_trips_in_another_order(
 
 
 def test_sync_header_replacement_that_lists_its_region_twice_is_not_it():
-    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
-    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-05-22", "2025-05-30"))
+    c, _ = _sync([_trip(7, "2026-03-31", "2026-04-02"), NOT_FOUND, _trip(8, *FIXED)],
                  [OLD, new], [_listing(STALE)] + [_listing((8, *FIXED, [1266, 1266]))] * 2)
     with pytest.raises(VerificationFailed, match="0 NEW trip"):
         c.sync_trip_header(7)
@@ -3570,7 +3570,7 @@ def test_sync_header_that_kept_an_id_does_not_call_it_stale(monkeypatch, tmp_pat
     assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 0
     said = capsys.readouterr().out.split("done; server confirms")[1]
     assert "trip 7 kept its id" in said and "No id changed" in said
-    assert "2026-10-25..2026-10-30" in said and "was 2026-10-27..2026-10-29" in said
+    assert "2026-03-25..2026-03-30" in said and "was 2026-03-27..2026-03-29" in said
     assert "stale" not in said and "→" not in said
 
 
@@ -3597,7 +3597,7 @@ def test_sync_header_says_where_the_saved_copy_is_however_it_ends(monkeypatch, t
         said = capsys.readouterr().out
         assert word in said
         (line,) = [x for x in said.splitlines() if SAVED_COPY in x]
-        assert str(tmp_path / "deletes-79597.ndjson") in line
+        assert str(tmp_path / "deletes-4242.ndjson") in line
         assert "snapshot" in _journal_lines(tmp_path)[0]
 
 
@@ -3662,8 +3662,8 @@ def test_sync_header_interrupted_says_where_to_look(monkeypatch, tmp_path, capsy
         assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 130
         said = capsys.readouterr().out
         for part in ("Whether trip 7 was replaced is not known", "the trips of 2026",
-                     "2026-10-31..2026-11-12", "1266", "wanderfill export --full",
-                     "saved copy", "snapshot", str(tmp_path / "deletes-79597.ndjson")):
+                     "2026-03-31..2026-04-12", "1266", "wanderfill export --full",
+                     "saved copy", "snapshot", str(tmp_path / "deletes-4242.ndjson")):
             assert part in said, part
         assert all(x in said for x in CLOSING) and len(_posts(t)) == 1
 
@@ -3680,9 +3680,9 @@ def test_sync_header_unanswered_but_unchanged_is_not_called_unknown_or_safe(
 
 
 BLOCKED = {
-    "open": lambda d: _open_line(d / "journal-79597-aaaaaaaaaaaa.ndjson"),
-    "open delete": lambda d: _open_line(d / "deletes-79597.ndjson", "delete_visit:1:2"),
-    "corrupt": lambda d: (d / "deletes-79597.ndjson").write_text("{torn"),
+    "open": lambda d: _open_line(d / "journal-4242-aaaaaaaaaaaa.ndjson"),
+    "open delete": lambda d: _open_line(d / "deletes-4242.ndjson", "delete_visit:1:2"),
+    "corrupt": lambda d: (d / "deletes-4242.ndjson").write_text("{torn"),
 }
 
 
@@ -3696,7 +3696,7 @@ def test_a_dry_run_says_what_would_block_the_confirm(monkeypatch, tmp_path, caps
                                 "kye/get-kye": [{"visited": [570]}] * 9},
                                {**DELETE_STATE})
     c = NomadMania(token="fake", transport=visit)
-    kinds = (("visit", "13450095", "--region", "791"), ("trip", "305716"),
+    kinds = (("visit", "1000001", "--region", "791"), ("trip", "2001"),
              ("region", "791", "--all-visits"), ("dare", "1142"), ("kye", "570"))
 
     def everything():
@@ -3713,7 +3713,7 @@ def test_a_dry_run_says_what_would_block_the_confirm(monkeypatch, tmp_path, caps
     assert not work.exists() and not list(default.glob(".lock-*")), "a dry run creates nothing"
     assert not [a for a, _ in visit.sent if Transport._is_write(a)]
     for path in default.iterdir():
-        path.rename(path.with_name(path.name.replace("79597", "7")))
+        path.rename(path.with_name(path.name.replace("4242", "7")))
     for rc, _ in everything():
         assert rc == 0, "another account's journal does not block"
 
@@ -3722,10 +3722,10 @@ def test_sync_header_holds_the_account_lock_and_meets_an_open_apply(monkeypatch,
     from wanderfill.plan.apply import account_lock
 
     t = TripServer()
-    with account_lock([tmp_path], 79597):
+    with account_lock([tmp_path], 4242):
         assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 2
     assert "another run" in capsys.readouterr().err
-    _open_line(tmp_path / "journal-79597-aaaaaaaaaaaa.ndjson")
+    _open_line(tmp_path / "journal-4242-aaaaaaaaaaaa.ndjson")
     assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 2
     assert not _posts(t) and _journal_lines(tmp_path) == []
 
@@ -6025,7 +6025,7 @@ def _unmark(monkeypatch, tmp_path, capsys, t):
     return rc, [e["phase"] for e in _journal_lines(tmp_path)], capsys.readouterr()
 
 
-DELETE_STATE = {"user/status-quick": {"result": "OK", "uid": 79597}, DARE_READ: {"ids": [1142]}}
+DELETE_STATE = {"user/status-quick": {"result": "OK", "uid": 4242}, DARE_READ: {"ids": [1142]}}
 CLOSING = ('"phase": "done"', '"error"', "Read the server back")
 
 
@@ -6053,7 +6053,7 @@ def test_a_dead_read_back_after_a_delete_stays_open(monkeypatch, tmp_path, capsy
     """It is a TransportError underneath, which on the write itself would close."""
     rc, phases, said = _unmark(monkeypatch, tmp_path, capsys, _DeadReadBack({}, DELETE_STATE))
     assert rc == 1 and phases == ["open"]
-    assert all(x in said.out for x in CLOSING) and "deletes-79597" in said.out
+    assert all(x in said.out for x in CLOSING) and "deletes-4242" in said.out
 
 
 @pytest.mark.parametrize("error", [RuntimeError("a bug of ours"), KeyboardInterrupt()], ids=repr)
@@ -6089,7 +6089,7 @@ def test_a_delete_whose_done_line_will_not_go_in_says_so(monkeypatch, tmp_path, 
 def test_every_command_says_the_same_about_an_open_entry(monkeypatch, tmp_path, capsys):
     from wanderfill.plan.apply import CLOSE_BY_HAND
 
-    _open_line(tmp_path / "journal-79597-aaaaaaaaaaaa.ndjson")
+    _open_line(tmp_path / "journal-4242-aaaaaaaaaaaa.ndjson")
     assert _run_delete(monkeypatch, tmp_path, FakeClient(), *UNMARK) == 2
     assert CLOSE_BY_HAND in capsys.readouterr().out
     _open_line(tmp_path / "journal-7-aaaaaaaaaaaa.ndjson")

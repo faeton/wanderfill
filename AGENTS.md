@@ -40,10 +40,10 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
 6. **Open every source that covers the year before you write a date.** Not the
    freshest one, not the tidiest one — *all* of them. A date written from a
    source that cannot see that year is unverified, whatever it agreed with.
-   User memory is a hypothesis, not a source: of five dates one user supplied
-   from recall, three were contradicted by their own archive.
+   User memory is a hypothesis, not a source: a date supplied from recall can be
+   contradicted by the archive.
 7. **Never propose the missing place, date or route.** Do not show the gap and
-   the days either side and ask "so, Luxembourg on the 30th?" Ask what they
+   the days either side and ask "so, that country on the 30th?" Ask what they
    independently remember, and treat "I don't know" as a final answer. **A yes
    to a corridor you drew is still your interpolation** — it has a human
    signature on it, which is worse than none, because now it looks sourced.
@@ -148,7 +148,7 @@ cannot say.**
 |---|---|---|
 | local Photos library | per photo, timestamped | thin or empty before iCloud; has *yesterday* |
 | a day-level track (`track.csv`) | one row per day per city | no intra-day movement, so no speed; city labels are suburb-level and inconsistently spelled |
-| user memory | a hypothesis | wrong about three dates in five, on one profile |
+| user memory | a hypothesis | can be wrong, however sure it sounds |
 
 The freshest source matters for a trip happening *now*: a phone that has not
 synced means the server-side library stops weeks ago and the newest trip is
@@ -423,9 +423,9 @@ whether a coordinate is a visit, and that is where the whole difficulty moves.
 **Grade by speed, not only by count.** A photo from seat 27A sits in a cell as
 convincingly as a week on the ground. Compute the implied speed between
 consecutive timestamped points and treat a cell whose legs mostly exceed ~200
-km/h as an aircraft. On the first run this caught two mid-Pacific boxes 1,100 km
-apart 2.5 hours apart, a flight over Yemen at 305 km/h, and two airport layovers
-that a point-count test would have waved through. Hold those for the user; do
+km/h as an aircraft. That catches two mid-ocean boxes 1,100 km apart 2.5 hours apart, a
+flight at 305 km/h, and airport layovers that a point-count test would
+wave through. Hold those for the user; do
 not reject them, and do not mark them.
 
 **Give `grade` the raw coordinate, not a rounded one.** A phone can repeat one
