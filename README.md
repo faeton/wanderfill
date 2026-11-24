@@ -288,7 +288,7 @@ they spent:
 - **Progress every couple of seconds** on stderr, `-v` for every request, and a
   closing `network: N requests, X KB` line.
 
-`plan`, `apply`, `check`, `delete` and `export` never use the cache: a drift
+`plan`, `apply`, `check`, `delete`, `sync-header` and `export` never use the cache: a drift
 check, a deletion read-back or a rollback reference read from a cache would
 pass for the wrong reason. A test fails if a cache reaches any of them.
 
@@ -320,7 +320,7 @@ These are constraints in the code, not aspirations in a document.
 
 - **Your account only, your data only.** No reads of other users, no leaderboard
   scraping. Those endpoints are not in the client.
-- **It never deletes what it computed.** The one way off the profile is
+- **It never deletes what it computed.** The one way to take something off the profile is
   `wanderfill delete <kind> <id>` — a visit, a trip, a region's visits, a DARE
   mark or a KYE tick — and it takes one id you name yourself, shows what goes,
   does nothing without `--confirm` and a `--reason`, journals the full record
@@ -329,7 +329,11 @@ These are constraints in the code, not aspirations in a document.
   blocks every further deletion and apply on that account until you have looked
   yourself. It is not a plan op and cannot be: a plan
   is something the tool worked out, and a deletion must never be. A test
-  asserts those five are the only removing methods in the client.
+  asserts those five are the only removing methods in the client. One command
+  replaces instead: `wanderfill sync-header <trip_id>` widens a trip's dates to
+  span its regions, and the server does that by deleting the trip and its visits
+  and creating them again under new ids. One trip per run, the same preview,
+  `--confirm`, `--reason` and journal, and not a plan op either.
 - **It never invents travel.** Only regions containing an observed point are
   claimed. No interpolation between points, no "you must have crossed X to get
   from A to B". This is a scored competition; an inferred region is a fabricated
@@ -423,6 +427,11 @@ wanderfill delete trip 305716 --confirm --reason "..."        # the trip AND its
 wanderfill delete region 791 --all-visits --confirm --reason "..."  # every visit on it
 wanderfill delete dare 1142 --confirm --reason "..."          # un-mark one DARE area
 wanderfill delete kye 570 --confirm --reason "..."            # un-tick one KYE quadrant
+
+# widen ONE trip's dates to span its regions. The server deletes the trip and its
+# visits and creates new ones: every id in it changes.
+wanderfill sync-header 305716                                # shows it, sends nothing
+wanderfill sync-header 305716 --confirm --reason "extended after it was written"
 ```
 
 There is deliberately **no command that computes and writes in one step.**
@@ -528,7 +537,7 @@ cost a wrong write or a wrong number the first time.
 | A visit counts whether standalone **or** trip-owned, so naive trips double-count | `visits_for_region` returns both kinds; `split_first_and_repeat` keeps totals honest |
 | `trips/new-trip` requires a junk `regions` field before it will read `regions_json` | `create_trip` sends both, reproducing the site's own bug deliberately |
 | `update-visit` replaces the whole record and silently downgrades `quality` | `quality` is keyword-only, required, and raised to `max()` of the live value |
-| `update-visit` moves a trip-owned visit but not the trip's own dates, so the trip reads shorter than its region | `sync_trip_header` re-saves the trip as the site's Save does, rebuilt from the server's rows with their qualities kept, and reads back one visit per region. The server does not edit in place: it deletes the trip and its visits and creates new ones, so the method follows and returns the **new** trip id. It only ever widens: before anything is sent it refuses a header that would get shorter at either end, a row and visit that disagree on quality or dates, and dates it cannot read; `test_sync_header_refuses_to_shorten_either_end`, `test_sync_header_refuses_when_a_row_and_its_visit_disagree_on_dates`, `test_sync_header_is_not_a_plan_op`, `test_sync_header_across_new_year` |
+| `update-visit` moves a trip-owned visit but not the trip's own dates, so the trip reads shorter than its region | `sync_trip_header` re-saves the trip as the site's Save does, rebuilt from the server's rows with their qualities kept, and reads back one visit per region. The server does not edit in place: it deletes the trip and its visits and creates new ones, so the method follows and returns the **new** trip id. It only ever widens: before anything is sent it refuses a header that would get shorter at either end, a row and visit that disagree on quality or dates, and dates it cannot read. Its one caller is `wanderfill sync-header <trip_id>`: the preview makes the same refusals and prints every id that will die, `expect_rows` binds the write to it, the whole trip is journalled first, and a save that is not proved, or an `ERROR` after which the trip does not read as before, stays open and is never sent again; `test_sync_header_refuses_to_shorten_either_end`, `test_sync_header_refuses_when_a_row_and_its_visit_disagree_on_dates`, `test_sync_header_is_not_a_plan_op`, `test_sync_header_across_new_year`, `test_sync_header_refuses_when_the_trip_changed_since_the_preview`, `test_sync_header_previews_every_refusal`, `test_sync_header_dry_run_prints_that_every_id_will_change`, `test_sync_header_journals_the_whole_trip_before_the_write`, `test_sync_header_that_cannot_prove_the_save_stays_open_and_says_what_is_known`, `test_sync_header_refused_by_the_server_closes_only_if_the_trip_is_still_as_it_was`, `test_sync_header_takes_exactly_one_trip_id`, `test_sync_trip_header_has_no_caller_but_the_sync_header_command` |
 | A visit can carry a **year with no month or day**, and reading that as undated erases it on write-back | `YearOnly`; `update_visit` refuses to make a date vaguer without `allow_vaguer` |
 | `slow/get-slow-app`'s `yes` is batch-computed and lags, so one reading looks broken | Renamed `yes_stored`; `yes_scores()` recomputes the published rule |
 | A country marked visited with no year scores **8**, so backfilling an old date makes YES *worse* | Documented with the eight-year break-even before any backfill is proposed |

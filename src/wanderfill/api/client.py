@@ -16,6 +16,9 @@ Three quirks are handled here rather than left to the user:
     ``unmark_dare``, ``unmark_kye`` — each take one id, read the thing before
     and after, refuse to act on a record they cannot see, and return what was
     removed so it can be journalled and put back.
+  * ``sync_trip_header`` is not an undo, but the server answers it by deleting
+    one trip and its visits and creating new ones, so it refuses whatever it
+    would lose and is bound to what ``preview_trip_header`` showed.
 """
 
 from __future__ import annotations
@@ -28,7 +31,14 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from .cache import ReadCache, summary_of
-from .errors import ApiError, PrecisionLoss, UnknownWriteOutcome, VerificationFailed
+from .errors import (
+    ApiError,
+    AuthError,
+    PrecisionLoss,
+    TransportError,
+    UnknownWriteOutcome,
+    VerificationFailed,
+)
 from .transport import Transport
 
 T = TypeVar("T")
@@ -264,6 +274,43 @@ def _row_problem(raw: object) -> str | None:
         if given - {0} and (0 in given or _date_parts(raw, side) is None):
             return f"its {side} date is {parts}"
     return None
+
+
+def _trip_rows(trip: dict) -> list[tuple]:
+    """Each region row as ``(region, quality, hidden, date_from, date_to)``, sorted."""
+    return sorted((int(r["id"]), int(r["quality"]), int(r.get("hidden") or 0),
+                   r.get("date_from"), r.get("date_to")) for r in trip["regions"])
+
+
+@dataclass(frozen=True)
+class TripResave:
+    """What re-saving a trip would send, and everything it would replace. Reads only.
+
+    Built by ``NomadMania._trip_resave``, so the preview a person sees and the
+    write that follows it come from the same code and the same refusals.
+    """
+
+    trip_id: int
+    trip: dict  # as the server sent it
+    description: str
+    was: tuple[str, str]
+    now: tuple[str, str]
+    body: list[dict]  # the region rows to send, qualities kept
+    visits: dict[int, list[Visit]]  # every visit of every region in it
+    owned: dict[int, int]  # region -> the one visit of the trip's there
+    listed: set[int]  # the trips that exist, in every year of the new span
+
+    @property
+    def expect_rows(self) -> list[tuple]:
+        """What a preview showed, for :meth:`NomadMania.sync_trip_header` to hold to.
+
+        First the trip, ``(date_from, date_to, description)``; then a tuple per
+        region, sorted: ``(region, quality, hidden, date_from, date_to, visit id)``.
+        The first one has another shape because the header and the description
+        belong to no row, and they are part of what was confirmed.
+        """
+        return [(*self.was, self.description),
+                *((*row, self.owned[row[0]]) for row in _trip_rows(self.trip))]
 
 
 def strict_ids(action: str, values: object) -> set[int]:
@@ -1117,7 +1164,120 @@ class NomadMania:
             regions_json=json.dumps(list(regions)),
         )
 
-    def sync_trip_header(self, trip_id: int) -> dict:
+    def _trip_listing(self, span: tuple[str, str]) -> list[dict]:
+        """The trips listed in every year of ``span``, some perhaps twice.
+
+        Nothing says which of its years a trip is listed under, or that it is
+        only one; the new span contains the old header.
+        """
+        return [t for year in range(int(span[0][:4]), int(span[1][:4]) + 1)
+                for t in self._strict("trips/get-trips-for-year-app", "trips", year=year)]
+
+    def _trip_resave(
+        self, trip_id: int, expect_rows: Sequence[tuple] | None = None
+    ) -> TripResave:
+        """Everything :meth:`sync_trip_header` does before it sends. Sends nothing.
+
+        Reads the trip, which trips exist and every visit in its regions, and
+        refuses; see there for what, and for ``expect_rows``, which is compared
+        before any other refusal, so a trip that changed says so.
+        """
+        def refuse(msg: str) -> ApiError:
+            return ApiError("trips/update-trip", f"trip {trip_id} {msg}", before)
+
+        def changed(what: str, now: object, shown: object) -> PrecisionLoss:
+            return PrecisionLoss(
+                f"trip {trip_id} has another {what} than the preview showed: {now}, not {shown} "
+                "— nothing was sent; re-run to re-preview"
+            )
+
+        answer = self.trip(trip_id)
+        before = answer.get("trip") if isinstance(answer, dict) else None
+        if not isinstance(before, dict):
+            before = {}
+            raise refuse(f"cannot be read: {str(answer)[:200]}")
+        regions = before.get("regions") or []
+        description = before.get("description") or ""
+        header = (before.get("date_from"), before.get("date_to"))
+        try:
+            rows = _trip_rows({"regions": regions})
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise refuse(f"has a region row that cannot be read ({exc!r})") from exc
+        shown = None if expect_rows is None else [tuple(r) for r in expect_rows]
+        if shown is not None:
+            if [(*header, description)] != shown[:1]:
+                raise changed("header or description", (*header, description), shown[:1])
+            if rows != [r[:-1] for r in shown[1:]]:
+                raise changed("set of region rows", rows, shown[1:])
+        if not regions:
+            raise refuse("has no regions to span")
+        if any(not (r.get("date_from") and r.get("date_to")) for r in regions):
+            raise refuse("has a year-only region; the site saves those as `year`, which this "
+                         "does not send")
+        if None in [_iso_day(d) for d in header]:
+            raise refuse(f"has a header that is not two YYYY-MM-DD dates: {list(header)}")
+        for r in regions:
+            for side in ("from", "to"):
+                iso = r[f"date_{side}"]
+                parts = [r.get(f"{unit}_{side}") for unit in ("year", "month", "day")]
+                day = _iso_day(iso)
+                if day is None or day != _date_parts(r, side):
+                    # the header goes out from the one, the region from the other
+                    raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: "
+                                   f"date_{side} {iso!r} is not the YYYY-MM-DD of its year, "
+                                   f"month and day {parts}", before)
+        now = (min(r["date_from"] for r in regions), max(r["date_to"] for r in regions))
+        if header == now:
+            raise refuse(f"already spans {now[0]}..{now[1]}")
+        if now[0] > header[0] or now[1] < header[1]:
+            raise refuse(f"reads {header[0]}..{header[1]} around regions spanning "
+                         f"{now[0]}..{now[1]}; the save would shorten it")
+        body = [{
+            "id": int(r["id"]), "quality": int(r["quality"]), "hidden": int(r.get("hidden") or 0),
+            "year_from": int(r["year_from"]), "month_from": int(r["month_from"]),
+            "day_from": int(r["day_from"]), "year_to": int(r["year_to"]),
+            "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
+        } for r in regions]
+        listed = strict_ids("trips/get-trips-for-year-app", [
+            t.get("id") if isinstance(t, dict) else t for t in self._trip_listing(now)])
+        visits = {r["id"]: self._visits_strict(r["id"]) for r in body}
+        mine = {rid: [v.id for v in there if v.trip_id == trip_id]
+                for rid, there in visits.items()}
+        if shown is not None and mine != {r[0]: [r[-1]] for r in shown[1:]}:
+            raise changed("set of visits", mine, {r[0]: r[-1] for r in shown[1:]})
+        if len(mine) != len(body) or any(len(ids) != 1 for ids in mine.values()):
+            raise refuse(f"does not own exactly one visit per region before the save: {mine}")
+        for r in body:
+            (visit,) = (v for v in visits[r["id"]] if v.trip_id == trip_id)
+            if visit.quality != r["quality"]:
+                # the body carries the trip row's quality; a visit that says
+                # otherwise would be rewritten to it. Not this method's call.
+                raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: trip row "
+                               f"says q{r['quality']}, visit {visit.id} says q{visit.quality}",
+                               before)
+            row_days = tuple(_date_parts(r, side) for side in ("from", "to"))
+            visit_days = (visit.date_from, visit.date_to)
+            if visit_days != row_days:  # likewise; a YearOnly or no date is not a date
+                row_says, visit_says = ("..".join(str(_iso(d)) for d in days)
+                                        for days in (row_days, visit_days))
+                raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: trip row "
+                               f"says {row_says}, visit {visit.id} says {visit_says}", before)
+        return TripResave(
+            trip_id=trip_id, trip=before, description=description, was=header, now=now,
+            body=body, visits=visits, owned={rid: ids[0] for rid, ids in mine.items()},
+            listed=listed)
+
+    def preview_trip_header(self, trip_id: int) -> TripResave:
+        """What :meth:`sync_trip_header` would do to this trip, or its refusal. Reads only.
+
+        The same code decides, so what is previewed is refused exactly when the
+        write would be. Pass the result's ``expect_rows`` to the write.
+        """
+        return self._trip_resave(trip_id)
+
+    def sync_trip_header(
+        self, trip_id: int, *, expect_rows: Sequence[tuple] | None = None
+    ) -> dict:
         """Widen a trip's own dates to span its regions, by **replacing the trip**.
 
         The server deletes the trip and its visits and creates new ones, so the
@@ -1158,108 +1318,68 @@ class NomadMania:
         from the row and would overwrite the visit; a header or row date that
         is not ``YYYY-MM-DD``, or a row whose year, month and day are another
         date; a year-only region (the site sends ``year`` instead, a different
-        shape); and a header that is already right. One attempt, never retried.
-        """
-        def rows(trip: dict) -> list[tuple]:
-            return sorted((int(r["id"]), int(r["quality"]), int(r.get("hidden") or 0),
-                           r.get("date_from"), r.get("date_to")) for r in trip["regions"])
+        shape); a trip that does not own exactly one visit in each region; and
+        a header that is already right. One attempt, never retried.
 
-        def inventory(region: int) -> dict[int, tuple]:
-            return {v.id: (v.date_from, v.date_to, int(v.quality), v.trip_id)
-                    for v in self._visits_strict(region)}
+        ``expect_rows`` binds the call to what a human was shown: pass
+        ``preview_trip_header(trip_id).expect_rows``. The trip is read again here,
+        and if its header, description, any region row (quality, hidden, dates)
+        or any visit it owns is not what that says, :class:`PrecisionLoss` is
+        raised and nothing is sent. An empty sequence matches no trip; only
+        ``None`` leaves the check out.
+
+        The save is a deletion and a creation, so an ``ERROR`` may come from
+        between them. It stays a plain refusal only if the trip, its visits and the
+        listing then read as they did before; otherwise, and when a 4xx left a
+        replacement behind, it is a :class:`VerificationFailed`.
+
+        **One command calls this**, ``wanderfill sync-header``, one trip per run:
+        the exception the owner approved on 2026-11-24 (AGENTS.md, rule 2). It is
+        not a plan op, and a loop over it is a policy violation.
+        """
+        saving = self._trip_resave(trip_id, expect_rows)
+        before, description, body = saving.trip, saving.description, saving.body
+        date_from, date_to = saving.now
+        ids = set(saving.owned)
+
+        def as_seen(there: list[Visit]) -> dict[int, tuple]:
+            return {v.id: (v.date_from, v.date_to, v.quality, v.trip_id) for v in there}
 
         def fail(msg: str) -> VerificationFailed:
             return VerificationFailed("trips/update-trip", f"server answered {resp!r}; {msg}",
                                       resp)
 
-        before = self.trip(trip_id)["trip"]
-        regions = before.get("regions") or []
-        if not regions:
-            raise ApiError("trips/update-trip", f"trip {trip_id} has no regions to span", before)
-        if any(not (r.get("date_from") and r.get("date_to")) for r in regions):
-            raise ApiError("trips/update-trip", f"trip {trip_id} has a year-only region; "
-                           "the site saves those as `year`, which this does not send", before)
-        header = [before.get(k) for k in ("date_from", "date_to")]
-        if None in [_iso_day(d) for d in header]:
-            raise ApiError("trips/update-trip", f"trip {trip_id} has a header that is not two "
-                           f"YYYY-MM-DD dates: {header}", before)
-        for r in regions:
-            for side in ("from", "to"):
-                iso = r[f"date_{side}"]
-                parts = [r.get(f"{unit}_{side}") for unit in ("year", "month", "day")]
-                day = _iso_day(iso)
-                if day is None or day != _date_parts(r, side):
-                    # the header goes out from the one, the region from the other
-                    raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: "
-                                   f"date_{side} {iso!r} is not the YYYY-MM-DD of its year, "
-                                   f"month and day {parts}", before)
-        date_from = min(r["date_from"] for r in regions)
-        date_to = max(r["date_to"] for r in regions)
-        if header == [date_from, date_to]:
-            raise ApiError("trips/update-trip",
-                           f"trip {trip_id} already spans {date_from}..{date_to}", before)
-        if date_from > header[0] or date_to < header[1]:
-            raise ApiError("trips/update-trip", f"trip {trip_id} reads {header[0]}..{header[1]} "
-                           f"around regions spanning {date_from}..{date_to}; the save would "
-                           "shorten it", before)
-        body = [{
-            "id": int(r["id"]), "quality": int(r["quality"]), "hidden": int(r.get("hidden") or 0),
-            "year_from": int(r["year_from"]), "month_from": int(r["month_from"]),
-            "day_from": int(r["day_from"]), "year_to": int(r["year_to"]),
-            "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
-        } for r in regions]
-        description = before.get("description") or ""
-        # Every year of the new span, which contains the old header: nothing says
-        # which of its years a trip is listed under, or that it is only one.
-        years = range(int(date_from[:4]), int(date_to[:4]) + 1)
-
-        def listing() -> list[dict]:
-            return [t for y in years
-                    for t in self._strict("trips/get-trips-for-year-app", "trips", year=y)]
-
-        def region_ids(t: dict) -> set[int]:
-            return {int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
-        # Everything the read-back compares against is read BEFORE the write:
-        # which trips already exist (so an old look-alike cannot pose as the
-        # replacement), and every visit in every region (so a duplicate, a
-        # surviving old visit or a lost unrelated one cannot pass).
-        listed_before = {int(t["id"]) for t in listing()}
-        inv_before = {r["id"]: inventory(r["id"]) for r in body}
-        mine_before = {rid: [k for k, v in inv.items() if v[3] == trip_id]
-                       for rid, inv in inv_before.items()}
-        if any(len(ids) != 1 for ids in mine_before.values()):
-            raise ApiError("trips/update-trip", f"trip {trip_id} does not own exactly one visit "
-                           f"per region before the save: {mine_before}", before)
-        for r in body:
-            (vid,) = mine_before[r["id"]]
-            if inv_before[r["id"]][vid][2] != r["quality"]:
-                # the body carries the trip row's quality; a visit that says
-                # otherwise would be rewritten to it. Not this method's call.
-                raise ApiError("trips/update-trip", f"region {r['id']}: trip row says q"
-                               f"{r['quality']}, visit {vid} says q{inv_before[r['id']][vid][2]}",
-                               before)
-            row_days = tuple(_date_parts(r, side) for side in ("from", "to"))
-            visit_days = inv_before[r["id"]][vid][:2]
-            if visit_days != row_days:  # likewise; a YearOnly or no date is not a date
-                row_says, visit_says = ("..".join(str(_iso(d)) for d in days)
-                                        for days in (row_days, visit_days))
-                raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: trip row "
-                               f"says {row_says}, visit {vid} says {visit_says}", before)
-        ids = {r["id"] for r in body}
-
         def readback(fn: Callable[[], T]) -> T:
             return self._readback("trips/update-trip", fn)
 
+        def region_ids(t: dict) -> set[int]:
+            return {int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
+
         def candidates() -> list[int]:
             return readback(lambda: sorted({
-                int(t["id"]) for t in listing()
-                if int(t["id"]) not in listed_before
-                and (t.get("date_from"), t.get("date_to")) == (date_from, date_to)
+                int(t["id"]) for t in self._trip_listing(saving.now)
+                if int(t["id"]) not in saving.listed
+                and (t.get("date_from"), t.get("date_to")) == saving.now
                 and region_ids(t) == ids}))
+
+        def note_candidates(exc: Exception) -> None:
+            """Hand the caller any replacement, so it is not orphaned."""
+            try:
+                exc.replacement_candidates = candidates()
+            except Exception as read_exc:  # the error that brought us here wins
+                exc.replacement_candidates = f"unreadable: {read_exc}"
+
+        def as_before() -> bool:
+            try:
+                again = self._trip_resave(trip_id, saving.expect_rows)
+            except Exception:
+                return False
+            return {r: as_seen(v) for r, v in again.visits.items()} == {
+                r: as_seen(v) for r, v in saving.visits.items()}
 
         def read_trip(tid: int) -> tuple[dict, list[tuple]]:
             trip = self.trip(tid)["trip"]
-            return trip, rows(trip)
+            return trip, _trip_rows(trip)
 
         def saved_trip() -> tuple[dict, list[tuple]] | None:
             """The trip under its old id, or None for the two answers that mean gone."""
@@ -1269,6 +1389,47 @@ class NomadMania:
                 if (exc.description or "").strip() not in ("Trip not found.", "Unauthorised."):
                     raise
                 return None
+
+        def proved() -> tuple[int, dict[int, int]]:
+            new_id = trip_id
+            saved = readback(saved_trip)
+            if saved is None:
+                if trip_id in readback(
+                        lambda: {int(t["id"]) for t in self._trip_listing(saving.now)}):
+                    raise fail(f"get-trip says {trip_id} is gone but the listing still has it")
+                found = candidates()
+                if len(found) != 1:
+                    raise fail(f"trip {trip_id} is gone and {len(found)} NEW trip(s) {found} match "
+                               f"{date_from}..{date_to} {sorted(ids)}")
+                new_id = found[0]
+                saved = readback(lambda: read_trip(new_id))
+            after, rows_after = saved
+            if (after.get("date_from"), after.get("date_to")) != saving.now:
+                raise fail(f"trip {new_id} reads {after.get('date_from')}..{after.get('date_to')}")
+            if rows_after != _trip_rows(before):
+                raise fail(f"trip {new_id} regions changed: {_trip_rows(before)} -> {rows_after}")
+            if (after.get("description") or "") != description:
+                raise fail(f"trip {new_id} description changed: {description!r} -> "
+                           f"{after.get('description')!r}")
+            visits = {}
+            for rid, old_visit in saving.owned.items():
+                was = as_seen(saving.visits[rid])
+                now = as_seen(readback(lambda rid=rid: self._visits_strict(rid)))
+                others_was = {k: v for k, v in was.items() if k != old_visit}
+                others_now = {k: v for k, v in now.items() if v[3] != new_id}
+                if new_id == trip_id:
+                    others_now = {k: v for k, v in now.items() if k != old_visit}
+                if others_now != others_was:
+                    raise fail(f"region {rid}: visits outside the trip changed: {others_was} -> "
+                               f"{others_now}")
+                owned = [k for k, v in now.items() if v[3] == new_id]
+                if len(owned) != 1:
+                    raise fail(f"region {rid} has {len(owned)} visit(s) in trip {new_id}")
+                if now[owned[0]][:3] != was[old_visit][:3]:
+                    raise fail(f"region {rid}: visit {owned[0]} reads {now[owned[0]][:3]}, was "
+                               f"{was[old_visit][:3]}")
+                visits[rid] = owned[0]
+            return new_id, visits
 
         try:
             resp = self.t.webapi(
@@ -1281,54 +1442,30 @@ class NomadMania:
                 regions_json=json.dumps(body),
             )
         except Exception as exc:
-            # Refused, or no answer at all. Never resend: read what is there,
-            # and hand the caller any replacement so it is not orphaned.
-            try:
-                exc.replacement_candidates = candidates()
-            except Exception as read_exc:  # the write's error wins
-                exc.replacement_candidates = f"unreadable: {read_exc}"
+            # Refused, or no answer at all. Never resend: read what is there.
+            note_candidates(exc)
+            found = exc.replacement_candidates
+            if isinstance(exc, ApiError):
+                contradicted = found != [] or not as_before()
+            else:  # a 4xx is refused before anything ran, unless a new trip says otherwise
+                contradicted = (isinstance(exc, (AuthError, TransportError))
+                                and isinstance(found, list) and found != [])
+            if contradicted:
+                worse = VerificationFailed(
+                    "trips/update-trip",
+                    f"the server refused it ({exc}), but the trip does not read as it did before "
+                    "— outcome unknown", getattr(exc, "payload", None))
+                worse.replacement_candidates = found
+                raise worse from exc
             raise
-
-        new_id = trip_id
-        saved = readback(saved_trip)
-        if saved is None:
-            if trip_id in readback(lambda: {int(t["id"]) for t in listing()}):
-                raise fail(f"get-trip says {trip_id} is gone but the listing still has it")
-            found = candidates()
-            if len(found) != 1:
-                raise fail(f"trip {trip_id} is gone and {len(found)} NEW trip(s) {found} match "
-                           f"{date_from}..{date_to} {sorted(ids)}")
-            new_id = found[0]
-            saved = readback(lambda: read_trip(new_id))
-        after, rows_after = saved
-        if (after.get("date_from"), after.get("date_to")) != (date_from, date_to):
-            raise fail(f"trip {new_id} reads {after.get('date_from')}..{after.get('date_to')}")
-        if rows_after != rows(before):
-            raise fail(f"trip {new_id} regions changed: {rows(before)} -> {rows_after}")
-        if (after.get("description") or "") != description:
-            raise fail(f"trip {new_id} description changed: {description!r} -> "
-                       f"{after.get('description')!r}")
-        visits = {}
-        for rid in (r["id"] for r in body):
-            was, now = inv_before[rid], readback(lambda rid=rid: inventory(rid))
-            (old_visit,) = mine_before[rid]
-            others_was = {k: v for k, v in was.items() if k != old_visit}
-            others_now = {k: v for k, v in now.items() if v[3] != new_id}
-            if new_id == trip_id:
-                others_now = {k: v for k, v in now.items() if k != old_visit}
-            if others_now != others_was:
-                raise fail(f"region {rid}: visits outside the trip changed: {others_was} -> "
-                           f"{others_now}")
-            owned = [k for k, v in now.items() if v[3] == new_id]
-            if len(owned) != 1:
-                raise fail(f"region {rid} has {len(owned)} visit(s) in trip {new_id}")
-            if now[owned[0]][:3] != was[old_visit][:3]:
-                raise fail(f"region {rid}: visit {owned[0]} reads {now[owned[0]][:3]}, was "
-                           f"{was[old_visit][:3]}")
-            visits[rid] = owned[0]
+        try:
+            new_id, visits = proved()
+        except VerificationFailed as exc:
+            note_candidates(exc)
+            raise
         return {"trip_id": new_id, "old_trip_id": trip_id, "visits": visits,
-                "was": (before.get("date_from"), before.get("date_to")),
-                "now": (date_from, date_to), "response": resp}
+                "old_visits": saving.owned, "was": saving.was, "now": saving.now,
+                "response": resp}
 
     def trips_for_year(self, year: int) -> Any:
         return self.t.webapi("trips/get-trips-for-year-app", year=year)

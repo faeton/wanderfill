@@ -20,6 +20,12 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
    has named the specific id and said it is wrong. One id per run, `--confirm`
    from them, and the preview shown first. "This region looks wrong" is not an
    id, a list of ids is not one id, and a deletion is never a plan op.
+   Beside it there is one named exception, approved by the owner on 2026-11-24:
+   `wanderfill sync-header <trip_id>`. It widens a trip's own dates to span its
+   regions, and to do that the server deletes the trip and its visits and creates
+   the same ones again, so every id in it changes. One trip per run, only when the
+   account owner has asked for that trip id, with the preview shown to them first
+   and `--confirm` from them; never as a plan op, never in a loop.
 3. **Compute, then plan, then apply — never in one step.** Write a plan file, show
    it, get a human yes, then execute it. No "and while I was there I also…".
 4. **The token is a year-long full-power credential.** Never print it, never write
@@ -225,9 +231,11 @@ and not the trip's own `date_from` and `date_to`, so a stay written early and
 extended later reads shorter on the trip than on its region. Nothing edits that
 header in place: `trips/update-trip` *replaces* the trip, so the old one and its
 visits are deleted and the id of the trip and of every visit in it changes. So
-**write a stay only after it is finished.** `sync_trip_header` in the client
-refuses to shorten a header or to send a row whose dates are not its visit's;
-no command runs it and it is not a plan op.
+**write a stay only after it is finished.** For one that was not,
+`wanderfill sync-header <trip_id>` is rule 2's named exception (see "Undoing,
+when the owner asks"). It refuses to shorten a header or to send a row whose
+dates are not its visit's, and it is not a plan op. A header that lags is a
+thing to report, not a reason to run it.
 
 **`trips/new-trip` requires a field it never reads.** Send *both*:
 
@@ -253,7 +261,8 @@ trips list fewer regions than the journey really covered.
 
 ### Undoing, when the owner asks
 
-There is one path off the profile: `wanderfill delete <kind> <id>` with kinds
+There is one path off the profile, and one command that replaces (the end of
+this section): `wanderfill delete <kind> <id>` with kinds
 `visit` (needs `--region`), `trip` (takes its visits with it), `region`
 (`set-not-visited`: every visit on it, needs `--all-visits`), `dare` and `kye`.
 Each shows a preview, sends nothing without `--confirm --reason "..."`, journals
@@ -275,6 +284,21 @@ the write did not land: a plain `done` means it did). The tool never rewrites a
 journal, and neither do you: do not close one for them.
 None of this is in the plan model, and it must not be: a plan is what the tool
 computed, and a deletion is what the owner decided.
+
+`wanderfill sync-header <trip_id>` is rule 2's named exception. It removes
+nothing for good, but the server deletes the trip and its visits and creates new
+ones, so every trip and visit id in it dies and any saved plan naming one has to
+be rebuilt. Raising it with the owner means showing them the preview first, as
+with `delete`: run it without `--confirm`, show what it prints, and stop. It
+shares `delete`'s journal, lock, open-entry block, `--confirm` and `--reason`;
+its `open` entry carries the whole trip and every visit in its regions. The
+preview makes every refusal that reads can find, and the write refuses if the
+trip is not the one that was shown. An `ERROR` closes its entry only if the trip
+then reads as it did before, because the save is a deletion and a creation and
+an error can come from between them. What it prints at the end, old id to new
+id, goes into the record. If it could not prove the save, show the owner the
+replacement candidates and the journal path it printed: it is not run again, and
+nothing is written to repair it.
 
 ### Trip segmentation is ill-posed — say so
 

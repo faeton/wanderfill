@@ -30,7 +30,8 @@ class VerificationFailed(ApiError):
     """The server said OK to a write, and the read-back does not prove it.
 
     Raised by the undo methods and ``sync_trip_header`` after the request went
-    out, whether the read-back disagrees or could not be read at all, and by
+    out, whether the read-back disagrees or could not be read at all (from
+    ``sync_trip_header`` also when a save that was refused is contradicted by it), and by
     any strict read whose answer lacks the list it needs, or holds an id that is
     not a number or a visit row with a field missing, before a write as well as
     after one. It is distinct from

@@ -2990,6 +2990,463 @@ def test_update_trip_is_a_single_attempt_write():
     assert Transport._is_write("trips/update-trip")
 
 
+class TripServer(FakeTransport):
+    """Holds trip 7 and its visits, and answers update-trip the way the server did:
+    the trip and its visits are gone, and new ones with new ids are there."""
+
+    def __init__(self, rows=None, header=("2026-10-31", "2026-11-02"), description="kept",
+                 on_save=None, on_read=None):
+        super().__init__({"user/status-quick": {"result": "OK", "uid": 79597}})
+        rows = rows or [_row()]
+        for r in rows:
+            r.setdefault("region_name", f"Region number {r['id']}")
+        self.trips = {7: _trip(7, *header, rows=rows, description=description)["trip"]}
+        self.visits = {}
+        for n, r in enumerate(rows):
+            mine = (100 + n, 7, r["quality"], r["date_from"] or "2026-10-31",
+                    r["date_to"] or "2026-11-12")
+            other = (50 + n, None, 3, "2025-10-22", "2025-10-30")
+            self.visits[r["id"]] = _visits(mine, other)["data"]
+        self.on_save, self.on_read = on_save, on_read
+
+    def webapi(self, action, **fields):
+        if action == "user/status-quick":
+            return super().webapi(action, **fields)
+        self.sent.append((action, fields))
+        if action == "trips/update-trip":
+            return (self.on_save or TripServer.replace)(self, fields)
+        if self.on_read:
+            self.on_read(self, action, fields)
+        if action == "trips/get-trip":
+            if fields["trip_id"] not in self.trips:
+                raise ApiError(action, "Trip not found.", NOT_FOUND)
+            return json.loads(json.dumps({"result": "OK", "trip": self.trips[fields["trip_id"]]}))
+        if action == "quickEnter/get-visits-to-region":
+            return {"result": "OK", "data": [dict(v) for v in self.visits[fields["region"]]]}
+        assert action == "trips/get-trips-for-year-app", action
+        return _listing(*((t["id"], t["date_from"], t["date_to"], [r["id"] for r in t["regions"]])
+                          for t in self.trips.values()))
+
+    def replace(self, fields):
+        old = self.trips.pop(fields["trip_id"])
+        self.trips[8] = old | {"id": 8, "date_from": fields["date_from"],
+                               "date_to": fields["date_to"]}
+        for rows in self.visits.values():
+            for v in rows:
+                if v["trip_id"] == 7:
+                    v.update(id=v["id"] + 1000, trip_id=8)
+        return {"result": "OK", "said": "whatever it says"}
+
+
+def _sync_cli(monkeypatch, tmp_path, t, *argv, trip="7"):
+    from wanderfill.cli import main as cli
+
+    monkeypatch.setattr(cli, "_client", lambda args: NomadMania(token="fake", transport=t))
+    return cli.main(["sync-header", trip, *argv, "--workdir", str(tmp_path)])
+
+
+SYNC = ("--confirm", "--reason", "owner asked for trip 7")
+TWO = (_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 4, "2026-10-25", "2026-10-27"))
+
+
+def _two():
+    return TripServer([dict(r) for r in TWO], ("2026-10-27", "2026-10-29"))
+
+
+def test_sync_header_refuses_when_the_trip_changed_since_the_preview():
+    """What was confirmed is the trip that was shown, not whatever has its id at send time."""
+    def row(**over):
+        return lambda t: t.trips[7]["regions"][0].update(over)
+
+    def both(t, **over):  # row and visit agree with each other, not with the preview
+        t.trips[7]["regions"][0].update(over, date_to=f"2026-11-{over.get('day_to', 12):02}")
+        t.visits[1266][0].update({k: v for k, v in over.items() if k != "date_to"})
+
+    def another_region(t):
+        t.trips[7]["regions"].append(_row(5))
+        t.visits[5] = _visits((105, 7, 5, *FIXED))["data"]
+
+    for change in (
+        lambda t: t.trips[7].update(date_to="2026-11-03"),
+        lambda t: t.trips[7].update(date_from="2026-11-01"),
+        lambda t: t.trips[7].update(date_to="2026-11-12"),    # already right by now
+        lambda t: t.trips[7].update(date_to="2026-11-30"),    # longer than its region by now
+        lambda t: t.trips[7].update(date_to=None),
+        lambda t: t.trips[7].update(description="rewritten"),
+        lambda t: t.trips[7].update(regions=[]),
+        row(hidden=1),
+        row(quality=2),                                       # and not its visit
+        row(date_to=None),
+        lambda t: both(t, quality=2),
+        lambda t: both(t, day_to=13),
+        another_region,
+        lambda t: t.visits[1266][0].update(id=999),
+        lambda t: t.visits[1266][0].update(trip_id=None),
+        lambda t: t.visits[1266].append(dict(t.visits[1266][0], id=999)),
+    ):
+        t = TripServer()
+        c = NomadMania(token="fake", transport=t)
+        shown = c.preview_trip_header(7)
+        change(t)
+        with pytest.raises(PrecisionLoss, match=r"trip 7 .*preview"):
+            c.sync_trip_header(7, expect_rows=shown.expect_rows)
+        assert not _posts(t)
+    # ...and the same preview of an unchanged trip is good, as often as it is read
+    t = TripServer()
+    c = NomadMania(token="fake", transport=t)
+    shown = c.preview_trip_header(7).expect_rows
+    assert shown == c.preview_trip_header(7).expect_rows
+    assert c.sync_trip_header(7, expect_rows=shown)["trip_id"] == 8
+
+
+def test_sync_header_expect_rows_is_the_trip_and_then_every_region_with_its_visit():
+    t = _two()
+    c = NomadMania(token="fake", transport=t)
+    assert c.preview_trip_header(7).expect_rows == [
+        ("2026-10-27", "2026-10-29", "kept"),
+        (1232, 4, 0, "2026-10-25", "2026-10-27", 101),
+        (1390, 3, 0, "2026-10-27", "2026-10-30", 100),
+    ]
+    # an empty or cut-short one is a trip that does not match, never "no check"
+    for wrong in ([], c.preview_trip_header(7).expect_rows[:-1]):
+        with pytest.raises(PrecisionLoss):
+            c.sync_trip_header(7, expect_rows=wrong)
+    assert not _posts(t)
+
+
+def test_sync_header_dry_run_prints_that_every_id_will_change(monkeypatch, tmp_path, capsys):
+    t = _two()
+    assert _sync_cli(monkeypatch, tmp_path, t) == 0
+    said = capsys.readouterr().out
+    assert "2026-10-27 → 2026-10-29" in said and "2026-10-25 → 2026-10-30" in said
+    for part in ("trip 7", "visit 100", "visit 101", "1390", "1232", "Region number 1390",
+                 "2026-10-27 → 2026-10-30", "2026-10-25 → 2026-10-27", "quality 3", "quality 4",
+                 "deletes", "EVERY trip and visit id", "rebuilt", "Dry run. Nothing was sent"):
+        assert part in said, part
+    assert "visit 50" not in said, "visits outside the trip keep their ids"
+    assert not _posts(t) and _journal_lines(tmp_path) == []
+
+
+def _year_only():
+    row = _row() | {"date_from": None, "date_to": None}
+    return TripServer([row], (None, None))
+
+
+def _with(change, *args, **kw):
+    t = TripServer(*args, **kw)
+    change(t)
+    return t
+
+
+@pytest.mark.parametrize("confirm", [(), SYNC], ids=["preview", "confirmed"])
+@pytest.mark.parametrize("make, says", [
+    (lambda: TripServer(header=FIXED), "already spans"),
+    (lambda: TripServer(header=("2026-10-30", "2026-11-12")), "shorten"),
+    (_year_only, "year-only"),
+    (lambda: _with(lambda t: t.trips[7].update(regions=[])), "no regions"),
+    (lambda: _with(lambda t: t.visits[1266][0].update(quality=3)), "trip row says q5"),
+    (lambda: _with(lambda t: t.visits[1266][0].update(day_to=13)), "visit 100 says"),
+    (lambda: _with(lambda t: t.visits[1266].pop(0)), "exactly one visit"),
+    (lambda: _with(lambda t: t.visits[1266].append(dict(t.visits[1266][0], id=9))),
+     "exactly one visit"),
+    (lambda: _with(lambda t: t.trips[7]["regions"].append(_row())), "exactly one visit"),
+    (lambda: _with(lambda t: t.trips.clear()), "Trip not found"),
+    (lambda: _with(lambda t: t.trips[7].update(regions="none")), "cannot be read"),
+    (lambda: _with(lambda t: t.trips[7]["regions"][0].update(quality=None)), "cannot be read"),
+    (lambda: _with(lambda t: t.trips[7]["regions"][0].pop("id")), "cannot be read"),
+    (lambda: _with(lambda t: t.visits[1266][0].pop("quality")), "cannot be read"),
+])
+def test_sync_header_previews_every_refusal(monkeypatch, tmp_path, capsys, make, says, confirm):
+    """Nobody is asked to confirm a save that is then refused."""
+    t = make()
+    assert _sync_cli(monkeypatch, tmp_path, t, *confirm) == 2
+    said = capsys.readouterr().out
+    assert says in said and "nothing was sent" in said and "Re-run with --confirm" not in said
+    assert not _posts(t) and _journal_lines(tmp_path) == []
+
+
+def test_sync_header_confirm_needs_a_reason(monkeypatch, tmp_path, capsys):
+    for reason in ((), ("--reason", ""), ("--reason", "  ")):
+        t = TripServer()
+        assert _sync_cli(monkeypatch, tmp_path, t, "--confirm", *reason) == 2
+        assert "--reason" in capsys.readouterr().out
+        assert not _posts(t) and _journal_lines(tmp_path) == []
+
+
+def test_sync_header_journals_the_whole_trip_before_the_write(monkeypatch, tmp_path, capsys):
+    at_send = []
+
+    def save(t, fields):
+        at_send.extend(_journal_lines(tmp_path))
+        return t.replace(fields)
+
+    t = _two()
+    t.on_save = save
+    was = json.loads(json.dumps(t.trips[7]))
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 0
+    said = capsys.readouterr().out
+    (opened,) = at_send
+    assert opened["phase"] == "open" and opened["kind"] == "sync_trip_header"
+    assert opened["key"] == "sync_trip_header:7" and "owner asked for trip 7" in opened["label"]
+    assert opened["snapshot"]["trip"] == was, "header, description and every row as read"
+    assert sorted((v["id"], v["region"], v["quality"], v["date_from"], v["date_to"], v["trip_id"])
+                  for v in opened["snapshot"]["visits"]) == [
+        (50, 1390, 3, "2025-10-22", "2025-10-30", None),
+        (51, 1232, 3, "2025-10-22", "2025-10-30", None),
+        (100, 1390, 3, "2026-10-27", "2026-10-30", 7),
+        (101, 1232, 4, "2026-10-25", "2026-10-27", 7),
+    ]
+    _, done = _journal_lines(tmp_path)
+    assert done["phase"] == "done" and done["error"] == "" and done["key"] == opened["key"]
+    assert (done["result"]["old_trip_id"], done["result"]["trip_id"]) == (7, 8)
+    assert sorted(map(tuple, (v.values() for v in done["result"]["visits"]))) == [
+        (1232, 101, 1101), (1390, 100, 1100)]
+    assert [sorted(v) for v in done["result"]["visits"]] == [["new", "old", "region"]] * 2
+    for part in ("trip 7 → 8", "visit 100 → 1100", "visit 101 → 1101", "record", "deletes-79597"):
+        assert part in said.lower(), part
+    assert len(_posts(t)) == 1
+
+
+def test_sync_header_changed_between_the_preview_and_the_lock_sends_nothing(
+        monkeypatch, tmp_path, capsys):
+    seen = []
+
+    def somebody_else(t, action, fields):
+        seen.append(action)
+        if action == "trips/get-trip" and seen.count(action) == 2:
+            t.trips[7]["description"] = "rewritten"
+
+    t = TripServer(on_read=somebody_else)
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    assert not _posts(t)
+    assert "refused, nothing changed" in capsys.readouterr().out
+    lines = _journal_lines(tmp_path)
+    assert [e["phase"] for e in lines] == ["open", "done"] and "preview" in lines[1]["error"]
+
+
+def _lost_after(land):
+    def save(t, fields):
+        from wanderfill.api.errors import UnknownWriteOutcome
+        if land:
+            t.replace(fields)
+        raise UnknownWriteOutcome("no answer")
+    return save
+
+
+def _ok_but(then):
+    def save(t, fields):
+        t.replace(fields)
+        then(t)
+        return {"result": "OK"}
+    return save
+
+
+def _downgrade(t):
+    t.visits[1266][0].update(quality=3)
+
+
+def _blind(t):
+    def on_read(t, action, fields):
+        raise ApiError(action, "Internal error.", {})
+    t.on_read = on_read
+
+
+def _blind_to_visits(t):
+    def on_read(t, action, fields):
+        if action == "quickEnter/get-visits-to-region":
+            raise ApiError(action, "Internal error.", {})
+    t.on_read = on_read
+
+
+@pytest.mark.parametrize("save, found", [
+    (_lost_after(land=True), "[8]"),
+    (_lost_after(land=False), "none found"),
+    (_ok_but(_downgrade), "[8]"),
+    (_ok_but(_blind_to_visits), "[8]"),
+    (_ok_but(_blind), "unreadable"),
+    (_ok_but(lambda t: t.trips.pop(8)), "none found"),
+    (_ok_but(lambda t: t.trips.update({9: t.trips[8] | {"id": 9}})), "[8, 9]"),
+], ids=["lost, landed", "lost", "downgraded", "visits unread", "nothing read", "no new trip",
+        "two new trips"])
+def test_sync_header_that_cannot_prove_the_save_stays_open_and_says_what_is_known(
+        monkeypatch, tmp_path, capsys, save, found):
+    """The trip may be gone: what is left of it is the saved copy and the replacement."""
+    from wanderfill.plan.apply import CLOSE_BY_HAND
+
+    t = TripServer(on_save=save)
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    said = capsys.readouterr().out
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
+    (line,) = [x for x in said.splitlines() if "replacement" in x]
+    assert found in line
+    assert CLOSE_BY_HAND in said and "snapshot" in said
+    assert str(tmp_path / "deletes-79597.ndjson") in said
+    assert "done; server confirms" not in said
+    assert [a for a, _ in t.sent if Transport._is_write(a)] == ["trips/update-trip"]
+    # and nothing more is sent for the account until it is closed by hand
+    again = TripServer()
+    assert _sync_cli(monkeypatch, tmp_path, again, *SYNC) == 2
+    assert CLOSE_BY_HAND in capsys.readouterr().out and not _posts(again)
+    assert _run_delete(monkeypatch, tmp_path, FakeClient(), "dare", "1142", *SYNC) == 2
+
+
+def test_sync_header_interrupted_in_the_save_stays_open(monkeypatch, tmp_path, capsys):
+    def save(t, fields):
+        raise KeyboardInterrupt
+
+    t = TripServer(on_save=save)
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 130
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
+    said = capsys.readouterr().out
+    assert "not looked for" in said and all(x in said for x in CLOSING)
+    assert len(_posts(t)) == 1
+
+
+def test_sync_header_whose_done_line_will_not_go_in_still_prints_the_new_ids(
+        monkeypatch, tmp_path, capsys):
+    """The old ids are dead by then, and the journal does not have the new ones."""
+    from wanderfill.plan import apply as ap
+
+    def full(self, op, result, error=""):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ap.Journal, "note", full)
+    with pytest.raises(OSError, match="disk full"):
+        _sync_cli(monkeypatch, tmp_path, TripServer(), *SYNC)
+    said = capsys.readouterr().out
+    assert "trip 7 → 8" in said and "visit 100 → 1100" in said
+    assert "not known" not in said and all(x in said for x in CLOSING)
+
+
+def test_sync_header_refused_by_the_server_closes_only_if_the_trip_is_still_as_it_was(
+        monkeypatch, tmp_path, capsys):
+    """The save is a deletion and a creation; an ERROR may come from between them."""
+    from wanderfill.api.errors import AuthError, TransportError
+
+    def error(exc, first=lambda t, fields: None):
+        def save(t, fields):
+            first(t, fields)
+            raise exc
+        return save
+
+    said_error = ApiError("trips/update-trip", "Database error.", {})
+    gone = error(said_error, lambda t, f: t.trips.pop(7))
+    visits_gone = error(said_error, lambda t, f: t.visits[1266].pop(0))
+    other_visits_gone = error(said_error, lambda t, f: t.visits[1266].pop(1))
+    landed = error(said_error, lambda t, f: t.replace(f))
+    both = error(said_error, lambda t, f: t.trips.update(
+        {8: t.trips[7] | {"id": 8, "date_to": FIXED[1]}}))
+    blind = error(said_error, lambda t, f: _blind(t))
+    rejected = AuthError("server rejected the token (403)")
+    for save, phases in (
+        (error(said_error), ["open", "done"]),
+        (error(TransportError("refused: 400")), ["open", "done"]),
+        (error(rejected), ["open", "done"]),
+        (error(rejected, lambda t, f: _blind(t)), ["open", "done"]),
+        (error(rejected, lambda t, f: t.replace(f)), ["open"]),
+        (gone, ["open"]), (visits_gone, ["open"]), (other_visits_gone, ["open"]),
+        (landed, ["open"]), (both, ["open"]), (blind, ["open"]),
+    ):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        t = TripServer(on_save=save)
+        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+        said = capsys.readouterr().out
+        lines = _journal_lines(tmp_path)
+        assert [e["phase"] for e in lines] == phases, said
+        assert ("nothing changed" in said) == (phases != ["open"])
+        assert ("replacement" in said) == (phases == ["open"])
+        assert len(_posts(t)) == 1
+
+
+def test_sync_header_holds_the_account_lock_and_meets_an_open_apply(monkeypatch, tmp_path, capsys):
+    from wanderfill.plan.apply import account_lock
+
+    t = TripServer()
+    with account_lock([tmp_path], 79597):
+        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 2
+    assert "another run" in capsys.readouterr().err
+    _open_line(tmp_path / "journal-79597-aaaaaaaaaaaa.ndjson")
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 2
+    assert not _posts(t) and _journal_lines(tmp_path) == []
+
+
+def test_sync_header_takes_exactly_one_trip_id(monkeypatch, tmp_path, capsys):
+    """Rule 2 names one trip per run. No list, no range, no flag that widens it."""
+    import argparse
+
+    from wanderfill.cli import main as cli
+
+    parser = cli.build_parser()
+    (sub,) = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    actions = {a.dest: a for a in sub.choices["sync-header"]._actions}
+    assert set(actions) == {"help", "trip_id", "confirm", "reason", "workdir"}
+    assert actions["trip_id"].nargs is None and actions["trip_id"].type is int
+    assert actions["confirm"].const is True and actions["confirm"].nargs == 0
+    assert not actions["reason"].required
+    for argv in ([], ["7", "8"], ["7,8"], ["7-8"], ["all"], ["7", "--all"], ["trip", "7"]):
+        with pytest.raises(SystemExit) as info:
+            parser.parse_args(["sync-header", *argv])
+        assert info.value.code == 2
+    assert parser.parse_args(["sync-header", "7"]).trip_id == 7
+    kind = next(a for a in sub.choices["delete"]._actions if a.dest == "kind")
+    assert list(kind.choices) == ["visit", "trip", "region", "dare", "kye"]
+    capsys.readouterr()
+    said = " ".join((parser.epilog + cli.__doc__).split())
+    assert "except through `delete`:" not in said
+    assert said.count("sync-header") >= 3
+
+
+def test_rule_2_names_the_sync_header_exception_and_its_limits():
+    from pathlib import Path
+
+    text = (Path(__file__).parent.parent / "AGENTS.md").read_text()
+    rule = " ".join(text.split("\n2. ")[1].split("\n3. ")[0].split())
+    for part in ("`wanderfill sync-header <trip_id>`", "approved by the owner on 2026-11-24",
+                 "One trip per run", "trip id", "preview", "never as a plan op",
+                 "never in a loop", "deletes the trip and its visits"):
+        assert part in rule, part
+    # the rest of it says what it said
+    assert rule.startswith(
+        "**Never delete anything you did not create in this session.** Not visits, not trips, "
+        "not ticks. If something looks redundant, report it and stop. The one exception is "
+        "`wanderfill delete <kind> <id>`, and only when the account owner has named the specific "
+        "id and said it is wrong. One id per run, `--confirm` from them, and the preview shown "
+        'first. "This region looks wrong" is not an id, a list of ids is not one id, and a '
+        "deletion is never a plan op.")
+
+
+def test_sync_trip_header_has_no_caller_but_the_sync_header_command():
+    """Not a plan, not an apply, not a loop: the approved exception is this one command."""
+    import ast
+    from pathlib import Path
+
+    import wanderfill
+
+    root = Path(wanderfill.__file__).parent
+    uses, posts = [], []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Attribute) and n.attr == "sync_trip_header":
+                    uses.append((path.name, fn.name))
+                if isinstance(n, ast.Call) and any(
+                        isinstance(a, ast.Constant) and a.value == "trips/update-trip"
+                        for a in n.args) and getattr(n.func, "attr", "") == "webapi":
+                    posts.append((path.name, fn.name))
+        whole = [n for n in ast.walk(tree) if isinstance(n, ast.Constant)
+                 and n.value == "sync_trip_header"]
+        # the journal's kind; getattr(client, "sync_trip_header") would be a second one
+        assert len(whole) <= (path.name == "main.py"), path
+        assert not any(isinstance(loop, (ast.For, ast.While, ast.comprehension)) and any(
+            isinstance(n, ast.Attribute) and n.attr == "sync_trip_header" for n in ast.walk(loop))
+            for loop in ast.walk(tree)), path
+    assert set(uses) == {("main.py", "cmd_sync_header"), ("main.py", "run_sync")}
+    assert len(uses) == 2, "one call, seen from the command and from the closure inside it"
+    assert posts == [("client.py", "sync_trip_header")]
+
+
 # --------------------------------------------------------------------------
 # a malformed plan is refused whole, before its first request
 # --------------------------------------------------------------------------

@@ -14,7 +14,7 @@ What it holds, and why each is safe to hold:
               whole profile; the records it vouches for cost one per region.
 
 What it will never hold is anything a write is planned or checked against.
-``plan``, ``apply``, ``check`` and ``delete`` build their client without a
+``plan``, ``apply``, ``check``, ``delete`` and ``sync-header`` build their client without a
 cache, so a drift check or a deletion read-back always sees the server. That
 is enforced where clients are made (``cli.main._client``), not by convention
 inside this module.

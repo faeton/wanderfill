@@ -14,14 +14,19 @@ The command set encodes the safety model rather than merely documenting it:
     history    where was I, and when: visa forms, ESTA, tax days, absences. Reads only.
     delete     undo ONE thing you have named by id: a visit, a trip, a region's
                visits, a DARE mark or a KYE tick
+    sync-header  widen ONE trip's dates to span its regions; the server replaces
+               the trip to do it, so every id in it changes
 
 There is deliberately no command that computes and writes in one step.
 
-``delete`` is the only way anything leaves the profile, and it is deliberately
+``delete`` is the only way to take something off the profile, and it is deliberately
 not a plan op: a plan is something the tool computed, and a deletion must
 never be. Every kind takes one id per run, shows what it is about to remove,
 does nothing without ``--confirm``, journals the request before sending it, and
-reads the server back afterwards rather than trusting ``OK``.
+reads the server back afterwards rather than trusting ``OK``. ``sync-header`` is
+the one exception to it: the server deletes the trip and its visits and creates
+the same ones with new ids. It is run with the same discipline and is not a plan
+op either.
 
 ``evidence`` is the odd one out and deliberately so: it is the only command
 whose output is aimed at the user rather than at the server. Everything else
@@ -158,8 +163,8 @@ def _client(args, *, cached: bool = False) -> NomadMania:
     """The one place clients are made, and so the one place a cache can be attached.
 
     ``cached=True`` is for commands that only read and only report: ``history``,
-    ``evidence`` and ``share``. Anything that plans, applies, checks drift or
-    deletes must see the server, so it never passes it — see api/cache.
+    ``evidence`` and ``share``. Anything that plans, applies, checks drift,
+    deletes or replaces must see the server, so it never passes it — see api/cache.
     """
     token, source = find_token()
     if not token:
@@ -1169,9 +1174,10 @@ def _fmt_visit(v) -> str:
 
 
 def _undo(
-    args, *, kind: str, key: str, label: str, preview: list[str], snapshot: object, run
+    args, *, kind: str, key: str, label: str, preview: list[str], snapshot: object, run,
+    on_open=None,
 ) -> int:
-    """The shared shape of every ``wanderfill delete`` kind.
+    """The shared shape of every ``wanderfill delete`` kind, and of ``sync-header``.
 
     Print what is about to be removed; stop unless ``--confirm``; write an
     ``open`` journal entry *before* the request, carrying the full ``snapshot``
@@ -1189,6 +1195,9 @@ def _undo(
     for a different id: a region cannot be cleared while one of its visits is in
     an unknown state. The account's lock is held from that check to the last line,
     in ``--workdir`` and the default directory; a third one is not seen.
+
+    ``on_open`` is given the error that left an entry open and returns lines to
+    print below it: what is known about the state it left.
     """
     from types import SimpleNamespace
 
@@ -1239,6 +1248,8 @@ def _undo(
         except (Exception, KeyboardInterrupt) as exc:
             if not _settled(journal, key):
                 print(f"journal entry left OPEN: {key} in {journal.path}\n{CLOSE_BY_HAND}")
+                for line in on_open(exc) if on_open else ():
+                    print(line)
             if not isinstance(exc, WanderfillError):
                 raise
             print(f"error: {exc}")
@@ -1413,6 +1424,94 @@ def cmd_delete(args) -> int:
     return 2
 
 
+def cmd_sync_header(args) -> int:
+    """Widen one trip's dates to span its regions. Dry run unless ``--confirm``.
+
+    Writes exactly one request, ``trips/update-trip``, for the one trip id given.
+    **The server deletes the trip and its visits and creates new ones**: the same
+    dates, qualities and description under new ids. It is the named exception to
+    AGENTS.md rule 2, approved by the owner on 2026-11-24.
+    Why it is safe: the preview and the write are one piece of client code, so
+    every refusal that reads can find (nothing to widen, a header that would be
+    shortened, a year-only region, a row and visit that disagree, not exactly one
+    visit per region) comes here and not after a ``--confirm``; the write is bound
+    to the previewed header, description, rows and visits, and refuses if any of
+    them changed; the trip as read and every visit in its regions are journalled
+    before the request; the new trip and its visits are read back and compared;
+    and it goes through ``_undo``, so an open entry or another run stops it, and an
+    outcome that is not proved stays open and is never sent again.
+    How the dates are derived: the earliest and the latest date of its own regions.
+    What it costs: every id listed in the preview is dead afterwards, and so is any
+    saved plan that names one.
+    """
+    c = _client(args)
+    args._client = c
+    ident = args.trip_id
+    try:
+        shown = c.preview_trip_header(ident)
+    except ApiError as exc:
+        print(f"trip {ident}: refused, nothing was sent: {exc}")
+        return 2
+    names = {int(r["id"]): str(r.get("region_name") or "")[:50] for r in shown.trip["regions"]}
+    result: dict = {}
+
+    def run_sync():
+        out = c.sync_trip_header(ident, expect_rows=shown.expect_rows)
+        result.update(
+            old_trip_id=ident, trip_id=out["trip_id"],
+            visits=[{"region": rid, "old": out["old_visits"][rid], "new": new}
+                    for rid, new in out["visits"].items()],
+            was=out["was"], now=out["now"], response=out["response"],
+        )
+        return result
+
+    def new_ids() -> list[str]:
+        return [
+            f"trip {ident} → {result['trip_id']}",
+            *(f"  region {v['region']}: visit {v['old']} → {v['new']}" for v in result["visits"]),
+            "Record the new ids: whatever names the old ones is stale.",
+        ]
+
+    def what_is_known(exc) -> list[str]:
+        found = getattr(exc, "replacement_candidates", "not looked for")
+        return [
+            *(new_ids() if result else [
+                f"Whether trip {ident} is still there is not known. New trips that could be its "
+                f"replacement: {found or 'none found'}"]),
+            "The trip and every visit of its regions, as they were, are the 'snapshot' of that "
+            "entry. This tool sends nothing again and repairs nothing.",
+        ]
+
+    rc = _undo(
+        args, kind="sync_trip_header", key=f"sync_trip_header:{ident}",
+        label=f"trip {ident} {shown.was[0]}..{shown.was[1]} -> {shown.now[0]}..{shown.now[1]} "
+              f"{len(shown.owned)} region(s)",
+        preview=[
+            f"trip {ident} '{shown.description}'",
+            f"  its dates now:   {shown.was[0]} → {shown.was[1]}",
+            f"  its dates after: {shown.now[0]} → {shown.now[1]}",
+        ] + [
+            f"  region {rid} {names[rid]}: visit {vid} quality {q} ({QUALITY.get(q, '?')}) "
+            f"{a} → {b}" + (", hidden" if hidden else "")
+            for rid, q, hidden, a, b, vid in shown.expect_rows[1:]
+        ] + [
+            f"The server does this by replacing the trip: it deletes trip {ident} and the "
+            f"{len(shown.owned)} visit(s) above and creates new ones, with the same dates and "
+            "qualities.",
+            "EVERY trip and visit id listed here will change, and any saved plan naming one of "
+            "them must be rebuilt.",
+        ],
+        snapshot={"trip": shown.trip,
+                  "visits": [_visit_snapshot(v) for there in shown.visits.values() for v in there]},
+        run=run_sync,
+        on_open=what_is_known,
+    )
+    if rc == 0 and result:
+        for line in new_ids():
+            print(line)
+    return rc
+
+
 # ------------------------------------------------------------------ parser
 
 
@@ -1432,7 +1531,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Import your location history into NomadMania. Unofficial, unaffiliated.",
         epilog=(
             "Token comes from NM_TOKEN. Nothing leaves the profile except through "
-            "`delete`: one id per run, with --confirm."
+            "`delete`, and through `sync-header`, where the server replaces one trip and its "
+            "visits by new ones: one id per run, with --confirm."
         ),
     )
     p.add_argument("--version", action="version", version=f"wanderfill {__version__}")
@@ -1642,6 +1742,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "(it leaves the trip too)")
     d.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
     d.set_defaults(func=cmd_delete)
+
+    y = sub.add_parser(
+        "sync-header",
+        help="widen ONE trip's dates to span its regions — dry run unless --confirm",
+        description=(
+            "Moving a visit of a trip leaves the trip's own dates behind. This saves the one "
+            "trip you name again with dates that span its regions. The server deletes the trip "
+            "and its visits and creates new ones, so every id in it changes; it only ever "
+            "widens, and refuses anything it would lose. One trip per run, never a plan op."
+        ),
+    )
+    y.add_argument("trip_id", type=int, help="the trip, e.g. from `wanderfill export --full`")
+    y.add_argument("--confirm", action="store_true", help="actually send it (needs --reason)")
+    y.add_argument("--reason", help="why; written into the deletion journal")
+    y.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
+    y.set_defaults(func=cmd_sync_header)
 
     a = sub.add_parser("apply", help="execute a plan file")
     a.add_argument("plan")
