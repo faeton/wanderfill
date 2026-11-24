@@ -354,7 +354,9 @@ passes through rather than the globe.
 city; being within a few kilometres of a monument is evidence of being in the
 area, not of having seen the thing. Grade candidates by distance, show the user
 the counts at several radii, validate recall against what they have already
-ticked by hand, and let them choose the threshold. Do not pick it for them.
+ticked by hand, and let them choose the threshold. Do not pick it for them. That is about a shortlist
+from a track. For series from photos, next, a radius only filters the page: it is never
+a yes to the items inside it, whoever chose it, and each item has its own answer.
 
 **Series from photos go through a page the owner answers.** Three commands, none of
 which writes to the profile:
@@ -362,16 +364,21 @@ which writes to the profile:
 1. `wanderfill series review --since DATE` reads the photos, the tiles and the live
    series, and writes a page and its list into `review/`. Read out the counts it
    prints, the recall, what was left out and the tiles that were not read. Exit 3
-   means the list is incomplete: say so, and run it again.
+   means the list is incomplete: say so, and run it again before planning. A plan from
+   an incomplete list is allowed only if the owner, told that it is incomplete, wants
+   it, for the answers are to what was shown.
 2. **Hand the page to the owner and stop.** They open it, answer and save the file.
    Never fill an answer in, edit the list or the answers, press a button for them, or
    suggest one: rule 7. An item with no answer is not a "no" and not a "yes", and "I
-   don't remember" is final. Do not ask about it again.
+   don't remember" is final: do not ask about it. A later page may show such an item
+   again. Hand that page over as it is: do not remove the item, do not turn the old
+   answer into "no", and do not carry any answer over to it.
 3. `wanderfill series plan LIST ANSWERS --series ID` makes the plan for one series.
    Only "I was there" becomes a tick. One series per plan and one approval per series,
-   rule 5: show it with `show -v`, then `check`, then a yes to that series. A refusal
-   (another account, another list, an item that is gone or renamed) means a new
-   `review`, not a repair of the files.
+   rule 5: show it with `show -v`, then `check`, then a yes to that series. An
+   item that is ticked by now is dropped and named, also if its name has changed. A
+   refusal (another account, another list, an item that is gone, or one that is not
+   ticked and has another name now) means a new `review`, not a repair of the files.
 
 What the marks on an item mean. They are facts for the owner, not grades for you.
 `thin`: one photo, or none within a kilometre. `conflict`: a photo of that day, here,
@@ -384,7 +391,7 @@ What the flags mean. `--origin` other than `own-camera` lets in photos that may 
 somebody else's, so only when the owner asks. `--spans` is the owner's file of
 stretches that prove nothing (`use: none`) or an airport only (`use: airports`); you
 may write down what they say, and do not decide it. `--until` leaves out a stay that
-is not over. `--radius` is theirs to choose, like the threshold above.
+is not over. `--radius` is theirs to choose, and 20 km at most.
 
 `wanderfill series named --series ID --name TEXT --said TEXT` is for a place the owner
 named without being asked. `--said` holds their own words and nobody else's, and a yes

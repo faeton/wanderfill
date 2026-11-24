@@ -381,6 +381,23 @@ def strict_ids(action: str, values: object) -> set[int]:
     return out
 
 
+def series_ticks(action: str, data: object) -> set[int]:
+    """The ticked ids in one series' answer, as strictly as :func:`strict_ids`.
+
+    The error quotes nothing of the answer, as the other strict reads do: a series'
+    answer is full of names, and one the traveller has no photo near is not to be printed.
+    """
+    ids = data.get("visited") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        raise VerificationFailed(action, "the answer has no 'visited' list of what is ticked")
+    out = set()
+    for i in ids:
+        if (n := _whole(i)) is None:
+            raise VerificationFailed(action, "'visited' holds something that is not an id")
+        out.add(n)
+    return out
+
+
 class NomadMania:
     """Thin, honest wrapper over both surfaces."""
 
@@ -1611,10 +1628,9 @@ class NomadMania:
         )
 
     def series_ticked(self, series_id: int) -> set[int]:
-        """The ticked ids of one series; a reply without the list raises, see ``_strict``."""
+        """The ticked ids of one series; a reply without the list raises, and is not quoted."""
         action = f"V2/ series {series_id}"
-        data = self._read(action, lambda: self.series(series_id))
-        return strict_ids(action, self._list_in(action, data, "visited"))
+        return series_ticks(action, self._read(action, lambda: self.series(series_id)))
 
     def tick_series_item(self, series_id: int, item_id: int) -> bool:
         """Tick one object. Answers with the literal string "OK".

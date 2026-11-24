@@ -13,6 +13,7 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import random
 import re
 import shutil
@@ -2642,7 +2643,7 @@ def test_a_series_reply_of_another_shape_is_refused_and_not_quoted(change):
 def test_a_series_reply_that_is_no_series_is_refused(reply):
     s = Site()
     s.series[22] = reply
-    for read in (review.read_series, review.read_ticked):
+    for read in (review.read_series, NomadMania.series_ticked):
         with pytest.raises(VerificationFailed) as e:
             read(s.client(), 22)
         assert "Glass" not in str(e.value)
@@ -2651,7 +2652,7 @@ def test_a_series_reply_that_is_no_series_is_refused(reply):
 def test_only_the_ticked_list_of_a_skipped_series_is_needed():
     s = Site()
     s.series[12] = {"visited": ["4"]}
-    assert review.read_ticked(s.client(), 12) == {4}
+    assert s.client().series_ticked(12) == {4}
 
 
 # -- names in a terminal
@@ -2831,7 +2832,8 @@ def test_the_speeds_recorded_are_the_speeds_used(world, monkeypatch):
     assert m.params["speeds"]["fast_kmh"] == 2.0 and m.left_out["fast"] > 0
 
 
-@pytest.mark.parametrize("radius,items", [("1", [1]), ("2", [1, 3]), ("0.05", [])])
+@pytest.mark.parametrize("radius,items", [("1", [1]), ("2", [1, 3]), ("0.05", []),
+                                          ("20", [1, 3])])
 def test_the_radius_is_the_one_asked_for(world, radius, items):
     assert do_review("--radius", radius) == 0
     assert [c.item for c in written_by()[1].candidates] == items
@@ -2947,6 +2949,18 @@ def test_a_series_asked_for_is_read_though_no_tile_has_it(world):
     assert m.candidates == [] and m.coverage["recall"]["31"]["no_photo"] == [7]
 
 
+def test_tile_objects_of_no_series_are_not_read_and_stop_nothing(world):
+    """Live, -2 answers with no items and 0 with a list: neither is a series."""
+    for series in (-2, -1, 0):
+        world.reader.points.append(SeriesPoint(1, series, "", 10.0, 20.0))
+        world.series[series] = [] if series == 0 else Site.reply("x", {})
+    assert do_review() == 0
+    assert [world.read(n) for n in (-2, -1, 0, 12, 22)] == [0, 0, 0, 1, 1]
+    _, m = written_by()
+    assert m.coverage["skipped"] == {"12": 1} and m.params["skip"] == [-2, 12, 17, 60]
+    assert [c.item for c in m.candidates] == [1, 3]
+
+
 @pytest.mark.parametrize("series", ["-2", "12", "17", "60", "0"])
 def test_a_skipped_series_cannot_be_asked_for(world, capsys, series):
     assert do_review("--series", series) == 2
@@ -2973,6 +2987,7 @@ def test_origins_asked_for_widen_it_and_each_is_graded_alone(world):
 @pytest.mark.parametrize("argv", [
     ("--since", "2026"), ("--since", "20260501"), ("--until", "soon"), ("--until", "2026-04-30"),
     ("--radius", "-1"), ("--radius", "nan"), ("--radius", "inf"), ("--radius", "far"),
+    ("--radius", "0"), ("--radius", "-0.0"), ("--radius", "20.01"), ("--radius", "2000"),
     ("--origin", "mine"), ("--spans", "nowhere.json"), ("--series", "x"),
 ])
 def test_review_arguments_that_make_no_sense_are_exit_two(world, argv):
@@ -3024,6 +3039,74 @@ def test_review_writes_through_no_symlink(world, suffix, capsys, tmp_path):
     assert other.stat().st_mtime_ns == beside and "symbolic link" in capsys.readouterr().err
     target.unlink()  # dangling
     assert do_review() == 2 and not target.exists()
+
+
+@pytest.mark.parametrize("fails", [".json", ".html"])
+def test_a_list_that_cannot_be_written_whole_is_not_there(world, monkeypatch, capsys, fails):
+    replace = Path.replace
+
+    def no_room(self, target):
+        if Path(target).suffix == fails:
+            raise OSError(28, "No space left on device")
+        return replace(self, target)
+
+    with monkeypatch.context() as broken:
+        broken.setattr(Path, "replace", no_room)
+        assert do_review() == 2
+    assert last_line(capsys).startswith("error: ") and list(Path("out").iterdir()) == []
+    assert do_review() == 0  # and with both files there, a failure takes neither
+    page, m = written_by()
+    monkeypatch.setattr(Path, "replace", no_room)
+    assert do_review() == 2
+    assert written_by()[1].sha256 == m.sha256 and page.read_text() == render_page(m)
+
+
+def test_a_page_that_was_there_is_not_removed_by_a_failure_beside_it(world, monkeypatch):
+    assert do_review() == 0
+    page, _ = written_by()
+    stored = page.with_suffix(".json")
+    page.unlink()
+
+    def no_room(self, target):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "replace", no_room)
+    assert do_review() == 2
+    assert list(Path("out").iterdir()) == [stored]
+
+
+def test_an_interrupt_between_the_two_files_leaves_neither(world, monkeypatch):
+    replace = Path.replace
+
+    def stop(self, target):
+        if Path(target).suffix == ".html":
+            raise KeyboardInterrupt
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", stop)
+    assert do_review() == 130
+    assert list(Path("out").iterdir()) == []
+
+
+def test_a_temporary_file_somebody_else_made_stays(world, capsys):
+    path = Path("x.html")
+    theirs = Path(f".x.html.{os.getpid()}.part")
+    theirs.write_text("theirs")
+    with pytest.raises(FileExistsError):
+        cli._write_private(path, "mine")
+    assert theirs.read_text() == "theirs" and not path.exists()
+
+
+@pytest.mark.parametrize("write", [cli._write_private, lambda p, t: cli._write_new(p, t)])
+def test_a_file_cut_short_is_removed(tmp_path, monkeypatch, write):
+    def full(fd, mode):
+        os.close(fd)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fdopen", full)
+    with pytest.raises(OSError, match="No space"):
+        write(tmp_path / "x", "mine")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_out_that_cannot_be_a_directory_is_a_plain_error(world, capsys):
@@ -3126,6 +3209,72 @@ def test_show_and_check_read_the_plan(site, capsys, tmp_path):
     assert "proof ground_photo" in capsys.readouterr().out
     assert run_cli("check", "plan-series-22.json", "--workdir", tmp_path / "w") == 0
     assert "Left to send: 1 of 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reply", [
+    {"title": "Secret Cave"}, {"visited": {"Secret Cave": 1}}, {"visited": "Secret Cave"},
+    {"visited": [1, "Secret Cave"]}, {"visited": [{"id": 1, "name": "Secret Cave"}]},
+    ["Secret Cave"], "Secret Cave"], ids=str)
+def test_check_and_apply_quote_nothing_of_a_series_they_cannot_read(
+        site, capsys, tmp_path, reply):
+    assert do_plan(i1="y") == 0
+    site.series[22] = reply
+    capsys.readouterr()
+    assert run_cli("check", "plan-series-22.json", "--workdir", tmp_path / "w") == 1
+    both = capsys.readouterr()
+    assert "cannot be read" in both.out and "series 22" in both.out
+    assert run_cli("apply", "plan-series-22.json", "--confirm", "--workdir", tmp_path / "w") == 2
+    both = [both.out, both.err, *capsys.readouterr()]
+    assert not any("Secret" in text for text in both)
+    with pytest.raises(VerificationFailed) as e:
+        site.client().series_ticked(22)
+    assert "Secret" not in repr(e.value) + str(e.value) + str(e.value.payload)
+
+
+def test_other_reads_keep_their_excerpt():
+    s = Site()
+    s.regions = {"why": "a portal"}
+    with pytest.raises(VerificationFailed, match="a portal"):
+        s.client().snapshot([])
+
+
+def test_show_prints_no_control_and_the_file_keeps_the_words(site, capsys):
+    said = "I \x1b[2Jwalked \u202eover\u2066 it,\nin the\train\x9b"
+    assert do_named(said=said) == 0
+    (op,) = Plan.load("plan-series-22.json").ops
+    assert op.proof == [{"kind": "memory", "detail": said}]
+    capsys.readouterr()
+    assert run_cli("show", "-v", "plan-series-22.json") == 0
+    assert "- proof memory: I [2Jwalked over it, in the rain\n" in capsys.readouterr().out
+    bad = "\x1b]0;x\x07\u202e"
+    op = dataclasses.replace(op, label=bad + "Label", method=bad + "Method",
+                             evidence=[bad + "Said"], date_from=bad, bucket="review",
+                             proof=[{"kind": bad, "detail": bad}, bad + "Odd", 5])
+    plan = dataclasses.replace(Plan.load("plan-series-22.json"), ops=[op], created=bad, tool=bad,
+                               params={bad: bad})
+    plan.save("odd.json")
+    for argv in (("show", "-v", "odd.json"), ("show", "odd.json")):
+        assert run_cli(*argv) == 0
+        out = capsys.readouterr().out
+        assert not set(out) & {"\x1b", "\x07", "\u202e"}
+    assert run_cli("show", "-v", "odd.json") == 0
+    out = capsys.readouterr().out
+    for word in ("Label", "Method", "Said", "Odd"):
+        assert word in out
+
+
+def test_apply_prints_labels_without_controls(site, tmp_path, capsys, monkeypatch):
+    assert do_plan(i1="y", i2="y") == 0
+    plan = Plan.load("plan-series-22.json")
+    for op in plan.ops:
+        op.label = "\x1b[2J\u202e" + op.label
+    plan.save("odd.json")
+    site.series[22]["visited"] = [1]
+    monkeypatch.setattr(Site, "ajax_text", lambda self, path, **f: (
+        self.series[22]["visited"].append(f["item"]) or "OK"))
+    assert run_cli("apply", "odd.json", "--confirm", "--workdir", tmp_path / "w") == 0
+    out = capsys.readouterr().out
+    assert "Glass Hall" in out and "Tin Bridge" in out and not set(out) & {"\x1b", "\u202e"}
 
 
 def test_apply_takes_the_plan_and_drift_stops_it(site, tmp_path, monkeypatch):
@@ -3354,7 +3503,8 @@ def test_a_named_item_already_ticked_makes_no_plan(site, capsys):
     assert "already ticked" in capsys.readouterr().out and not list(Path().glob("plan*"))
 
 
-@pytest.mark.parametrize("said", ["", " ", "\n\t\u00a0"])
+@pytest.mark.parametrize("said", ["", " ", "\n\t\u00a0", "\u202e\u2066", "\x1b\x07 \x85",
+                                  "\u200b\ufeff"])
 def test_the_owners_words_cannot_be_empty(site, said):
     assert do_named(said=said) == 1
     assert site.sent == [] and not list(Path().glob("plan*"))

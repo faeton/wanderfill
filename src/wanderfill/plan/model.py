@@ -256,6 +256,24 @@ def _r(value: object) -> str:
     return text if len(text) <= 60 else text[:57] + "..."
 
 
+# The review page takes the same out: direction marks reorder what is beside them, and an
+# escape is an instruction to a terminal.
+_CONTROLS = {n: None for low, high in (
+    (0x00, 0x1F), (0x7F, 0x9F), (0x61C, 0x61C), (0x200E, 0x200F), (0x202A, 0x202E),
+    (0x2066, 0x2069)) for n in range(low, high + 1)}
+
+
+def shown(text: str, fallback: str = "") -> str:
+    """A text as a terminal and the page show it, or ``fallback`` if nothing is left."""
+    plain = text.translate(_CONTROLS)
+    return plain if plain.strip() else fallback
+
+
+def one_line(value: object) -> str:
+    """:func:`shown` for what somebody wrote: a line break is a space and not nothing."""
+    return shown(" ".join(str(value).replace("\t", " ").splitlines()))
+
+
 def parse_when(text: object):
     """A plan's date string, as either a real date or a bare year; the one parser.
 

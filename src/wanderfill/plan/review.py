@@ -44,12 +44,12 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from ..api.client import NomadMania
+from ..api.client import NomadMania, series_ticks
 from ..api.client import _whole as _live_id
 from ..api.errors import AccountMismatch, DriftError, PlanInvalid, VerificationFailed
 from ..geo.tiles import SeriesPoint, haversine_km, neighbourhood
 from ..sources.photos_app import ORIGINS, Origin, PhotoAsset
-from .model import Op, Plan, _r, basis_of, fingerprint, parse_when, validate
+from .model import Op, Plan, _r, basis_of, fingerprint, parse_when, shown, validate
 from .series import AIRPORT_SERIES
 
 SKIP_SERIES = frozenset({-2, 12, 17, 60})
@@ -1062,7 +1062,10 @@ def read_series(client: NomadMania, series_id: int) -> tuple[SeriesInfo, set[int
     is missing or of another shape raises :class:`VerificationFailed`. Its text quotes
     nothing of the answer, which is full of names the owner may have no photo near.
     """
-    action, data = _series_reply(client, series_id)
+    action = f"V2/ series {series_id}"
+    data = client.series(series_id)
+    if not isinstance(data, dict):
+        raise VerificationFailed(action, "the answer is not an object")
     title, rows = data.get("title"), data.get("items2")
     if not isinstance(title, str):
         raise VerificationFailed(action, "the answer has no title in text")
@@ -1078,46 +1081,10 @@ def read_series(client: NomadMania, series_id: int) -> tuple[SeriesInfo, set[int
         name = _text(name, "name")
         if items.setdefault(number, name) != name:
             raise VerificationFailed(action, f"items2 has item {number} twice, with two names")
-    return SeriesInfo(_text(title, "title"), items), _ticked_in(action, data)
-
-
-def read_ticked(client: NomadMania, series_id: int) -> set[int]:
-    """The ids ticked in one series, as strictly as :func:`read_series` and no more."""
-    return _ticked_in(*_series_reply(client, series_id))
-
-
-def _series_reply(client: NomadMania, series_id: int) -> tuple[str, dict]:
-    action = f"V2/ series {series_id}"
-    data = client.series(series_id)
-    if not isinstance(data, dict):
-        raise VerificationFailed(action, "the answer is not an object")
-    return action, data
-
-
-def _ticked_in(action: str, data: dict) -> set[int]:
-    ids = data.get("visited")
-    if not isinstance(ids, list):
-        raise VerificationFailed(action, "the answer has no list of what is ticked in 'visited'")
-    out = {_live_id(i) for i in ids}
-    if None in out:
-        raise VerificationFailed(action, "'visited' holds something that is not an id")
-    return out
+    return SeriesInfo(_text(title, "title"), items), series_ticks(action, data)
 
 
 # -- from answers to a plan ------------------------------------------------------
-
-# The page takes the same out: direction marks reorder what is beside them, and an escape
-# is an instruction to a terminal.
-_CONTROLS = {n: None for low, high in (
-    (0x00, 0x1F), (0x7F, 0x9F), (0x61C, 0x61C), (0x200E, 0x200F), (0x202A, 0x202E),
-    (0x2066, 0x2069)) for n in range(low, high + 1)}
-
-
-def shown(text: str, fallback: str = "") -> str:
-    """A catalogue name as a terminal and the page show it, or ``fallback`` if nothing is left."""
-    plain = text.translate(_CONTROLS)
-    return plain if plain.strip() else fallback
-
 
 def _km_text(km: float) -> str:
     return f"{round(km * 1000)} m" if km < 1 else f"{km:.2f}".rstrip("0").rstrip(".") + " km"
@@ -1220,7 +1187,7 @@ def plan_for_named(series_id: int, name: str, said: str, client: NomadMania) -> 
     """
     if series_id <= 0:
         raise PlanInvalid(f"{series_id} is not the id of a series")
-    if not said.strip():
+    if not any(ch.isprintable() and not ch.isspace() for ch in said):
         raise PlanInvalid("what the owner said is empty, and it is the only evidence there is")
     if not name.strip():
         raise PlanInvalid("the name is empty")
@@ -1266,7 +1233,6 @@ __all__ = [
     "plan_for_series",
     "read_answers",
     "read_series",
-    "read_ticked",
     "recall",
     "render_page",
     "shown",

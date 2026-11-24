@@ -653,7 +653,7 @@ came from is refused.
 | flag | what it does |
 |---|---|
 | `--since`, `--until` | the first and the last day, by the photo's own clock. `--until` is for a stay that is not over |
-| `--radius KM` | how near a photo has to be; 2 unless you say |
+| `--radius KM` | how near a photo has to be; 2 unless you say, 20 at most |
 | `--origin NAME` | `own-camera`, `airdrop`, `other` or `unknown`, and again for another. All but the first may be somebody else's photos |
 | `--spans FILE` | stretches of photos that prove nothing, or only an airport |
 | `--series ID` | only this series, and again for another |
@@ -667,6 +667,8 @@ is not yours, and `"airports"` for a layover. `bbox` is west, south, east, north
   "why": "the receiver was wrong", "use": "none"}]
 ```
 
+A time "by the photo's own clock" is UTC for a photo with no recorded zone.
+
 It prints how much of what you have ticked already the same photos find. That says
 what the list will miss, and not how often it is right. Things that no photo is near
 are not listed anywhere.
@@ -676,8 +678,10 @@ nothing. The page loads nothing and sends nothing; it saves a file of answers, w
 fits that list and no other.
 
 **`plan`** takes the list, the answers and one series. Only "I was there" becomes a
-tick. It reads the account and the series again: what is ticked by now is left out
-and named, and an item that is gone or has another name refuses the whole plan.
+tick. It reads the account and the series again. An item that is gone from the series
+refuses the whole plan, ticked or not, and so does one that is not ticked and has
+another name now. What is ticked by now is left out and named, also if its name has
+changed, for nothing would be sent for it.
 **`named`** is for one place you remember yourself. The name has to be the
 catalogue's, letter for letter, and your words go into the plan as the evidence. If
 it does not match, nothing is suggested. Both write `plan-series-<ID>.json`, or
@@ -690,6 +694,8 @@ any plan.
 | 1 | no token | no token; a list or answers that cannot be used, a series that is not on the list, a name that does not match, nothing said |
 | 2 | an error, and no file | an error, another account, an item that is gone, a plan file that exists |
 | 3 | both files written, and a map tile could not be read, so the list is incomplete: run it again | |
+
+With exit 2 a run leaves no file of its own; a list that was there before stays.
 
 The files in `review/` hold coordinates and dates. They are readable by you alone and
 ignored by git.

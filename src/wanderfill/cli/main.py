@@ -69,6 +69,8 @@ from ..evidence import (
 )
 from ..sources.photos_app import ORIGINS
 
+# A radius in metres would ask for a great many map tiles.
+MAX_RADIUS_KM = 20.0
 DEFAULT_WORKDIR = Path.home() / ".local" / "share" / "wanderfill"
 # Kept here rather than imported so ``--help`` does not load the history module.
 TAX_YEAR_CHOICES = (
@@ -791,23 +793,24 @@ def cmd_history(args) -> int:
 
 
 def cmd_show(args) -> int:
-    from ..plan.model import Plan, validate
+    from ..plan.model import Plan, one_line, validate
 
+    # Names are the server's and words the owner's; neither may drive the terminal.
     plan = Plan.load(args.plan)
-    print(f"plan for account {plan.account}, made {plan.created}")
-    print(f"tool {plan.tool}, schema {plan.schema}")
+    print(one_line(f"plan for account {plan.account}, made {plan.created}"))
+    print(one_line(f"tool {plan.tool}, schema {plan.schema}"))
     if plan.params:
         print(f"params: {json.dumps(plan.params)}")
     print("\ncounts by kind and bucket:")
     for k, v in sorted(plan.counts().items()):
-        print(f"  {k:28} {v:>5}")
+        print(f"  {one_line(k):28} {v:>5}")
     print(f"\n{len(plan.to_apply())} op(s) are in the apply bucket and would execute.")
     if args.verbose:
         # Everything a human needs to approve the write, not just its label.
         # Reviewing a plan from a summary that hides the dates, the visit id and
         # the quality is not review; it is assent.
         for op in plan.ops[: args.limit]:
-            print(f"\n  [{op.bucket}] {op.kind}  {op.label}")
+            print("\n" + one_line(f"  [{op.bucket}] {op.kind}  {op.label}"))
             bits = []
             if op.region is not None:
                 bits.append(f"region={op.region}")
@@ -830,14 +833,14 @@ def cmd_show(args) -> int:
                                            for r in op.regions))
                 else:  # not a plan the tool wrote; the problems below say so
                     bits.append(f"regions={op.regions!r}")
-            print(f"      {'  '.join(bits)}")
-            print(f"      confidence {op.confidence}  |  {op.method}")
+            print(one_line(f"      {'  '.join(bits)}"))
+            print(one_line(f"      confidence {op.confidence}  |  {op.method}"))
             for e in op.evidence if isinstance(op.evidence, list) else [op.evidence]:
-                print(f"        - {e}")
+                print(one_line(f"        - {e}"))
             for p in op.proof if isinstance(op.proof, list) else [op.proof]:
                 typed = isinstance(p, dict) and {"kind", "detail"} <= p.keys()
-                print(f"        - proof {p['kind']}: {p['detail']}" if typed
-                      else f"        - proof {p}")
+                print(one_line(f"        - proof {p['kind']}: {p['detail']}" if typed
+                               else f"        - proof {p}"))
     elif plan.ops:
         print("Run with -v to see dates, ids, quality and the evidence behind each op.")
     if problems := validate(plan):
@@ -983,7 +986,6 @@ def _series_review(args) -> int:
         left_out,
         load_spans,
         read_series,
-        read_ticked,
         recall,
     )
     from ..sources.photos_app import DEFAULT_LIBRARY, PhotosAppSource
@@ -1038,6 +1040,8 @@ def _series_review(args) -> int:
     except OSError as exc:
         raise WanderfillError(f"the map tile cache cannot be used: {exc}") from None
 
+    # The map has objects of 0 and -2 too, and neither is a series to read.
+    objects = {key: o for key, o in objects.items() if key[0] > 0}
     there = {series for series, _ in objects}
     wanted = sorted(set(args.series) if args.series else there - SKIP_SERIES)
     skipped = [] if args.series else sorted(there & SKIP_SERIES)
@@ -1046,7 +1050,7 @@ def _series_review(args) -> int:
     for n, series in enumerate(wanted, 1):
         catalogue[series], ticked[series] = read_series(c, series)
         show("series", n, len(wanted) + len(skipped))
-    of_skipped = {series: read_ticked(c, series) for series in skipped}
+    of_skipped = {series: c.series_ticked(series) for series in skipped}
 
     rows = recall(shots, objects, ticked, radii, catalogue=catalogue)
     for series, row in rows.items():
@@ -1090,8 +1094,17 @@ def _write_review(out: Path, manifest) -> tuple[Path, Path]:
                 same = False
             if not same:
                 raise WanderfillError(f"{stored} is there and is not this list; move it away")
-        for path, content in ((stored, text), (page, html)):
-            _write_private(path, content)
+        made: list[Path] = []
+        try:
+            for path, content in ((stored, text), (page, html)):
+                new = not os.path.lexists(path)
+                _write_private(path, content)
+                if new:
+                    made.append(path)
+        except BaseException:  # half of a list is none
+            for path in made:
+                path.unlink(missing_ok=True)
+            raise
     except OSError as exc:
         raise WanderfillError(f"{out} cannot be written: {exc}") from None
     return page, stored
@@ -1100,18 +1113,24 @@ def _write_review(out: Path, manifest) -> tuple[Path, Path]:
 def _write_private(path: Path, text: str) -> None:
     """Replace ``path`` whole, by a file nobody else can read."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.part")
+    _write_new(tmp, text)  # raises if it is there, and then it is not ours to remove
     try:
-        _write_new(tmp, text)
         tmp.replace(path)
-    finally:
+    except BaseException:
         tmp.unlink(missing_ok=True)
+        raise
 
 
 def _write_new(path: Path, text: str) -> None:
     """Make ``path``, private, and raise :class:`FileExistsError` if anything is there."""
     data = text.encode("utf-8")
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
-        f.write(data)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _print_review(m, ground: int) -> None:
@@ -1330,15 +1349,16 @@ def cmd_share(args) -> int:
 
 def _print_apply_report(report) -> None:
     from ..plan.apply import CLOSE_BY_HAND
+    from ..plan.model import one_line
 
     print(
         f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
         f"failed {report.failed}, skipped {report.skipped}"
     )
     for label in report.already:
-        print(f"  already ticked, not sent: {label}")
+        print(f"  already ticked, not sent: {one_line(label)}")
     for e in report.errors:
-        print(f"  error: {e}")
+        print(f"  error: {one_line(e)}")
     # Read back from the server, not from the responses. Printed, because a
     # verify file nobody opens is the habit that lapses.
     seen = report.verified
@@ -1372,7 +1392,7 @@ def cmd_apply(args) -> int:
     :func:`main` returns 2 for it, or 130 for Ctrl-C.
     """
     from ..plan.apply import apply_plan
-    from ..plan.model import Plan, validate
+    from ..plan.model import Plan, one_line, validate
 
     plan = Plan.load(args.plan)
     ops = plan.to_apply()
@@ -1393,10 +1413,11 @@ def cmd_apply(args) -> int:
 
     def progress(i, total, op, ok):
         mark = "ok " if ok else "ERR"
-        print(f"  [{i:4}/{total}] {mark} {op.kind:13} {op.label[:56]}")
+        print(f"  [{i:4}/{total}] {mark} {op.kind:13} {one_line(op.label)[:56]}")
 
     def skipped(i, total, op):
-        print(f"  [{i:4}/{total}] skip {op.kind:13} {op.label[:56]} (ticked already, not sent)")
+        print(f"  [{i:4}/{total}] skip {op.kind:13} {one_line(op.label)[:56]} "
+              "(ticked already, not sent)")
 
     try:
         report = apply_plan(
@@ -1846,9 +1867,10 @@ def _day_arg(text: str) -> dt.date:
 
 def _km_arg(text: str) -> float:
     with contextlib.suppress(ValueError):
-        if 0 <= (km := float(text)) < float("inf"):
+        if 0 < (km := float(text)) <= MAX_RADIUS_KM:  # nor is NaN
             return km
-    raise argparse.ArgumentTypeError(f"{text!r} is not a distance in kilometres")
+    raise argparse.ArgumentTypeError(
+        f"{text!r} is not a distance over 0 and up to {MAX_RADIUS_KM:g} km")
 
 
 def _series_parser(sub) -> None:
@@ -1871,7 +1893,7 @@ def _series_parser(sub) -> None:
     r.add_argument("--until", type=_day_arg, metavar="DATE",
                    help="YYYY-MM-DD, the last day: for a stay that is not over")
     r.add_argument("--radius", type=_km_arg, metavar="KM",
-                   help="how near a photo has to be, in km (default: 2)")
+                   help="how near a photo has to be, in km, 20 at most (default: 2)")
     r.add_argument("--origin", action="append", choices=sorted(ORIGINS),
                    help="whose photos count, and may be given again (default: own-camera). "
                         "Others may be somebody else's photos")
