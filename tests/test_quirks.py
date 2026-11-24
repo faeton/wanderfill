@@ -2444,6 +2444,17 @@ REJECTED = {
     "trip region year huge": lambda: _vplan(_vtrip(regions=[
         {"id": 1, "quality": 3, "year_from": 2024, "month_from": 10**30, "day_from": 1}])),
     "allow_vaguer as text": lambda: _vplan(_vop(region=1, quality=3, allow_vaguer="false")),
+    "an empty string as undated": lambda: _vplan(_vop(region=1, quality=3, date_from="")),
+    "a compact date": lambda: _vplan(_vop(region=1, quality=3, date_from="20240101")),
+    "an ISO week date": lambda: _vplan(_vop(region=1, quality=3, date_from="2024-W01-1")),
+    "a day with no zero padding": lambda: _vplan(
+        _vop(region=1, quality=3, date_from="2024-1-1")),
+    "a year in other digits": lambda: _vplan(
+        _vop(region=1, quality=3, date_from="\u0662\u0660\u0662\u0664")),
+    "a date in other digits": lambda: _vplan(_vop(
+        region=1, quality=3, date_from="\u0662\u0660\u0662\u0664-01-01")),
+    "a date with a space": lambda: _vplan(_vop(region=1, quality=3, date_from=" 2024-01-01")),
+    "a trip header, compact": lambda: _vplan(_vtrip(date_from="20240101")),
     "same add, other quality": lambda: _vplan(
         _vop(region=1, quality=2, date_from="2024-01-01", date_to="2024-01-02"),
         _vop(region=1, quality=3, date_from="2024-01-01", date_to="2024-01-02")),
@@ -2651,3 +2662,77 @@ def test_show_renders_malformed_values_and_still_prints_the_problems(tmp_path, c
         {"kind": "mark_dare", "bucket": "apply", "region": [1], "label": None}]}))
     assert cli.main(["show", str(path), "-v"]) == 0
     assert "INVALID" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", [
+    "", "20240101", "2024-W01-1", "2024-1-1", " 2024", "2024 ", "\u0662\u0660\u0662\u0664",
+    "\u0662\u0660\u0662\u0664-01-01", "2024-01-01T00:00", "0000", "2101", 2024, 1.5,
+])
+def test_execution_reads_one_spelling_per_date(text):
+    """Two spellings of one date hashed to two keys and ran as the same write twice."""
+    from wanderfill.plan.apply import _when
+    from wanderfill.plan.model import parse_when
+
+    with pytest.raises(ValueError):
+        parse_when(text)
+    with pytest.raises(ValueError):
+        _when(text)
+
+
+def test_the_canonical_spellings_still_parse():
+    from wanderfill.plan.model import parse_when
+
+    assert parse_when(None) is None
+    assert parse_when("2013") == YearOnly(2013)
+    assert parse_when("2024-02-29") == dt.date(2024, 2, 29)
+
+
+def test_two_spellings_of_one_visit_are_no_longer_both_valid(tmp_path):
+    from wanderfill.api.errors import PlanInvalid
+    from wanderfill.plan.apply import apply_plan
+    from wanderfill.plan.model import validate
+
+    for a, b in ((None, ""), ("2024-01-01", "20240101")):
+        two = [_vop(region=1, quality=3, date_from=x, date_to=x) for x in (a, b)]
+        assert validate(_vplan(*two))
+    c, t = client({"user/status-quick": {"result": "OK", "uid": 7}})
+    plan = _vplan(_vop("mark_dare", region=1), _vop(region=2, quality=3, date_from="20240101"))
+    with pytest.raises(PlanInvalid, match=r"ops\[1\]"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert t.sent == []
+
+
+NESTED = [10**30, 10**5000, "9" * 5000, "\u0662\u0660\u0662\u0664", 2024.0, float("nan"),
+          True, [[1]], ["2024"], {"a": 1}, "", "1" * 11]
+
+
+@pytest.mark.parametrize("field", [
+    "id", "quality", "year_from", "month_from", "day_from", "year_to", "month_to", "day_to"])
+def test_validate_never_raises_on_a_wrong_typed_trip_region_field(field):
+    from wanderfill.plan.model import validate
+
+    for value in NESTED:
+        region = {"id": 1, "quality": 3, "year_from": 2024, "month_from": 1, "day_from": 2,
+                  "year_to": 2024, "month_to": 1, "day_to": 2}
+        region[field] = value
+        plan = Plan(account=7, ops=[_vtrip(regions=[region])])
+        assert isinstance(validate(plan), list), (field, str(value)[:20])
+
+
+def test_show_prints_the_problems_of_a_huge_numeric_trip_region_part(tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"account": 7, "ops": [{
+        "kind": "create_trip", "bucket": "apply", "date_from": "2024-01-01",
+        "date_to": "2024-01-02",
+        "regions": [{"id": 1, "quality": 3, "year_from": "9" * 5000}]}]}))
+    assert cli.main(["show", str(path), "-v"]) == 0
+    assert "INVALID" in capsys.readouterr().out
+
+
+def test_short_ascii_numeric_strings_in_trip_region_parts_are_still_accepted():
+    from wanderfill.plan.model import validate
+
+    region = {"id": 1, "quality": 3, "year_from": "2024", "month_from": "1", "day_from": "02"}
+    assert validate(Plan(account=7, ops=[_vtrip(regions=[region])])) == []

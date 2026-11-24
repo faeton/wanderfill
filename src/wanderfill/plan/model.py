@@ -212,6 +212,16 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
 # -- validation ---------------------------------------------------------------
 
 _PARTS = ("year", "month", "day")
+_DIGITS = frozenset("0123456789")
+
+
+def _r(value: object) -> str:
+    """``repr`` that cannot raise or fill a screen: an int of 5,000 digits has no repr."""
+    try:
+        text = repr(value)
+    except ValueError:
+        return "<a number too large to print>"
+    return text if len(text) <= 60 else text[:57] + "..."
 
 
 def parse_when(text: object):
@@ -226,13 +236,19 @@ def parse_when(text: object):
     year range (``YearOnly``'s own) and the date forms cannot drift apart.
     Raises ``ValueError`` for anything it cannot read, and for a non-string.
     """
-    if text is None or text == "":
+    if text is None:
         return None
     if not isinstance(text, str):
-        raise ValueError(f"{text!r} is not text")
-    if len(text) == 4 and text.isdigit():
+        raise ValueError(f"{_r(text)} is not text")
+    if len(text) == 4 and all(c in _DIGITS for c in text):
         return YearOnly(int(text))
-    return dt.date.fromisoformat(text)
+    # One spelling per date. Python's own parser takes "20240101" and, from 3.11,
+    # week dates too, and two spellings of one day hash to two keys, so the
+    # duplicate check cannot see them and the read-back cannot match them.
+    # `isdigit` is not the test either: it accepts digits of other scripts.
+    if len(text) == 10 and (day := dt.date.fromisoformat(text)).isoformat() == text:
+        return day
+    raise ValueError(f"{_r(text)} is not YYYY-MM-DD or a bare YYYY")
 
 
 def _is_id(value: object) -> bool:
@@ -248,11 +264,11 @@ def _when_of(text: object, *, full: bool = False) -> tuple[str, Any] | str | Non
     try:
         got = parse_when(text)
     except ValueError as exc:
-        return f"{text!r} cannot be used as a date ({exc})"
+        return f"{_r(text)} cannot be used as a date ({exc})"
     if got is None:
         return None
     if isinstance(got, YearOnly):
-        return f"{text!r} is not YYYY-MM-DD" if full else ("year", got.year)
+        return f"{_r(text)} is not YYYY-MM-DD" if full else ("year", got.year)
     return ("date", got)
 
 
@@ -278,7 +294,8 @@ def _number(value: object) -> int | None:
     """An int, or the digits of one: the site's own forms send both."""
     if type(value) is int:
         return value
-    if isinstance(value, str) and value.isdecimal():
+    # Short and ASCII: the site's forms send numbers as text, not 5,000 digits of it.
+    if isinstance(value, str) and len(value) <= 10 and value and set(value) <= _DIGITS:
         return int(value)
     return None
 
@@ -303,7 +320,7 @@ def _side_of(region: dict, which: str) -> tuple[tuple[str, Any] | None, str | No
             return ("year", nums["year"]), None
         return ("date", dt.date(nums["year"], nums["month"], nums["day"])), None
     except (ValueError, OverflowError) as exc:
-        return None, f"{', '.join(f'{k}={v}' for k, v in nums.items())} is not usable ({exc})"
+        return None, f"{', '.join(f'{k}={_r(v)}' for k, v in nums.items())} is not usable ({exc})"
 
 
 def _trip_problems(op: Op) -> list[str]:
@@ -317,7 +334,7 @@ def _trip_problems(op: Op) -> list[str]:
     if not out and _backwards(_when_of(op.date_from), _when_of(op.date_to)):
         out.append(f"starts {op.date_from} after it ends {op.date_to}")
     if not isinstance(op.regions, list) or not op.regions:
-        return [*out, f"needs a non-empty list of regions, not {op.regions!r}"]
+        return [*out, f"needs a non-empty list of regions, not {_r(op.regions)}"]
     seen: set[int] = set()
     for n, r in enumerate(op.regions):
         at = f"regions[{n}]"
@@ -327,12 +344,12 @@ def _trip_problems(op: Op) -> list[str]:
         if not _is_id(r.get("id")):
             out.append(f"{at} has no integer id")
         elif r["id"] in seen:
-            out.append(f"{at}: region {r['id']} is listed twice")
+            out.append(f"{at}: region {_r(r['id'])} is listed twice")
         else:
             seen.add(r["id"])
         q = r.get("quality")
         if not _is_id(q) or not 1 <= q <= 6:
-            out.append(f"{at} needs a quality from 1 to 6, not {q!r}")
+            out.append(f"{at} needs a quality from 1 to 6, not {_r(q)}")
         sides = {w: _side_of(r, w) for w in ("from", "to")}
         bad = [f"{at}: {why}" for _, why in sides.values() if why]
         out += bad
@@ -356,11 +373,11 @@ def _op_problems(op: Op) -> list[str]:
     for name in _INT_FIELDS:
         v = getattr(op, name)
         if v is not None and not _is_id(v):
-            out.append(f"{name} must be an integer or absent, not {v!r}")
+            out.append(f"{name} must be an integer or absent, not {_r(v)}")
     if type(op.allow_vaguer) is not bool:
-        out.append(f"allow_vaguer must be true or false, not {op.allow_vaguer!r}")
+        out.append(f"allow_vaguer must be true or false, not {_r(op.allow_vaguer)}")
     if not isinstance(op.regions, list) or not all(isinstance(r, dict) for r in op.regions):
-        out.append(f"regions must be a list of objects, not {op.regions!r}")
+        out.append(f"regions must be a list of objects, not {_r(op.regions)}")
     if out:
         return out
 
@@ -384,7 +401,7 @@ def _op_problems(op: Op) -> list[str]:
     if op.kind in ("add_visit", "update_visit"):
         # 0 is "no visit", and an absent quality is a broken plan, not a default 3.
         if op.quality is None or not 1 <= op.quality <= 6:
-            out.append(f"needs a quality from 1 to 6, not {op.quality!r}")
+            out.append(f"needs a quality from 1 to 6, not {_r(op.quality)}")
     return out
 
 
@@ -402,11 +419,11 @@ def validate(plan: Plan) -> list[str]:
     """
     out: list[str] = []
     if not isinstance(plan.basis, dict):
-        out.append(f"plan basis must be an object, not {plan.basis!r}")
+        out.append(f"plan basis must be an object, not {_r(plan.basis)}")
     if type(plan.schema) is not int or plan.schema != SCHEMA:
-        out.append(f"plan schema is {plan.schema!r}; this version reads schema {SCHEMA} only")
+        out.append(f"plan schema is {_r(plan.schema)}; this version reads schema {SCHEMA} only")
     if not _is_id(plan.account):
-        out.append(f"plan account must be an integer, not {plan.account!r}")
+        out.append(f"plan account must be an integer, not {_r(plan.account)}")
 
     kinds, buckets = get_args(OpKind), get_args(Bucket)
     seen_key: dict[str, int] = {}
@@ -414,12 +431,12 @@ def validate(plan: Plan) -> list[str]:
     updated: dict[int, int] = {}
 
     for i, op in enumerate(plan.ops):
-        who = f"ops[{i}] {op.kind} {op.label!r}"
+        who = f"ops[{i}] {op.kind} {_r(op.label)}"
         if op.kind not in kinds:
             out.append(f"{who}: unknown kind")
             continue
         if op.bucket not in buckets:
-            out.append(f"{who}: unknown bucket {op.bucket!r}")
+            out.append(f"{who}: unknown bucket {_r(op.bucket)}")
             continue
         if op.bucket != "apply":
             continue
