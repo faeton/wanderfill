@@ -203,7 +203,7 @@ that at plan time, before the user picks a quality, not after the count comes
 back one short. `verify()` reports it as `not_counted`, for a standalone visit
 and for a region inside a trip alike.
 
-### The four traps, in the order you will hit them
+### The five traps, in the order you will hit them
 
 **`quickEnter/add-visit` auto-creates a single-region trip with an empty
 description.** You cannot turn this off. Record the trip id it produces so the
@@ -213,6 +213,15 @@ debris is reconcilable later.
 overwritten, not preserved. Always read-modify-write, and take `max()` of the
 existing qualities so an update can never downgrade a "lived here" to a
 "good visit".
+
+**`update-visit` leaves the trip's header behind.** It moves a trip-owned visit
+and not the trip's own `date_from` and `date_to`, so a stay written early and
+extended later reads shorter on the trip than on its region. Nothing edits that
+header in place: `trips/update-trip` *replaces* the trip, so the old one and its
+visits are deleted and the id of the trip and of every visit in it changes. So
+**write a stay only after it is finished.** `sync_trip_header` in the client
+refuses to shorten a header or to send a row whose dates are not its visit's;
+no command runs it and it is not a plan op.
 
 **`trips/new-trip` requires a field it never reads.** Send *both*:
 

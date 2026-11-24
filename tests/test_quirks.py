@@ -2348,6 +2348,165 @@ def test_update_trip_refusals_send_nothing():
     assert not _posts(t) and not _posts(t2)
 
 
+def test_sync_header_refuses_to_shorten_either_end():
+    """Two trips were found longer than their regions (2026-11-23). The save deletes
+    the trip, so a re-span would have thrown the longer header away for good."""
+    for header in (
+        ("2026-10-30", "2026-11-12"),  # starts before its region
+        ("2026-10-31", "2026-11-14"),  # ends after it
+        ("2026-10-30", "2026-11-14"),
+        ("2026-10-30", "2026-11-02"),  # would shorten the start, lengthen the end
+        ("2026-11-02", "2026-11-14"),  # would lengthen the start, shorten the end
+    ):
+        c, t = _sync([_trip(7, *header)], [OLD], [_listing((7, *header, [1266]))])
+        with pytest.raises(ApiError, match=r"trip 7 .*shorten") as info:
+            c.sync_trip_header(7)
+        assert type(info.value) is ApiError and info.value.action == "trips/update-trip"
+        for day in (*header, *FIXED):
+            assert day in str(info.value)
+        assert not _posts(t), header
+
+
+def test_sync_header_refuses_when_a_row_and_its_visit_disagree_on_dates():
+    """The body is built from the trip's rows; a stale row would overwrite the visit,
+    and the read-back that compares them runs after the old visit is gone."""
+    def one(**over):
+        row = {"id": 100, "trip_id": 7, "quality": 5, "year_from": 2026, "month_from": 10,
+               "day_from": 31, "year_to": 2026, "month_to": 11, "day_to": 12}
+        return {"result": "OK", "data": [row | over]}
+
+    no_from = {"year_from": None, "month_from": None, "day_from": None}
+    no_to = {"year_to": None, "month_to": None, "day_to": None}
+    for visits_, says in (
+        (one(day_from=30), "2026-10-30"),
+        (one(day_to=13), "2026-11-13"),
+        (one(day_to=11), "2026-11-11"),
+        (one(month_from=None, day_from=None), "2026"),  # year only
+        (one(**no_from), "None"),
+        (one(**no_to), "None"),
+        (one(**no_from, **no_to), "None"),
+    ):
+        c, t = _sync([_trip(7, "2026-10-31", "2026-11-02")], [visits_], [_listing(STALE)])
+        with pytest.raises(ApiError, match="trip 7, region 1266: trip row says 2026-1") as info:
+            c.sync_trip_header(7)
+        assert type(info.value) is ApiError and info.value.action == "trips/update-trip"
+        assert "says 2026-10-31..2026-11-12, visit 100 says " in str(info.value)
+        assert says in str(info.value).split("visit 100 says ")[1]
+        assert not _posts(t)
+
+
+def test_sync_header_reads_every_region_before_it_decides():
+    """The stale row may be the second one."""
+    rows = [_row(1390, 3, "2026-10-27", "2026-10-30"), _row(1232, 3, "2026-10-25", "2026-10-27")]
+    c, t = _sync([_trip(7, "2026-10-27", "2026-10-29", rows=rows)],
+                 [_visits((200, 7, 3, "2026-10-27", "2026-10-30")),
+                  _visits((201, 7, 3, "2026-10-24", "2026-10-27"))],
+                 [_listing((7, "2026-10-27", "2026-10-29", [1390, 1232]))])
+    with pytest.raises(ApiError, match="region 1232"):
+        c.sync_trip_header(7)
+    assert not _posts(t)
+
+
+def test_sync_header_refuses_a_header_or_a_row_it_cannot_read():
+    """The header goes out from the ISO dates, the rows from year/month/day."""
+    start = ("2026-10-31", "2026-11-02")
+    for trip in (
+        _trip(7, None, None),
+        _trip(7, None, "2026-11-02"),
+        _trip(7, "2026-10-31", None),
+        _trip(7, "2026-10-31", ""),
+        _trip(7, "20261031", "2026-11-02"),
+        _trip(7, "2026-W44-6", "2026-11-02"),
+        _trip(7, "2026-10-31", "2026-11-02T00:00:00"),
+        _trip(7, 2026, "2026-11-02"),
+        _trip(7, "2026-10-31", "2026-02-30"),
+        _trip(7, *start, rows=[_row() | {"date_to": "20261112"}]),
+        _trip(7, *start, rows=[_row() | {"date_to": "12 Nov 2026"}]),
+        _trip(7, *start, rows=[_row() | {"date_to": 20261112}]),
+        _trip(7, *start, rows=[_row() | {"day_to": 11}]),
+        _trip(7, *start, rows=[_row() | {"year_from": 2025}]),
+        _trip(7, *start, rows=[_row() | {"month_from": None, "day_from": None}]),
+        _trip(7, *start, rows=[_row() | {"day_to": 32}]),
+        _trip(7, *start, rows=[_row() | {"day_to": "x"}]),
+        _trip(7, *start, rows=[{k: v for k, v in _row().items() if k != "day_to"}]),
+    ):
+        c, t = _sync([trip], [OLD], [_listing(STALE)])
+        with pytest.raises(ApiError, match="trip 7") as info:
+            c.sync_trip_header(7)
+        assert type(info.value) is ApiError and info.value.action == "trips/update-trip"
+        assert not _posts(t), trip
+
+
+def test_sync_header_is_not_a_plan_op():
+    """update-trip deletes the trip and its visits; a plan never deletes."""
+    from pathlib import Path
+    from typing import get_args
+
+    import wanderfill.plan.apply as apply_mod
+    import wanderfill.plan.model as model_mod
+    from wanderfill.plan.model import validate
+
+    kinds = ("sync_trip_header", "sync_header", "update_trip")
+    assert not [k for k in get_args(model_mod.OpKind)
+                if k in kinds or "sync" in k or "header" in k]
+    for kind in kinds:
+        assert "unknown kind" in validate(_vplan(_vop(kind, item=7)))[0]
+    for mod in (apply_mod, model_mod):
+        source = Path(mod.__file__).read_text()
+        assert "sync_trip_header" not in source and "update-trip" not in source
+
+
+class YearListing(SequencedTransport):
+    """``get-trips-for-year-app`` answered per year, and differently after the save."""
+
+    def __init__(self, sequences, before, after):
+        super().__init__(sequences)
+        self.before, self.after = before, after
+
+    def webapi(self, action, **fields):
+        if action != "trips/get-trips-for-year-app":
+            return super().webapi(action, **fields)
+        self.sent.append((action, fields))
+        trips = self.after if _posts(self) else self.before
+        return _listing(*(t for years, t in trips if fields["year"] in years))
+
+
+def test_sync_header_across_new_year():
+    """The old and the new header can be in different years, and nothing says
+    which of its years the server lists a trip under."""
+    def case(old, new, before, after, get_trip=NOT_FOUND):
+        row = [_row(a=new[0], b=new[1])]
+        t = YearListing({
+            "trips/get-trip": [_trip(7, *old, rows=row), get_trip, _trip(8, *new, rows=row)],
+            "quickEnter/get-visits-to-region": [_visits((100, 7, 5, *new)),
+                                                _visits((101, 8, 5, *new))],
+        }, [(years, (7, *old, [1266])) for years in before],
+           [(years, (tid, *(old if tid == 7 else new), [1266])) for tid, years in after])
+        return NomadMania(token="fake", transport=t), t
+
+    into = (("2026-12-28", "2026-12-31"), ("2026-12-28", "2027-01-05"))
+    back = (("2027-01-02", "2027-01-05"), ("2026-12-30", "2027-01-05"))
+    for old, new, was in ((*into, {2026}), (*back, {2027})):
+        for now in ({2026}, {2027}, {2026, 2027}):  # by start, by end, or under both
+            c, t = case(old, new, [was], [(8, now)])
+            out = c.sync_trip_header(7)
+            assert (out["trip_id"], out["visits"]) == (8, {1266: 101}), (old, now)
+            assert len(_posts(t)) == 1
+
+    # a span of three years, the old trip listed only under the middle one
+    old, new = ("2025-02-01", "2025-03-01"), ("2024-12-30", "2026-01-02")
+    c, t = case(old, new, [{2025}], [(7, {2025}), (8, {2024})])
+    with pytest.raises(VerificationFailed, match="gone but the listing still has it"):
+        c.sync_trip_header(7)
+    c, t = case(old, new, [{2025}], [(8, {2025})])
+    assert c.sync_trip_header(7)["trip_id"] == 8
+
+    # two different new trips are still two, whatever years they are listed under
+    c, t = case(*into, [{2026}], [(8, {2026, 2027}), (9, {2026, 2027})])
+    with pytest.raises(VerificationFailed, match="2 NEW trip"):
+        c.sync_trip_header(7)
+
+
 def test_update_trip_write_error_is_not_resent_and_reports_candidates():
     class Boom(SequencedTransport):
         def webapi(self, action, **fields):

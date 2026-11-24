@@ -152,6 +152,15 @@ def _date_parts(raw: dict, side: str) -> When | None:
         return None
 
 
+def _iso_day(value: object) -> dt.date | None:
+    """``YYYY-MM-DD`` as a date; anything else, other ISO spellings included, is None."""
+    try:
+        day = dt.date.fromisoformat(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return day if day.isoformat() == value else None
+
+
 def _precision(day: When | None) -> int:
     """0 nothing, 1 year only, 2 a full date. Only ever compared, never stored."""
     if day is None:
@@ -1032,7 +1041,10 @@ class NomadMania:
         )
 
     def sync_trip_header(self, trip_id: int) -> dict:
-        """Move a trip's own dates to span its regions. Touches nothing else.
+        """Widen a trip's own dates to span its regions, by **replacing the trip**.
+
+        The server deletes the trip and its visits and creates new ones, so the
+        trip id and every visit id in it change. Other visits stay as they are.
 
         ``update-visit`` moves a trip-owned visit but leaves the trip's header
         (``date_from``/``date_to``) where it was, so a trip extended visit by
@@ -1054,15 +1066,22 @@ class NomadMania:
         replacement must be a trip that did not exist before, with the same
         header, rows (quality, hidden, dates) and description, one visit per
         region with the old visit's dates and quality, and every other visit
-        in those regions exactly as it was. It refuses a trip whose row and
-        visit disagree on quality, since the body would rewrite the visit. A
-        failed or unanswered write is never resent; the exception carries
-        ``replacement_candidates`` from a read. A read-back that cannot be read
-        is a :class:`VerificationFailed`, like one that disagrees. The returned
-        ``trip_id`` is the one to record; any id noted for the old trip or its visits is dead. It
-        refuses a trip with a year-only region (the site sends ``year``
-        instead, a different shape) and a trip whose header is already right.
-        One attempt, never retried.
+        in those regions exactly as it was. A failed or unanswered write is
+        never resent; the exception carries ``replacement_candidates`` from a
+        read. A read-back that cannot be read is a :class:`VerificationFailed`,
+        like one that disagrees. The returned ``trip_id`` is the one to record;
+        any id noted for the old trip or its visits is dead.
+
+        What the write replaces cannot be put back under its old ids, and the
+        read-back runs only after it. So these are refused before anything is
+        sent: a header that would be shortened at either end (two trips longer
+        than their regions were found on 2026-11-23; whether the header or the
+        regions are wrong is the owner's to say); a region row and its visit
+        that disagree on quality or on either date, since the body is built
+        from the row and would overwrite the visit; a header or row date that
+        is not ``YYYY-MM-DD``, or a row whose year, month and day are another
+        date; a year-only region (the site sends ``year`` instead, a different
+        shape); and a header that is already right. One attempt, never retried.
         """
         def rows(trip: dict) -> list[tuple]:
             return sorted((int(r["id"]), int(r["quality"]), int(r.get("hidden") or 0),
@@ -1083,11 +1102,29 @@ class NomadMania:
         if any(not (r.get("date_from") and r.get("date_to")) for r in regions):
             raise ApiError("trips/update-trip", f"trip {trip_id} has a year-only region; "
                            "the site saves those as `year`, which this does not send", before)
+        header = [before.get(k) for k in ("date_from", "date_to")]
+        if None in [_iso_day(d) for d in header]:
+            raise ApiError("trips/update-trip", f"trip {trip_id} has a header that is not two "
+                           f"YYYY-MM-DD dates: {header}", before)
+        for r in regions:
+            for side in ("from", "to"):
+                iso = r[f"date_{side}"]
+                parts = [r.get(f"{unit}_{side}") for unit in ("year", "month", "day")]
+                day = _iso_day(iso)
+                if day is None or day != _date_parts(r, side):
+                    # the header goes out from the one, the region from the other
+                    raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: "
+                                   f"date_{side} {iso!r} is not the YYYY-MM-DD of its year, "
+                                   f"month and day {parts}", before)
         date_from = min(r["date_from"] for r in regions)
         date_to = max(r["date_to"] for r in regions)
-        if (before.get("date_from"), before.get("date_to")) == (date_from, date_to):
+        if header == [date_from, date_to]:
             raise ApiError("trips/update-trip",
                            f"trip {trip_id} already spans {date_from}..{date_to}", before)
+        if date_from > header[0] or date_to < header[1]:
+            raise ApiError("trips/update-trip", f"trip {trip_id} reads {header[0]}..{header[1]} "
+                           f"around regions spanning {date_from}..{date_to}; the save would "
+                           "shorten it", before)
         body = [{
             "id": int(r["id"]), "quality": int(r["quality"]), "hidden": int(r.get("hidden") or 0),
             "year_from": int(r["year_from"]), "month_from": int(r["month_from"]),
@@ -1095,7 +1132,9 @@ class NomadMania:
             "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
         } for r in regions]
         description = before.get("description") or ""
-        years = sorted({int(date_from[:4]), int(date_to[:4])})
+        # Every year of the new span, which contains the old header: nothing says
+        # which of its years a trip is listed under, or that it is only one.
+        years = range(int(date_from[:4]), int(date_to[:4]) + 1)
 
         def listing() -> list[dict]:
             return [t for y in years
@@ -1122,17 +1161,24 @@ class NomadMania:
                 raise ApiError("trips/update-trip", f"region {r['id']}: trip row says q"
                                f"{r['quality']}, visit {vid} says q{inv_before[r['id']][vid][2]}",
                                before)
+            row_days = tuple(_date_parts(r, side) for side in ("from", "to"))
+            visit_days = inv_before[r["id"]][vid][:2]
+            if visit_days != row_days:  # likewise; a YearOnly or no date is not a date
+                row_says, visit_says = ("..".join(str(_iso(d)) for d in days)
+                                        for days in (row_days, visit_days))
+                raise ApiError("trips/update-trip", f"trip {trip_id}, region {r['id']}: trip row "
+                               f"says {row_says}, visit {vid} says {visit_says}", before)
         ids = {r["id"] for r in body}
 
         def readback(fn: Callable[[], T]) -> T:
             return self._readback("trips/update-trip", fn)
 
         def candidates() -> list[int]:
-            return readback(lambda: [
+            return readback(lambda: sorted({
                 int(t["id"]) for t in listing()
                 if int(t["id"]) not in listed_before
                 and (t.get("date_from"), t.get("date_to")) == (date_from, date_to)
-                and region_ids(t) == ids])
+                and region_ids(t) == ids}))
 
         def read_trip(tid: int) -> tuple[dict, list[tuple]]:
             trip = self.trip(tid)["trip"]
