@@ -27,9 +27,11 @@ class ApiError(WanderfillError):
 
 
 class VerificationFailed(ApiError):
-    """The server said OK to a write, and the read-back says it did not happen.
+    """The server said OK to a write, and the read-back does not prove it.
 
-    Raised by the undo methods after the request went out. It is distinct from
+    Raised by the undo methods and ``sync_trip_header`` after the request went
+    out, whether the read-back disagrees or could not be read at all, and by
+    any strict read whose answer lacks the list it needs. It is distinct from
     a plain :class:`ApiError` so that a caller keeping a journal can tell "the
     server refused, nothing changed" from "something was sent and the state is
     now unknown" — the second must stay unresolved until a human reads back.
@@ -37,17 +39,22 @@ class VerificationFailed(ApiError):
 
 
 class TransportError(WanderfillError):
-    """The request never got an answer — timeout, DNS, connection reset."""
+    """A write the server refused with a 4xx, or a read that failed every attempt.
+
+    Never a write whose outcome is in doubt: that is :class:`UnknownWriteOutcome`.
+    """
 
 
 class UnknownWriteOutcome(WanderfillError):
-    """A write was sent and no answer came back.
+    """A write was sent and no usable answer came back.
 
-    Distinct from :class:`TransportError`, which means the server answered and
-    refused. Here we do not know whether the profile changed, and the difference
-    matters: retrying a refused write is safe, retrying an unanswered one is how
-    duplicate visits and phantom trips are made. The only correct response is to
-    stop and read the affected record back.
+    Nothing at all, a 5xx or 408, a body that is not JSON, or a series toggle
+    that said something other than ``OK``. Distinct from :class:`TransportError`,
+    which on a write means the server answered and refused. Here we do not know
+    whether the profile changed, and the difference matters: retrying a refused
+    write is safe, retrying an unanswered one is how duplicate visits and phantom
+    trips are made. The only correct response is to stop and read the affected
+    record back.
     """
 
 

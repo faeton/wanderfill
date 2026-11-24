@@ -543,6 +543,200 @@ def test_journal_unresolved_is_chronological(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# an error after sending is not proof of failure
+# --------------------------------------------------------------------------
+
+def _answering(monkeypatch, *answers):
+    """A real Transport over a scripted urlopen: an int is an HTTP error, bytes a body."""
+    import urllib.error
+
+    from wanderfill.api import transport as tr
+
+    calls = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout):
+        answer = answers[min(len(calls), len(answers) - 1)]
+        calls.append(req.full_url)
+        if isinstance(answer, int):
+            raise urllib.error.HTTPError(req.full_url, answer, "scripted", {}, None)
+        return Resp(answer)
+
+    monkeypatch.setattr(tr.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    return Transport(token="x" * 36, keep_alive=False), calls
+
+
+@pytest.mark.parametrize("code", [500, 502, 503, 504, 408])
+def test_a_500_on_a_write_is_an_unknown_outcome(monkeypatch, code):
+    """A gateway that gave up says nothing about what the server behind it did."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    t, calls = _answering(monkeypatch, code)
+    with pytest.raises(UnknownWriteOutcome, match=str(code)):
+        t.webapi("quickEnter/add-visit", region=1)
+    assert len(calls) == 1
+    t, calls = _answering(monkeypatch, code)
+    with pytest.raises(UnknownWriteOutcome):
+        t.ajax_text("my_series/", action="toggle", item=1, state=1, series=1)
+    assert len(calls) == 1, "a replayed toggle can undo the tick"
+
+
+@pytest.mark.parametrize("code", [400, 429])
+def test_a_refusal_of_a_write_is_still_definite(monkeypatch, code):
+    from wanderfill.api.errors import TransportError
+
+    t, calls = _answering(monkeypatch, code)
+    with pytest.raises(TransportError):
+        t.webapi("quickEnter/add-visit", region=1)
+    assert len(calls) == 1
+
+
+def test_a_500_on_a_read_is_still_retried(monkeypatch):
+    t, calls = _answering(monkeypatch, 500, b'{"result":"OK","ids":[1]}')
+    assert t.webapi("maps/get-visited-regions-ids-simple")["ids"] == [1]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("body", [b"<html>", b"[]", b"", b"\xff\xfe"])
+def test_a_write_answered_with_html_is_an_unknown_outcome(monkeypatch, body):
+    """A captive portal or an error page: no word on what the server did."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    t, calls = _answering(monkeypatch, body)
+    with pytest.raises(UnknownWriteOutcome):
+        t.webapi("quickEnter/add-visit", region=1)
+    with pytest.raises(UnknownWriteOutcome):
+        t.ajax_json("my_series/", action="toggle", item=1)
+    assert len(calls) == 2, "one attempt each"
+
+
+def _apply_one(tmp_path, op, replies=None):
+    """Run a one-op plan that has not drifted; return what it raised and its journal."""
+    from wanderfill.plan.apply import Journal, apply_plan
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    state = {"user/status-quick": {"result": "OK", "uid": 7},
+             "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
+             "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}}
+    c, _ = client(state | (replies or {}))
+    plan = Plan(account=7, ops=[op], basis={"fingerprint": fingerprint(basis_of({}, []))})
+    with pytest.raises(Exception) as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    (path,) = tmp_path.glob("journal-*.ndjson")
+    return info.value, Journal(path)
+
+
+def test_a_series_toggle_that_does_not_say_ok_leaves_the_journal_open(tmp_path):
+    """Closed as failed, the next run toggled it again, which can undo the tick."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    op = Op(kind="tick_series", bucket="apply", series=1, item=22)
+    exc, journal = _apply_one(tmp_path, op, {"my_series/": "<html>"})
+    assert isinstance(exc, UnknownWriteOutcome)
+    assert journal.unresolved() == {op.key}
+
+
+def test_an_unexpected_exception_leaves_the_journal_open(tmp_path, monkeypatch):
+    """Only an outcome that proves nothing changed may close an entry."""
+    from wanderfill.api.errors import AuthError, TransportError, UnknownWriteOutcome
+    from wanderfill.plan import apply as ap
+
+    op = Op(kind="mark_dare", bucket="apply", region=1)
+    for n, (outcome, left_open) in enumerate((
+        (RuntimeError("bug in our own parsing"), True),
+        (KeyError("result"), True),
+        (UnknownWriteOutcome("lost"), True),
+        (VerificationFailed("quickEnter/updateMQP", "still there"), True),
+        (ApiError("quickEnter/add-visit", "Missing params"), False),
+        (PrecisionLoss("refused before sending"), False),
+        (AuthError("401"), False),
+        (TransportError("400"), False),
+    )):
+        def execute(client, op, outcome=outcome):
+            raise outcome
+
+        monkeypatch.setattr(ap, "_execute", execute)
+        workdir = tmp_path / str(n)
+        exc, journal = _apply_one(workdir, op)
+        assert exc is outcome
+        assert journal.unresolved() == ({op.key} if left_open else set()), repr(outcome)
+        assert journal.done_keys() == set()
+
+
+def _undo_calls():
+    """method call, the read it verifies with, and that read's answer beforehand."""
+    return {
+        "delete_visit": (lambda c: c.delete_visit(13450095, 791), READ, visits(ROW)),
+        "clear_region": (lambda c: c.clear_region(791), READ, visits(ROW)),
+        "delete_trip": (lambda c: c.delete_trip(305716), "trips/get-trip", TRIP),
+        "unmark_dare": (lambda c: c.unmark_dare(1142), DARE_READ, {"ids": [1142]}),
+        "unmark_kye": (lambda c: c.unmark_kye(570), "kye/get-kye", {"visited": [570]}),
+    }
+
+
+def _raising(exc):
+    """A transport whose queued exceptions are raised in their turn."""
+    class T(SequencedTransport):
+        def webapi(self, action, **fields):
+            if self.queues.get(action) and self.queues[action][0] is exc:
+                self.sent.append((action, fields))
+                raise exc
+            return super().webapi(action, **fields)
+    return T
+
+
+@pytest.mark.parametrize("method", sorted(UNDO_METHODS))
+def test_a_delete_whose_readback_errors_stays_open(method):
+    """delete-visit said OK, the read-back said ERROR, and the plain ApiError read
+    as "the server refused, nothing changed" — which closed the journal entry."""
+    from wanderfill.api.errors import AuthError, TransportError
+
+    call, read, before = _undo_calls()[method]
+    error = {"result": "ERROR", "result_description": "Internal error."}
+    t = SequencedTransport({read: [before, error]})
+    with pytest.raises(VerificationFailed):
+        call(NomadMania(token="fake", transport=t))
+    # ...and the same for a read-back that died, lost its session or was not JSON.
+    for exc in (TransportError("wifi"), AuthError("401"), json.JSONDecodeError("html", "<", 0)):
+        t = _raising(exc)({read: [before, exc]})
+        with pytest.raises(VerificationFailed) as info:
+            call(NomadMania(token="fake", transport=t))
+        assert info.value.__cause__ is exc
+
+
+@pytest.mark.parametrize("method", sorted(UNDO_METHODS))
+def test_a_read_that_errors_before_the_delete_is_still_a_plain_refusal(method):
+    """Nothing was sent, so nothing is uncertain and the entry may close."""
+    call, read, _ = _undo_calls()[method]
+    t = SequencedTransport({read: [{"result": "ERROR", "result_description": "Internal error."}]})
+    with pytest.raises(ApiError) as info:
+        call(NomadMania(token="fake", transport=t))
+    assert not isinstance(info.value, VerificationFailed)
+    assert len(t.sent) == 1
+
+
+def test_a_delete_trip_whose_listing_errors_stays_open():
+    """The second half of the proof failing is not proof either."""
+    error = {"result": "ERROR", "result_description": "Internal error."}
+    t = SequencedTransport({"trips/get-trip": [TRIP, GONE], YEAR: [error]})
+    with pytest.raises(VerificationFailed):
+        NomadMania(token="fake", transport=t).delete_trip(305716)
+
+
+# --------------------------------------------------------------------------
 # visit identity
 # --------------------------------------------------------------------------
 
@@ -1750,6 +1944,26 @@ def test_update_trip_write_error_is_not_resent_and_reports_candidates():
         NomadMania(token="fake", transport=t).sync_trip_header(7)
     assert len(_posts(t)) == 1
     assert info.value.replacement_candidates == [8]
+
+
+def test_update_trip_whose_readback_errors_is_a_failed_verification():
+    """The trip may already be gone and re-created; "the server refused" is wrong."""
+    error = {"result": "ERROR", "result_description": "Internal error."}
+    start = _trip(7, "2026-10-31", "2026-11-02")
+    for get_trip, visits_, listings in (
+        ([start, error], [OLD], [_listing(STALE)]),
+        ([start, {"result": "OK"}], [OLD], [_listing(STALE)]),
+        ([start, {"result": "OK", "trip": {"id": 7}}], [OLD], [_listing(STALE)]),
+        ([start, NOT_FOUND], [OLD], [_listing(STALE), error]),
+        ([start, NOT_FOUND], [OLD], [_listing(STALE), _listing(), error]),
+        ([start, NOT_FOUND, error], [OLD],
+         [_listing(STALE)] + [_listing((8, *FIXED, [1266]))] * 2),
+        ([start, _trip(7, *FIXED)], [OLD, error], [_listing(STALE)]),
+    ):
+        c, t = _sync(get_trip, visits_, listings)
+        with pytest.raises(VerificationFailed):
+            c.sync_trip_header(7)
+        assert len(_posts(t)) == 1
 
 
 def test_update_trip_gone_answering_unauthorised_is_followed():

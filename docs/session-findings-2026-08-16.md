@@ -230,6 +230,12 @@ Reads retry now; writes get one attempt. A write that gets no answer raises
 Only the second leaves its journal entry open, which blocks the next run until a
 human reconciles. "It failed" and "we never found out" needed different types.
 
+*Widened 2026-11-24.* "No answer" now includes a 5xx, a 408, a body that is not
+JSON and a toggle that does not say `OK`: an error after sending is not proof of
+failure. And it is no longer the only outcome that leaves an entry open. A
+failed or disagreeing read-back (`VerificationFailed`) and any exception nobody
+planned for do too; only a refusal closes one.
+
 ### Three more from the same review
 
 - **Duplicate ops in one plan both executed.** `already` was read once, so the

@@ -25,11 +25,13 @@ import json
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from .cache import ReadCache, summary_of
 from .errors import ApiError, PrecisionLoss, VerificationFailed
 from .transport import Transport
+
+T = TypeVar("T")
 
 # Bulk reads run this many at a time. On a slow link the cost is round-trip
 # latency, not bandwidth, so four in flight is roughly four times faster.
@@ -625,6 +627,26 @@ class NomadMania:
             )
         return value
 
+    def _readback(self, action: str, fn: Callable[[], T]) -> T:
+        """Run a read that follows the write ``action``; any failure is unproven.
+
+        A plain :class:`ApiError` from here would look like the write endpoint
+        refusing, and a journal would close its entry on a write that was
+        answered ``OK``. So every failure comes out as
+        :class:`VerificationFailed`: an ``ERROR`` reply, a dead connection, a
+        lost session, and equally an answer that is not JSON or lacks a field.
+        """
+        try:
+            return fn()
+        except VerificationFailed:
+            raise
+        except Exception as exc:
+            raise VerificationFailed(
+                action,
+                f"sent and answered, but the read-back failed ({exc!r}) — outcome unknown",
+                getattr(exc, "payload", None),
+            ) from exc
+
     def _visits_strict(self, region: int) -> list[Visit]:
         rows = self._strict("quickEnter/get-visits-to-region", "data", region=region)
         return [Visit.from_api(v, region) for v in rows]
@@ -668,9 +690,9 @@ class NomadMania:
 
         The transport gives writes one attempt: a lost answer raises
         :class:`UnknownWriteOutcome`, and the caller reads back rather than
-        re-sends. A read-back that still shows the record raises
-        :class:`VerificationFailed`, which is an ``ApiError`` a journal can
-        tell apart from a refusal.
+        re-sends. A read-back that still shows the record, or that cannot be
+        read, raises :class:`VerificationFailed`, which is an ``ApiError`` a
+        journal can tell apart from a refusal.
         """
         before = self._visits_strict(region)
         current = next((v for v in before if v.id == int(visit_id)), None)
@@ -684,7 +706,7 @@ class NomadMania:
                 "removes it from the trip. Pass allow_trip_owned=True if that is deliberate."
             )
         resp = self.t.webapi("quickEnter/delete-visit", id=int(visit_id))
-        after = self._visits_strict(region)
+        after = self._readback("quickEnter/delete-visit", lambda: self._visits_strict(region))
         if any(v.id == int(visit_id) for v in after):
             raise VerificationFailed(
                 "quickEnter/delete-visit",
@@ -736,7 +758,7 @@ class NomadMania:
                 "those trips. Pass allow_trip_owned=True if that is deliberate."
             )
         resp = self.t.webapi("quickEnter/set-not-visited", region=region)
-        after = self._visits_strict(region)
+        after = self._readback("quickEnter/set-not-visited", lambda: self._visits_strict(region))
         if after:
             raise VerificationFailed(
                 "quickEnter/set-not-visited",
@@ -777,25 +799,34 @@ class NomadMania:
                 )
         year = int(str(trip.get("date_from", ""))[:4] or 0)
         resp = self.t.webapi("trips/delete-trip", trip_id=int(trip_id))
-        try:
-            still = self.trip(trip_id)
-        except ApiError as exc:
-            if exc.description.strip() != "Unauthorised.":
-                raise VerificationFailed(
-                    "trips/delete-trip",
-                    f"server answered {resp!r}; get-trip then failed with {exc.description!r}, "
-                    "which is not the missing-trip answer — outcome unknown",
-                    resp,
-                ) from exc
-        else:
+
+        def reads_back() -> tuple[bool, Any]:
+            try:
+                return True, self.trip(trip_id)
+            except ApiError as exc:
+                if exc.description.strip() != "Unauthorised.":
+                    raise VerificationFailed(
+                        "trips/delete-trip",
+                        f"server answered {resp!r}; get-trip then failed with "
+                        f"{exc.description!r}, which is not the missing-trip answer — "
+                        "outcome unknown",
+                        resp,
+                    ) from exc
+                return False, None
+
+        there, still = self._readback("trips/delete-trip", reads_back)
+        if there:
             raise VerificationFailed(
                 "trips/delete-trip",
                 f"server answered {resp!r} but trip {trip_id} still reads back: {still!r}"[:400],
                 resp,
             )
         if year:
-            listed = self._strict("trips/get-trips-for-year-app", "trips", year=year)
-            if any(int(t.get("id", -1)) == int(trip_id) for t in listed):
+            listed = self._readback("trips/delete-trip", lambda: {
+                int(t.get("id", -1))
+                for t in self._strict("trips/get-trips-for-year-app", "trips", year=year)
+            })
+            if int(trip_id) in listed:
                 raise VerificationFailed(
                     "trips/delete-trip",
                     f"get-trip says trip {trip_id} is gone but the {year} listing still has it",
@@ -814,7 +845,7 @@ class NomadMania:
         if int(dare_id) not in self._dare_strict():
             raise PrecisionLoss(f"DARE area {dare_id} is not marked — nothing to un-mark")
         resp = self.t.webapi("quickEnter/updateMQP", region=int(dare_id), visits=0)
-        if int(dare_id) in self._dare_strict():
+        if int(dare_id) in self._readback("quickEnter/updateMQP", self._dare_strict):
             raise VerificationFailed(
                 "quickEnter/updateMQP",
                 f"server answered {resp!r} but DARE area {dare_id} is still marked",
@@ -832,7 +863,7 @@ class NomadMania:
         if int(qid) not in self._kye_strict():
             raise PrecisionLoss(f"KYE quadrant {qid} is not ticked — nothing to un-tick")
         resp = self.t.webapi("kye/set-kye", qid=int(qid), visited=0)
-        if int(qid) in self._kye_strict():
+        if int(qid) in self._readback("kye/set-kye", self._kye_strict):
             raise VerificationFailed(
                 "kye/set-kye", f"server answered {resp!r} but quadrant {qid} is still ticked", resp
             )
@@ -985,8 +1016,9 @@ class NomadMania:
         in those regions exactly as it was. It refuses a trip whose row and
         visit disagree on quality, since the body would rewrite the visit. A
         failed or unanswered write is never resent; the exception carries
-        ``replacement_candidates`` from a read. The returned ``trip_id`` is the one to
-        record; any id noted for the old trip or its visits is dead. It
+        ``replacement_candidates`` from a read. A read-back that cannot be read
+        is a :class:`VerificationFailed`, like one that disagrees. The returned
+        ``trip_id`` is the one to record; any id noted for the old trip or its visits is dead. It
         refuses a trip with a year-only region (the site sends ``year``
         instead, a different shape) and a trip whose header is already right.
         One attempt, never retried.
@@ -1051,11 +1083,28 @@ class NomadMania:
                                before)
         ids = {r["id"] for r in body}
 
+        def readback(fn: Callable[[], T]) -> T:
+            return self._readback("trips/update-trip", fn)
+
         def candidates() -> list[int]:
-            return [int(t["id"]) for t in listing()
-                    if int(t["id"]) not in listed_before
-                    and (t.get("date_from"), t.get("date_to")) == (date_from, date_to)
-                    and region_ids(t) == ids]
+            return readback(lambda: [
+                int(t["id"]) for t in listing()
+                if int(t["id"]) not in listed_before
+                and (t.get("date_from"), t.get("date_to")) == (date_from, date_to)
+                and region_ids(t) == ids])
+
+        def read_trip(tid: int) -> tuple[dict, list[tuple]]:
+            trip = self.trip(tid)["trip"]
+            return trip, rows(trip)
+
+        def saved_trip() -> tuple[dict, list[tuple]] | None:
+            """The trip under its old id, or None for the two answers that mean gone."""
+            try:
+                return read_trip(trip_id)
+            except ApiError as exc:
+                if (exc.description or "").strip() not in ("Trip not found.", "Unauthorised."):
+                    raise
+                return None
 
         try:
             resp = self.t.webapi(
@@ -1077,30 +1126,27 @@ class NomadMania:
             raise
 
         new_id = trip_id
-        try:
-            after = self.trip(trip_id)["trip"]
-        except ApiError as exc:
-            if (exc.description or "").strip() not in ("Trip not found.", "Unauthorised."):
-                raise
-            if trip_id in {int(t["id"]) for t in listing()}:
-                raise fail(f"get-trip says {trip_id} is gone but the listing still has it"
-                           ) from exc
+        saved = readback(saved_trip)
+        if saved is None:
+            if trip_id in readback(lambda: {int(t["id"]) for t in listing()}):
+                raise fail(f"get-trip says {trip_id} is gone but the listing still has it")
             found = candidates()
             if len(found) != 1:
                 raise fail(f"trip {trip_id} is gone and {len(found)} NEW trip(s) {found} match "
-                           f"{date_from}..{date_to} {sorted(ids)}") from exc
+                           f"{date_from}..{date_to} {sorted(ids)}")
             new_id = found[0]
-            after = self.trip(new_id)["trip"]
+            saved = readback(lambda: read_trip(new_id))
+        after, rows_after = saved
         if (after.get("date_from"), after.get("date_to")) != (date_from, date_to):
             raise fail(f"trip {new_id} reads {after.get('date_from')}..{after.get('date_to')}")
-        if rows(after) != rows(before):
-            raise fail(f"trip {new_id} regions changed: {rows(before)} -> {rows(after)}")
+        if rows_after != rows(before):
+            raise fail(f"trip {new_id} regions changed: {rows(before)} -> {rows_after}")
         if (after.get("description") or "") != description:
             raise fail(f"trip {new_id} description changed: {description!r} -> "
                        f"{after.get('description')!r}")
         visits = {}
         for rid in (r["id"] for r in body):
-            was, now = inv_before[rid], inventory(rid)
+            was, now = inv_before[rid], readback(lambda rid=rid: inventory(rid))
             (old_visit,) = mine_before[rid]
             others_was = {k: v for k, v in was.items() if k != old_visit}
             others_now = {k: v for k, v in now.items() if v[3] != new_id}

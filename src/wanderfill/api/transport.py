@@ -189,7 +189,9 @@ class Transport:
 
         So reads retry, and writes get exactly one attempt. A write that fails
         without an answer from the server raises :class:`UnknownWriteOutcome`,
-        because "it did not happen" is not something we know.
+        because "it did not happen" is not something we know. A 5xx or a 408 is
+        no answer either: it is usually a gateway giving up on a server that may
+        have committed. Only the other HTTP errors are a refusal.
         """
         body = urllib.parse.urlencode(
             {k: v for k, v in fields.items() if v is not None}
@@ -229,10 +231,17 @@ class Transport:
             if attempt < attempts - 1:
                 time.sleep(1.5 * (attempt + 1))
         if not idempotent:
-            # An HTTPError means the server answered and refused. Anything else
-            # — timeout, reset, DNS — means we never learned what it did.
+            # A 4xx means the server answered and refused. Anything else —
+            # timeout, reset, DNS, a 5xx, a 408 — means we never learned what
+            # it did.
             if isinstance(last, urllib.error.HTTPError):
-                raise TransportError(f"{url} refused: {last}")
+                if last.code < 500 and last.code != 408:
+                    raise TransportError(f"{url} refused: {last}")
+                raise UnknownWriteOutcome(
+                    f"{url} sent, answered with {last}. "
+                    "Whether the server applied it is unknown; do not retry blind. "
+                    "Read the affected record back before running anything again."
+                )
             raise UnknownWriteOutcome(
                 f"{url} sent, no answer received ({last}). "
                 "Whether the server applied it is unknown; do not retry blind. "
@@ -252,15 +261,35 @@ class Transport:
         tail = action.rsplit("/", 1)[-1]
         return any(h in tail for h in cls.WRITE_HINTS)
 
+    @staticmethod
+    def _write_reply(label: str, raw: bytes) -> dict:
+        """The JSON object a write must answer with, or an unknown outcome.
+
+        A captive portal's page, a PHP warning or an empty body is not the
+        server saying no. The write may have landed before it was produced.
+        """
+        try:
+            data = json.loads(raw)
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError both
+            data = None
+        if not isinstance(data, dict):
+            raise UnknownWriteOutcome(
+                f"{label} sent, but the answer ({len(raw)} bytes) is not a JSON object. "
+                "Whether the server applied it is unknown; do not retry blind. "
+                "Read the affected record back before running anything again."
+            )
+        return data
+
     def webapi(self, action: str, **fields: Any) -> dict:
         """Call the modern API and unwrap its in-body error convention."""
+        write = self._is_write(action)
         raw = self._post(
             WEBAPI + action,
             fields,
             {"NMTOKEN": self.token, "LANG": self.lang, "platform": "web"},
-            idempotent=not self._is_write(action),
+            idempotent=not write,
         )
-        data = json.loads(raw)
+        data = self._write_reply(action, raw) if write else json.loads(raw)
         if isinstance(data, dict) and data.get("result") == "ERROR":
             raise ApiError(action, data.get("result_description", "unknown"), data)
         return data
@@ -275,7 +304,7 @@ class Transport:
         raw = self._post(
             AJAX + path, {**fields, "token": self.token}, {}, idempotent=not write
         )
-        return json.loads(raw)
+        return self._write_reply(path, raw) if write else json.loads(raw)
 
     def ajax_text(self, path: str, **fields: Any) -> str:
         """Same, for the endpoints that answer with a bare string such as "OK".

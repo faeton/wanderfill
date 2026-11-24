@@ -20,7 +20,11 @@ from typing import Any
 from ..api.client import MARKS_REGION_FROM, NomadMania, YearOnly
 from ..api.errors import (
     AccountMismatch,
+    ApiError,
+    AuthError,
     DriftError,
+    PrecisionLoss,
+    TransportError,
     UnknownWriteOutcome,
     VerificationFailed,
 )
@@ -126,6 +130,20 @@ class ApplyReport:
     errors: list[str] = field(default_factory=list)
     # Filled by `verify()` after the writes: what the server actually says now.
     verified: dict = field(default_factory=dict)
+
+
+def _proves_nothing_changed(exc: Exception) -> bool:
+    """Whether a failed op may be journalled as closed, and so be sent again.
+
+    Only a refusal counts: ours before sending, or the server's own. An answer
+    we could not read, a read-back that failed, a bug in our own parsing after
+    the request went out — all may sit on top of a write that landed. Named as
+    a list of what closes, not of what stays open, so an exception nobody
+    thought of leaves the entry open.
+    """
+    if isinstance(exc, VerificationFailed):
+        return False
+    return isinstance(exc, (PrecisionLoss, AuthError, TransportError, ApiError))
 
 
 def apply_plan(
@@ -245,19 +263,15 @@ def apply_plan(
             journal.note(op, result)
             already.add(op.key)
             report.succeeded += 1
-        except UnknownWriteOutcome as exc:
-            # Deliberately NOT journalled as done. The entry stays open, which is
-            # what blocks the next run from retrying a write that may have landed.
-            report.failed += 1
-            report.errors.append(f"{op.kind} {op.label}: {exc}")
-            if on_progress:
-                on_progress(i, len(ops), op, False)
-            raise
         except Exception as exc:
-            journal.note(op, None, error=str(exc))
+            # Anything that does not prove the write was refused is deliberately
+            # NOT journalled as done. The entry stays open, which is what blocks
+            # the next run from retrying a write that may have landed.
+            if _proves_nothing_changed(exc):
+                journal.note(op, None, error=str(exc))
             report.failed += 1
             report.errors.append(f"{op.kind} {op.label}: {exc}")
-            # Stop on the first definite failure. Continuing runs later ops
+            # Stop on the first failure of any kind. Continuing runs later ops
             # against a profile that is no longer in the state the plan assumed,
             # and the ops after a failure are the least reviewed of the batch.
             if on_progress:
@@ -561,7 +575,11 @@ def _execute(client: NomadMania, op: Op):
 
     if op.kind == "tick_series":
         if not client.tick_series_item(op.series, op.item):
-            raise RuntimeError("series toggle did not answer OK")
+            # Not a refusal. A toggle sent again can undo the tick it repeats.
+            raise UnknownWriteOutcome(
+                f"series {op.series} item {op.item}: toggle sent, the answer was not OK. "
+                "Read the series back before running anything again."
+            )
         return "OK"
 
     raise ValueError(f"unknown op kind: {op.kind}")

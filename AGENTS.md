@@ -602,7 +602,11 @@ At apply time:
   an unknown outcome, and sending it again is how duplicate visits and phantom
   trips are made. The transport enforces this — writes get one attempt and raise
   `UnknownWriteOutcome`, which leaves the journal entry open on purpose so the
-  next run refuses to start until a human has reconciled it.
+  next run refuses to start until a human has reconciled it. A 5xx, a 408, a
+  body that is not JSON and a toggle that does not say `OK` are no answer
+  either. Only a refusal closes an entry — ours before sending, or the server's
+  own (401/403, another 4xx, an `ERROR` body); any other exception, a bug in
+  this package included, leaves it open.
 
 Then **verify**: `apply` now calls `verify()` itself and writes a `verify-*.json`
 beside the journal. Read it. A response saying `OK` is not evidence — both
