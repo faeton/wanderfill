@@ -855,14 +855,15 @@ def cmd_check(args) -> int:
     from ..plan.apply import (
         CLOSE_BY_HAND,
         GONE_IS_NOT_DONE,
+        NOT_IN_THE_SERIES,
         OLD_KEY_IS_NOT_KNOWN,
         Journal,
         describe_open,
         doubles,
         gone,
         open_entries,
+        tick_lists,
         tick_of,
-        ticked_before,
         trips_under_old_keys,
     )
     from ..plan.model import Plan, basis_of, fingerprint, regions_touched, validate
@@ -932,11 +933,14 @@ def cmd_check(args) -> int:
     else:
         problems += doubles(snap, to_send)
         try:
-            ticked = ticked_before(c, ops, snap)
+            ticked, missing = tick_lists(c, ops, snap, done)
         except WanderfillError as exc:
             problems.append(f"a list this plan ticks cannot be read: {exc}")
             unread = True
         else:
+            if missing:
+                problems += missing
+                hints.append(NOT_IN_THE_SERIES)
             if lost := gone(snap, ticked, [op for op in ops if op.key in done], journal.path):
                 problems += lost
                 hints.append(GONE_IS_NOT_DONE)

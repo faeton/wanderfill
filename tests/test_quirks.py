@@ -765,6 +765,11 @@ def test_a_write_answered_with_html_is_an_unknown_outcome(monkeypatch, body):
     assert len(calls) == 2, "one attempt each"
 
 
+def _rows(*ids):
+    """``items2`` as a series answers it, with nothing in it but the ids and a name."""
+    return [{"id": i, "name": f"Thing {i}"} for i in ids]
+
+
 def _apply_one(tmp_path, op, replies=None, transport=FakeTransport):
     """Run a one-op plan that has not drifted; return what it raised and its journal."""
     from wanderfill.plan.apply import Journal, apply_plan
@@ -773,7 +778,7 @@ def _apply_one(tmp_path, op, replies=None, transport=FakeTransport):
     state = {"user/status-quick": {"result": "OK", "uid": 7},
              "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
              "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []},
-             "V2/": {"title": "a series", "visited": []}}
+             "V2/": {"title": "a series", "visited": [], "items2": _rows(5, 22, 570)}}
     c = NomadMania(token="fake", transport=transport(state | (replies or {})))
     plan = Plan(account=7, ops=[op], basis={"fingerprint": fingerprint(basis_of({}, []))})
     with pytest.raises(Exception) as info:
@@ -4610,7 +4615,7 @@ def test_check_reports_a_list_the_server_refuses_as_a_blocker(monkeypatch, tmp_p
 
 
 def _tick_replies(ids=(570, "571")):
-    return {"V2/": {"title": "Capitals", "visited": list(ids)},
+    return {"V2/": {"title": "Capitals", "visited": list(ids), "items2": _rows(*range(10), *ids)},
             "kye/get-kye": {"visited": list(ids)},
             "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": list(ids)}}
 
@@ -4674,6 +4679,138 @@ def test_a_tick_list_that_cannot_be_read_sends_nothing(
     t.replies[action] = _bad(reply, field)
     assert action in _refused(plan, c, t, tmp_path, VerificationFailed)
     assert "BLOCKERS" in _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+
+
+def test_a_tick_whose_item_is_not_in_the_series_now_sends_nothing(monkeypatch, tmp_path, capsys):
+    """Objects leave a series, and a toggle of an id that is not there proves nothing."""
+    replies = _tick_replies()
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1), _vop("tick_series", series=1, item=5),
+                          _vop("tick_series", series=1, item=77, label="Secret Cave"),
+                          _vop("tick_series", series=2, item=78), replies=replies)
+    t.replies["V2/"]["items2"][0]["name"] = "Lead Gate"
+    message = _refused(plan, c, t, tmp_path)
+    assert "series 1: 77" in message and "series 2: 78" in message
+    assert "Nothing was sent" in message
+    for other in ("Secret Cave", "Lead Gate", "570"):
+        assert other not in message
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    blockers = out.split("BLOCKERS")[1]
+    assert "series 1: 77" in blockers and "series 2: 78" in blockers
+    assert "cannot be read" not in out and "Left to send: 4 of 4" in out, "and it reads on"
+    assert "Lead Gate" not in out
+
+
+def test_check_names_a_missing_item_and_what_is_gone(monkeypatch, tmp_path, capsys):
+    """The one blocker does not hide the other."""
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import Journal
+    from wanderfill.plan.model import fingerprint
+
+    plan, c, _ = _rebuilt(_vop("tick_series", series=1, item=77),
+                          _vop("mark_kye", item=5, label="taken back"), replies=_tick_replies())
+    Journal(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson").note(plan.ops[1], "OK")
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+    assert cli.main(["check", str(saved), "--workdir", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "series 1: 77" in out and "'taken back'" in out and "is gone now" in out
+
+
+def test_a_missing_item_of_a_later_series_prevents_every_write(tmp_path):
+    """It was found, if at all, after everything before it had been sent."""
+    from wanderfill.plan.apply import apply_plan
+
+    ops = [_vop("mark_dare", region=1), _vop("mark_kye", item=5), _jan_add(),
+           *(_vop("tick_series", series=s, item=s) for s in (1, 2, 3))]
+    for lacks in (1, 2, 3):
+        plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+        asked = []
+
+        def series(path, /, asked=asked, lacks=lacks, **f):
+            asked.append(f["id"])
+            return {"visited": [], "items2": _rows(*{1, 2, 3} - {lacks})}
+
+        t.ajax_json = series
+        work = tmp_path / str(lacks)
+        assert f"series {lacks}: {lacks}" in _refused(plan, c, t, work)
+        assert asked == [1, 2, 3], "one request for each series, as before"
+    plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+    assert apply_plan(c, plan, workdir=tmp_path / "all", confirm=True).succeeded == 6
+
+
+@pytest.mark.parametrize("rows", [
+    None, {}, "x", [7], [None], [{}], [{"name": "Secret Cave"}], [{"id": None}],
+    [{"id": "Secret Cave"}], [{"id": True}], [{"id": 5.0}], [{"id": -5}, {"id": "5 "}],
+    [{"id": 5}, {"id": "5x", "name": "Secret Cave"}]], ids=str)
+def test_a_series_whose_items_cannot_be_read_sends_nothing(monkeypatch, tmp_path, capsys, rows):
+    """A row that is skipped reads as an item that left, and one that is guessed as one there."""
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1), _vop("tick_series", series=1, item=5),
+                          replies=_tick_replies())
+    t.replies["V2/"]["items2"] = rows
+    message = _refused(plan, c, t, tmp_path, VerificationFailed)
+    assert "series 1" in message and "items2" in message and "Secret" not in message
+    if isinstance(rows, list):
+        assert f"items2[{len(rows) - 1}]" in message
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    assert "BLOCKERS" in out and "items2" in out and "Secret" not in out
+
+
+def test_an_item_id_is_the_same_as_text_or_as_a_number(monkeypatch, tmp_path, capsys):
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, t = _rebuilt(_vop("tick_series", series=1, item=5), replies=_tick_replies(ids=()))
+    t.replies["V2/"]["items2"] = _rows("4", "5")
+    _checked(monkeypatch, capsys, plan, c, tmp_path, 0)
+    assert apply_plan(c, plan, workdir=tmp_path / "w", confirm=True).succeeded == 1
+
+
+def test_an_item_ticked_already_has_to_be_in_the_series_too(tmp_path):
+    """Nothing would be sent for it, but the series is not the one the plan was made from."""
+    plan, c, t = _rebuilt(_vop("tick_series", series=1, item=77), replies=_tick_replies((77,)))
+    t.replies["V2/"]["items2"] = _rows(5)
+    assert "series 1: 77" in _refused(plan, c, t, tmp_path)
+
+
+def test_the_read_back_asks_only_whether_the_item_is_ticked():
+    """What landed is in the list of ticks, whatever the catalogue does meanwhile."""
+    from wanderfill.plan.apply import verify
+
+    for more in ({}, {"items2": None}, {"items2": []}):
+        c, _ = client({"V2/": {"visited": [5]} | more})
+        out = verify(c, [_vop("tick_series", series=1, item=n) for n in (5, 6)])
+        assert out["unproven"] == [] and out["mismatches"] == ["series 1 item 6 did not stick"]
+
+
+def test_a_done_tick_is_judged_by_the_tick_and_not_by_the_series_items(
+        monkeypatch, tmp_path, capsys):
+    """As `gone` judges it: the tick is there, so it is done, and nothing is sent for it."""
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import Journal, apply_plan
+    from wanderfill.plan.model import fingerprint
+
+    plan, c, t = _rebuilt(_vop("tick_series", series=1, item=77, label="done"),
+                          _vop("tick_series", series=1, item=5), replies=_tick_replies((77,)))
+    t.replies["V2/"]["items2"] = _rows(5)
+    journal = Journal(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson")
+    journal.note(plan.ops[0], "OK")
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+    assert cli.main(["check", str(saved), "--workdir", str(tmp_path)]) == 0
+    assert "Left to send: 1 of 2 op(s)" in capsys.readouterr().out
+    report = apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert (report.succeeded, report.skipped) == (1, 1)
+    t.replies["V2/"]["visited"] = []
+    with pytest.raises(DriftError, match="series 1 item 77 is not ticked"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+
+
+def test_ticked_before_takes_any_iterable_of_ops():
+    """It reads them twice, for the lists and for the items."""
+    from wanderfill.plan.apply import ticked_before
+
+    c, _ = client(_tick_replies())
+    with pytest.raises(DriftError, match="series 1: 77"):
+        ticked_before(c, (_vop("tick_series", series=1, item=n) for n in (5, 77)))
 
 
 def test_a_tcc_row_whose_id_is_not_a_number_is_a_failed_read():
@@ -6025,7 +6162,7 @@ def test_a_tick_taken_back_after_it_landed_is_not_skipped_as_done(
 
     op = TICKED[name]()
     plan, c, t = _rebuilt(op, _vop("tick_series", series=9, item=1), replies={
-        "V2/": {"visited": []}, "kye/get-kye": {"visited": []}})
+        "V2/": {"visited": [], "items2": _rows(1)}, "kye/get-kye": {"visited": []}})
     if name == "tcc":
         op.item = 64  # in the list, and not ticked
     path = tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson"
@@ -6177,7 +6314,7 @@ def test_check_counts_only_what_would_be_sent(monkeypatch, tmp_path, capsys):
     assert "Left to send: 2 of 5 op(s), in 1 region(s)." in out and "would execute" not in out
     t.replies["V2/"] = {"result": "OK"}  # the list is gone: nobody knows what is ticked
     assert "Left to send: at most 3 of 5 op(s)" in check(1)
-    t.replies["V2/"] = {"visited": [5]}
+    t.replies["V2/"] = {"visited": [5], "items2": _rows(5)}
     for op in ops[2:]:
         journal.note(op, {"result": "OK"})
     t.replies[READ] = visits(_stored(**JAN))  # what a finished plan finds

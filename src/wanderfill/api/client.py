@@ -398,6 +398,19 @@ def series_ticks(action: str, data: object) -> set[int]:
     return out
 
 
+def series_items(action: str, data: object) -> set[int]:
+    """The ids of everything in one series, read as strictly, and quoted no more."""
+    rows = data.get("items2") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise VerificationFailed(action, "the answer has no 'items2' list of what is in it")
+    out = set()
+    for i, row in enumerate(rows):
+        if (n := _whole(row.get("id")) if isinstance(row, dict) else None) is None:
+            raise VerificationFailed(action, f"items2[{i}] has no id that is a number")
+        out.add(n)
+    return out
+
+
 class NomadMania:
     """Thin, honest wrapper over both surfaces."""
 

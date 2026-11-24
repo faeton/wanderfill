@@ -761,6 +761,10 @@ At apply time:
   and a repeat may undo it. Such an op is skipped, not journalled, and printed as
   `skip` and as `already ticked, not sent`. The series and KYE lists as they were are in the
   snapshot file under `ticked`.
+- Refuse a tick whose item is not in its series now: the same read has the series'
+  items, and one that cannot be read refuses too. Ids are compared and names are not,
+  so **an item that was renamed is not detected**. An op this plan's journal has done
+  is judged by its tick alone, as above. `check` lists each id.
 - Cap the number of writes per run.
 - Journal every request and its response, including the id of any phantom trip
   created behind your back.
@@ -822,8 +826,9 @@ did not foresee is a traceback, after the report.
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports how many ops are left to
 send, net of those done or ticked already, and account mismatch, drift,
-duplicate ops, second copies, done ops that are gone, lists that cannot be read,
-and every open or unreadable journal entry of the account without sending a write.
+duplicate ops, second copies, done ops that are gone, items that are not in their
+series, lists that cannot be read, and every open or unreadable journal entry of
+the account without sending a write.
 
 ---
 

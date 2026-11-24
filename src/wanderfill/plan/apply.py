@@ -15,13 +15,21 @@ import errno
 import json
 import os
 import sys
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..api.client import MARKS_REGION_FROM, NomadMania, Visit, YearOnly, strict_ids
+from ..api.client import (
+    MARKS_REGION_FROM,
+    NomadMania,
+    Visit,
+    YearOnly,
+    series_items,
+    series_ticks,
+    strict_ids,
+)
 from ..api.errors import (
     AccountMismatch,
     ApiError,
@@ -392,27 +400,62 @@ def tick_of(op: Op) -> tuple[tuple[str, int], int] | None:
     return None
 
 
-def ticked_before(
-    client: NomadMania, ops: Iterable[Op], snapshot: dict | None = None
-) -> dict[tuple[str, int], set[int]]:
+def tick_lists(
+    client: NomadMania, ops: Iterable[Op], snapshot: dict | None = None,
+    done: Collection[str] = (),
+) -> tuple[dict[tuple[str, int], set[int]], list[str]]:
     """What is ticked now in every list ``ops`` would tick, one strict read per list.
 
     Keys are ``("series", id)``, ``("kye", 0)``, ``("dare", 0)`` and ``("tcc", 0)``.
     DARE and TCC come from ``snapshot`` where it holds them, since it has just
     read them strictly; TCC alone is 29 requests.
+
+    And one line per series that does not have an item ``ops`` tick, from the same
+    answers: the ids and no names. An op whose key is in ``done`` is left to
+    :func:`gone`, which asks whether the tick is there and nothing else.
     """
+    items: dict[int, set[int]] = {}
+
+    def series(n: int) -> set[int]:
+        action = f"V2/ series {n}"
+        data = client._read(action, lambda: client.series(n))
+        ticked = series_ticks(action, data)
+        items[n] = series_items(action, data)
+        return ticked
+
     held = {"dare": "visited_dare", "tcc": "visited_tcc"}
-    read = {"series": client.series_ticked, "kye": lambda _: client.kye_ticked(),
+    read = {"series": series, "kye": lambda _: client.kye_ticked(),
             "dare": lambda _: client._dare_strict(), "tcc": lambda _: client.visited_tcc_ids()}
     out: dict[tuple[str, int], set[int]] = {}
+    absent: dict[int, set[int]] = {}
     for op in ops:
-        tick = tick_of(op)
-        if tick is None or tick[0] in out:
+        if (tick := tick_of(op)) is None:
             continue
         name, n = key = tick[0]
-        have = (snapshot or {}).get(held.get(name))
-        out[key] = read[name](n) if have is None else strict_ids(held[name], have)
-    return out
+        if key not in out:
+            have = (snapshot or {}).get(held.get(name))
+            out[key] = read[name](n) if have is None else strict_ids(held[name], have)
+        if name == "series" and op.key not in done and tick[1] not in items[n]:
+            absent.setdefault(n, set()).add(tick[1])
+    return out, [f"series {n}: {', '.join(map(str, sorted(ids)))} not in it now"
+                 for n, ids in sorted(absent.items())]
+
+
+NOT_IN_THE_SERIES = (
+    "An id that is not in its series is not the thing the plan was approved for: build a new plan "
+    "from the series as it is."
+)
+
+
+def ticked_before(
+    client: NomadMania, ops: Iterable[Op], snapshot: dict | None = None,
+    done: Collection[str] = (),
+) -> dict[tuple[str, int], set[int]]:
+    """The lists of :func:`tick_lists`, or :class:`DriftError` if an item is not in its series."""
+    ticked, missing = tick_lists(client, ops, snapshot, done)
+    if missing:
+        raise DriftError("; ".join(missing) + f". {NOT_IN_THE_SERIES} Nothing was sent.")
+    return ticked
 
 
 def gone(
@@ -561,7 +604,9 @@ def apply_plan(
         or in the plan, already with the same region and full dates
         (:func:`doubles`).
     11. Every hand-ticked list the plan ticks must be readable
-        (:func:`ticked_before`). A series tick is a toggle and a repeat may undo
+        (:func:`ticked_before`), and every item to tick in a series must be in it
+        now, unless this plan's journal has the op done. That compares ids only: an
+        item under another name passes. A series tick is a toggle and a repeat may undo
         it, so an item in its list already is skipped: nothing is sent or
         journalled for it, its label goes in ``ApplyReport.already``, and
         ``on_skip`` is told, or ``on_progress`` with ``True``. The series and KYE
@@ -674,7 +719,7 @@ def _apply_locked(
         raise DriftError("; ".join(twice) + ". Nothing was sent.")
 
     # Also of the ops that are done: a tick somebody took back is not done any more.
-    ticked = ticked_before(client, ops, snapshot)
+    ticked = ticked_before(client, ops, snapshot, done)
     if lost := gone(snapshot, ticked, [op for op in ops if op.key in done], journal.path):
         raise DriftError("; ".join(lost) + f". {GONE_IS_NOT_DONE} Nothing was sent.")
     lists: dict[str, Any] = {}
@@ -884,8 +929,10 @@ class _Reads:
         return self._once(("marked",), lambda: self._client.visited_region_ids(strict=True))
 
     def ticked(self, op: Op) -> set[int]:
-        """The list a tick op ticks; TCC is 29 requests."""
+        """The list a tick op ticks; TCC is 29 requests. What else a series has is not asked."""
         where, _ = tick_of(op)  # type: ignore[misc]
+        if where[0] == "series":
+            return self._once(where, lambda: self._client.series_ticked(where[1]))
         return self._once(where, lambda: ticked_before(self._client, [op])[where])
 
     def header(self, trip_id: int) -> tuple[str, str]:
