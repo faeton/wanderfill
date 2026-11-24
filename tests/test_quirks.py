@@ -2476,6 +2476,56 @@ def test_unset_bounds_are_open(tmp_path, mac_on_utc_minus_10):
     assert len(list(PhotosAppSource(library=lib).assets())) == 2
 
 
+# ------------------------------------------- the zone a photo's clock was in
+
+
+def test_a_photo_carries_the_zone_its_clock_was_in(tmp_path):
+    """A zone of 0 is a recorded one, and none at all is not a zone of 0: the first dates
+    the photo and the second does not."""
+    import sqlite3
+
+    from wanderfill.sources.photos_app import PhotoAsset, PhotosAppSource
+
+    noon = dt.datetime(2026, 5, 1, 12)
+    lib = _photos_library(tmp_path, [(noon, 0, 1.0, 1.0), (noon, 19800, 2.0, 2.0),
+                                     (noon, -36000, 3.0, 3.0), (noon, None, 4.0, 4.0),
+                                     (noon, 0, 5.0, 5.0), (noon, "?", 6.0, 6.0)])
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.execute("DELETE FROM ZADDITIONALASSETATTRIBUTES WHERE ZASSET = 5")
+    con.commit()
+    con.close()
+    got = {a.uuid: a.zone for a in PhotosAppSource(library=lib).assets()}
+    assert got == {"u1": 0, "u2": 19800, "u3": -36000, "u4": None, "u5": None, "u6": None}
+    assert list(PhotoAsset.__dataclass_fields__)[-1] == "zone"
+    assert PhotoAsset("u", noon, 1.0, 1.0, "", "").zone is None
+
+
+H = 3600
+
+
+@pytest.mark.parametrize("zone, lon, fits", [
+    (None, 0.0, False),
+    (0, 0.0, True), (4 * H, 0.0, True), (-4 * H, 0.0, True),
+    (4 * H + 1, 0.0, False), (-4 * H - 1, 0.0, False),
+    (2 * H, 90.0, True), (10 * H, 90.0, True), (2 * H - 1, 90.0, False),
+    (10 * H + 1, 90.0, False),
+    (0, 150.0, False), (10 * H, 150.0, True),           # the clock of another continent
+    (13 * H, -175.0, True), (13 * H, 175.0, True),      # both sides of the date line
+    (14 * H, -157.0, True), (14 * H, 157.0, True),
+    (-11 * H, -171.0, True), (-11 * H, 178.0, True), (12 * H, -179.9, True),
+    (13 * H, -100.0, False), (14 * H, 120.0, False), (-11 * H, 100.0, False),
+    (12 * H, 180.0, True), (-12 * H, 180.0, True), (12 * H, -180.0, True),
+    (24 * H, 0.0, False), (-24 * H, 0.0, False),        # a day off, and no zone there is
+    (14 * H, -150.0, True), (14 * H + 1, -150.0, False), (-12 * H, 178.0, True),
+    (-12 * H - 1, 178.0, False),
+])
+def test_a_clock_fits_the_place_or_dates_nothing(zone, lon, fits):
+    """A photo with zone 0 at longitude 150 is ten hours off, and can be on another day."""
+    from wanderfill.sources.photos_app import zone_fits
+
+    assert zone_fits(zone, lon) is fits
+
+
 # ------------------------------------------- who a photo came from
 
 # One of each, in this order: camera, AirDrop, glasses, no importer, empty importer.

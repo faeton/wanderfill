@@ -51,6 +51,17 @@ from ..api.client import _whole as _live_id
 from ..api.errors import AccountMismatch, DriftError, PlanInvalid, VerificationFailed
 from ..geo.tiles import SeriesPoint, haversine_km, neighbourhood
 from ..sources.photos_app import ORIGINS, Origin, PhotoAsset
+from .manifest import canonical as _canonical
+from .manifest import date as _date
+from .manifest import escape_data, sha256_of
+from .manifest import fields as _fields
+from .manifest import json_of as _json_of
+from .manifest import no_repeats as _no_repeats
+from .manifest import number as _number
+from .manifest import read_bytes as _read_bytes
+from .manifest import read_json as _read_json
+from .manifest import text as _text
+from .manifest import whole as _whole
 from .model import Op, Plan, _r, basis_of, fingerprint, parse_when, shown, validate
 from .series import AIRPORT_SERIES
 
@@ -98,15 +109,6 @@ class Span:
 
 
 _SPAN_FIELDS = ("from", "to", "bbox", "why", "use")
-
-
-def _no_repeats(pairs: list[tuple[str, Any]]) -> dict:
-    out: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in out:  # json keeps the last, and the owner may have read the first
-            raise ValueError(f"an object gives {_r(key)} twice")
-        out[key] = value
-    return out
 
 
 def load_spans(path: str | Path) -> list[Span]:
@@ -182,7 +184,8 @@ class Shot:
     it; one with ``use`` ``none`` takes no part in anything. ``untimed`` is a photo
     with no UTC time, which cannot be shown to be slow or fast; its ``use`` is
     always ``none``. ``late`` says that ``use`` is ``none`` because the photo is
-    after ``until``.
+    after ``until``. ``uuid`` and ``zone`` are the photo's: which one it is, and the
+    seconds from UTC of the clock that dates it, or ``None`` when that is not recorded.
     """
 
     taken: dt.datetime
@@ -193,6 +196,8 @@ class Shot:
     kind: Kind
     use: Use
     late: bool = False
+    uuid: str = ""
+    zone: int | None = None
 
 
 def grade_shots(
@@ -301,7 +306,8 @@ def _shot(a: PhotoAsset, kind: Kind, spans: Sequence[Span], until: dt.date | Non
     late = until is not None and a.date > until
     uses = {s.use for s in spans if s.covers(a.date, a.lat, a.lon)}
     use: Use = "none" if late or "none" in uses else "airports" if uses else "all"
-    return Shot(a.taken, a.taken_utc, a.lat, a.lon, a.origin, kind, use, late)
+    return Shot(a.taken, a.taken_utc, a.lat, a.lon, a.origin, kind, use, late,
+                a.uuid, a.zone)
 
 
 def default_speeds() -> dict[str, float]:
@@ -732,7 +738,7 @@ class Manifest:
 
     @property
     def sha256(self) -> str:
-        return hashlib.sha256(_canonical(self._content()).encode("utf-8")).hexdigest()
+        return sha256_of(self._content())
 
     def _stored(self) -> dict:
         """The file, and the page's data: the content, and what is not hashed beside it."""
@@ -774,11 +780,6 @@ class Manifest:
         except ValueError as exc:
             raise PlanInvalid(f"{path}: {exc}") from None
         return m
-
-
-def _canonical(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                      allow_nan=False)
 
 
 def _key(c: Candidate) -> str:
@@ -889,56 +890,6 @@ def _left_out_of(raw: object) -> dict:
     return {name: _whole(n, f"left_out.{name}", low=0) for name, n in raw.items()}
 
 
-def _fields(row: object, wanted: Sequence[str], what: str, optional: Sequence[str] = ()) -> None:
-    if not isinstance(row, Mapping):
-        raise ValueError(f"{what} must be an object, not {_r(row)}")
-    for name in wanted:
-        if name not in row:
-            raise ValueError(f"{what} has no {name!r}")
-    for name in row:
-        if name not in wanted and name not in optional:
-            raise ValueError(f"{what} has a field {_r(name)}, which this version does not know")
-
-
-def _whole(value: object, what: str, *, low: int | None = None) -> int:
-    # Within what JavaScript counts exactly: the page reads ids and writes them back.
-    if type(value) is not int or abs(value) >= 2**53 or (low is not None and value < low):
-        least = "" if low is None else f" of {low} or more"
-        raise ValueError(f"{what} must be a whole number{least}, not {_r(value)}")
-    return value
-
-
-def _number(value: object, what: str, *, low: float = 0.0, high: float = math.inf) -> float:
-    if type(value) in (int, float):
-        try:
-            number = float(value)
-        except OverflowError:
-            number = math.inf
-        if math.isfinite(number) and low <= number <= high:
-            return number + 0.0
-    raise ValueError(f"{what} must be a number from {low:g} to {high:g}, not {_r(value)}")
-
-
-def _text(value: object, what: str) -> str:
-    """``value`` with what UTF-8 cannot hold replaced: half a surrogate pair is no reason
-    to refuse a list, and would be one to the file and to the hash."""
-    if not isinstance(value, str):
-        raise ValueError(f"{what} must be text, not {_r(value)}")
-    return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
-
-
-def _date(value: object, what: str) -> str:
-    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
-        return value.isoformat()
-    try:
-        day = parse_when(value)
-    except ValueError as exc:
-        raise ValueError(f"{what}: {exc}") from None
-    if not isinstance(day, dt.date):
-        raise ValueError(f"{what}: {_r(value)} is not YYYY-MM-DD")
-    return day.isoformat()
-
-
 def _at(value: object, what: str) -> dt.datetime:
     """A photo's own clock, which has no zone, in the one spelling it is hashed in."""
     try:
@@ -992,19 +943,17 @@ def _by_id(value: object, what: str) -> dict[str, Any]:
 # -- the page, and what came back from it --------------------------------------
 
 _DATA = "__DATA__"
-_ESCAPES = {ord(c): f"\\u{ord(c):04x}" for c in "<>&\u2028\u2029"}
 
 
 def render_page(manifest: Manifest) -> str:
     """The review page: one file that loads nothing, sends nothing and links to nothing.
 
-    The manifest goes in as JSON, in which those five characters occur only inside
-    strings, so escaping them changes no value and nothing in a name can end the script
+    The manifest goes in with :func:`escape_data`, so nothing in a name can end the script
     element it is in. The page writes every text with ``textContent``.
     """
     template = files(__package__).joinpath("review_page.html").read_text(encoding="utf-8")
     before, after = template.split(_DATA)  # exactly one, or this is another template
-    return before + _canonical(manifest._stored()).translate(_ESCAPES) + after
+    return before + escape_data(manifest._stored()) + after
 
 
 def load_answers(path: str | Path, manifest: Manifest) -> dict[tuple[int, int], Answer]:
@@ -1049,32 +998,6 @@ def read_answers(
     except ValueError as exc:
         raise PlanInvalid(f"{path}: {exc}") from None
     return out, hashlib.sha256(data).hexdigest()
-
-
-def _read_json(path: str | Path, what: str) -> Any:
-    return _json_of(_read_bytes(path, what), path, what)
-
-
-def _read_bytes(path: str | Path, what: str, *, limit: int | None = None) -> bytes:
-    try:
-        with Path(path).open("rb") as f:
-            data = f.read() if limit is None else f.read(limit + 1)
-    except OSError as exc:
-        raise PlanInvalid(f"{path}: cannot be read ({exc.strerror or exc})") from None
-    if limit is not None and len(data) > limit:
-        raise PlanInvalid(f"{path}: over {limit // 1_000_000} MB, which is no {what}")
-    return data
-
-
-def _json_of(data: bytes, path: str | Path, what: str) -> Any:
-    def no_number(text: str) -> None:
-        raise ValueError(f"{text} is not a number")
-
-    try:
-        return json.loads(data.decode("utf-8"), object_pairs_hook=_no_repeats,
-                          parse_constant=no_number)
-    except (ValueError, RecursionError) as exc:  # not JSON, not UTF-8, nested without end
-        raise PlanInvalid(f"{path}: not a readable {what} ({exc})") from None
 
 
 # -- the series as it is now, read live -----------------------------------------

@@ -694,6 +694,53 @@ def test_a_tile_off_the_grid_is_absent_and_not_asked_for(tmp_path, monkeypatch):
     assert r.reader.failed == set()
 
 
+def test_a_point_inside_a_region_the_catalogue_does_not_have_is_stale(tmp_path, monkeypatch):
+    """The map is newer than the catalogue. The point is not at sea, and the neighbour it is
+    given to is not where it is; all else about the answer stays as it was."""
+    net = _Tiles(monkeypatch)
+    net.at = {_home(): _tile(9)}
+    r = _resolver(tmp_path)
+    got = r.resolve_many([HERE])[HERE]
+    assert (got.method, got.region, got.stale) == ("unresolved", None, True)
+    assert r.from_tiles(*HERE, ring=0).stale and r.unknown_ids == {9}
+    net.at[_east()] = _tile(2)
+    got = _resolver(tmp_path / "b").resolve_many([HERE])[HERE]
+    assert (got.method, got.region, got.stale) == ("tile_nearest", 2, True)
+
+
+def test_a_point_that_is_inside_a_known_region_too_is_not_stale(tmp_path, monkeypatch):
+    net = _Tiles(monkeypatch)
+    net.at = {_home(): _tile(9), _east(): _tile(2, -4096, 0, 4096, 4096)}
+    got = _resolver(tmp_path).resolve_many([HERE])[HERE]
+    assert (got.method, got.region, got.stale) == ("tile_interior", 2, False)
+
+
+def test_a_point_beside_an_unknown_region_is_not_stale(tmp_path, monkeypatch):
+    net = _Tiles(monkeypatch)
+    net.at = {_home(): _tile(9, 3000, 0, 3400, 4096)}
+    got = _resolver(tmp_path).resolve_many([HERE])[HERE]
+    assert (got.method, got.stale) == ("unresolved", False)
+
+
+def test_a_point_whose_tile_was_not_read_is_not_stale(tmp_path, monkeypatch):
+    """It may be inside a region of the tile that did not arrive."""
+    net = _Tiles(monkeypatch)
+    net.at = {_home(): _tile(9), _east(): TimeoutError()}
+    got = _resolver(tmp_path).resolve_many([HERE])[HERE]
+    assert (got.method, got.stale) == ("tile_error", False)
+
+
+def test_a_saved_coordinate_map_says_nothing_of_stale(tmp_path):
+    from wanderfill.geo.resolve import Resolution, load_coord_map, save_coord_map
+
+    was = Resolution(1.0, 2.0, None, "unresolved")
+    assert was.stale is False
+    plain = save_coord_map(tmp_path / "a.json", {(1.0, 2.0): was}).read_bytes()
+    stale = Resolution(1.0, 2.0, None, "unresolved", stale=True)
+    assert save_coord_map(tmp_path / "b.json", {(1.0, 2.0): stale}).read_bytes() == plain
+    assert load_coord_map(tmp_path / "b.json")[1.0, 2.0] == was
+
+
 def test_a_region_measured_across_a_failed_tile_is_not_small(tmp_path, monkeypatch):
     """Half a region is a small region. Only a whole one may be exempted."""
     from wanderfill.geo.resolve import region_extent_km, small_regions

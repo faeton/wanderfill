@@ -100,6 +100,21 @@ def origin_of(importer: str | None) -> Origin:
     return "other"
 
 
+def zone_fits(zone: int | None, lon: float) -> bool:
+    """Whether a clock ``zone`` seconds ahead of UTC can be the local one at ``lon``.
+
+    At most four hours from the sun's, a day more or less apart being the same: the date
+    line is not at 180 for everybody. A clock that does not fit can date a photo on the day
+    before or after, so it dates nothing, and neither does one that was not recorded or is
+    in no zone there is. What it cannot see is a clock from just across the date line, which
+    shows the right hour of the wrong day.
+    """
+    if zone is None or not -12 * 3600 <= zone <= 14 * 3600:
+        return False
+    off = (zone - lon * 240 + 43200) % 86400 - 43200  # a degree is four minutes
+    return abs(off) <= 4 * 3600
+
+
 MINE = """
   a.ZLATITUDE BETWEEN -90 AND 90
   AND a.ZLONGITUDE BETWEEN -180 AND 180
@@ -177,7 +192,8 @@ SELECT a.ZUUID                                    AS uuid,
        a.ZKIND                                    AS kind,
        m.ZTITLE                                   AS place,
        {{importer}}                               AS importer,
-       a.ZDATECREATED + :epoch                    AS utc
+       a.ZDATECREATED + :epoch                    AS utc,
+       aa.ZTIMEZONEOFFSET                         AS zone
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
@@ -198,7 +214,9 @@ class PhotoAsset:
     ``taken`` is the clock where the photo was taken, and is what dates it. It does
     not order photos taken in different zones: over the date line the later photo
     can have the earlier clock. ``taken_utc`` is the same instant without the zone,
-    and is the one to sort by or to take a speed from.
+    and is the one to sort by or to take a speed from. ``zone`` is the seconds between
+    the two, and ``None`` where the library recorded none: ``taken`` is then UTC, which is
+    nobody's clock. Ask :func:`zone_fits` before believing the date.
     """
 
     uuid: str
@@ -214,6 +232,7 @@ class PhotoAsset:
     video: bool = False
     importer: str | None = None
     taken_utc: dt.datetime | None = None
+    zone: int | None = None
 
     @property
     def origin(self) -> Origin:
@@ -356,7 +375,7 @@ class PhotosAppSource:
         rows = self._read(ASSET_QUERY, self._bounds())
         for (
             uuid, ts, lat, lon, directory, filename,
-            original_name, capture_device, favorite, kind, place, importer, utc,
+            original_name, capture_device, favorite, kind, place, importer, utc, zone,
         ) in rows:
             yield PhotoAsset(
                 uuid=str(uuid),
@@ -379,6 +398,7 @@ class PhotosAppSource:
                 video=int(kind or 0) == 1,
                 importer=None if importer in (None, "") else str(importer),
                 taken_utc=dt.datetime.fromtimestamp(float(utc), dt.timezone.utc),
+                zone=int(zone) if isinstance(zone, (int, float)) else None,
             )
 
     def points(self) -> Iterator[DayPoint]:

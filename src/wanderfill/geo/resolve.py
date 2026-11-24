@@ -38,6 +38,9 @@ class Resolution:
     region: int | None
     method: Method
     distance_deg: float = 0.0
+    # Inside a polygon whose id the catalogue does not have, and inside none that it has:
+    # the map is newer than the catalogue, and ``region`` is at best a neighbour.
+    stale: bool = False
 
     @property
     def confident(self) -> bool:
@@ -132,12 +135,15 @@ class RegionResolver:
         failed. Otherwise one failed tile makes the answer ``tile_error``, even
         with a candidate in reach: the tile that did not arrive may hold the
         region the point is in.
+
+        A polygon whose id is not in the catalogue answers nothing, but a point inside
+        one is ``stale``, unless it is inside a known one too or a tile failed.
         """
         from shapely.geometry import Point
 
         pt = Point(lon, lat)
         best_id, best_dist = None, float("inf")
-        failed = False
+        failed = stale = False
         for x, y in neighbourhood(lat, lon, self.zoom, ring=ring):
             for props, geom in self.reader.shapes(self.layer, self.zoom, x, y):
                 rid = props.get("id") or props.get("region_id")
@@ -146,6 +152,7 @@ class RegionResolver:
                 rid = int(rid)
                 if rid not in self.catalogue:
                     self.unknown_ids.add(rid)
+                    stale = stale or geom.covers(pt)
                     continue
                 if geom.covers(pt):
                     return Resolution(lat, lon, rid, "tile_interior", 0.0)
@@ -156,8 +163,8 @@ class RegionResolver:
         if failed:
             return Resolution(lat, lon, None, "tile_error", 0.0)
         if best_id is not None and best_dist <= self.tolerance:
-            return Resolution(lat, lon, best_id, "tile_nearest", best_dist)
-        return Resolution(lat, lon, None, "unresolved", best_dist if best_id else 0.0)
+            return Resolution(lat, lon, best_id, "tile_nearest", best_dist, stale)
+        return Resolution(lat, lon, None, "unresolved", best_dist if best_id else 0.0, stale)
 
     def resolve(self, lat: float, lon: float, geocoded: dict | None = None) -> Resolution:
         """Full pipeline: trust the geocoder only when its answer still exists."""

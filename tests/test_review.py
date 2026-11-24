@@ -1064,6 +1064,37 @@ def test_a_manifest_comes_back_from_disk_as_it_was(tmp_path):
     assert Manifest.load(back.save(tmp_path / "n.json")) == m
 
 
+def test_the_hash_of_a_list_is_what_it_was():
+    """Answers on disk name it. Another hash for the same list is another list to them."""
+    m = manifest(EVERYTHING, coverage=COVERAGE | {"skipped": {12: 3}},
+                 left_out=LEFT_OUT | {"other_origin": 8})
+    assert m.sha256 == "ff0eeda787e2ba9703091ff737ea10a618e989a6bbf3ea0bebcd40a7506b8d49"
+
+
+def test_the_file_binding_is_one_module_for_both_lists():
+    from wanderfill.plan import manifest as shared
+
+    for name in ("canonical", "fields", "whole", "number", "text", "date", "read_json",
+                 "read_bytes", "json_of"):
+        assert getattr(review, f"_{name}") is getattr(shared, name), name
+    value = {"b": ["<x>&\u2028\u2029", 1.5], "a": "東"}
+    assert shared.canonical(value) == '{"a":"東","b":["<x>&\u2028\u2029",1.5]}'
+    assert shared.sha256_of(value) == hashlib.sha256(
+        shared.canonical(value).encode("utf-8")).hexdigest()
+    assert not set(shared.escape_data(value)) & set("<>&\u2028\u2029")
+    assert json.loads(shared.escape_data(value)) == value
+
+
+def test_a_shot_says_which_photo_it_is_and_by_what_clock():
+    assert [f.name for f in dataclasses.fields(Shot)][-2:] == ["uuid", "zone"]
+    assert shot(1.0, 1.0).uuid == "" and shot(1.0, 1.0).zone is None
+    one = dataclasses.replace(photo(10.0, 20.0, uuid="a"), zone=0)
+    two = dataclasses.replace(photo(10.0, 20.0, 60, uuid="b", zone=1), zone=3600)
+    three = photo(10.0, 20.0, uuid="c", timed=False)
+    assert [(s.uuid, s.zone) for s in grade_shots([three, two, one], ())] == [
+        ("a", 0), ("b", 3600), ("c", None)]
+
+
 def test_the_hash_is_of_the_canonical_json_of_all_but_created(tmp_path):
     m = manifest([candidate(1, name="東京")])
     stored = json.loads(m.save(tmp_path / "m.json").read_text(encoding="utf-8"))
