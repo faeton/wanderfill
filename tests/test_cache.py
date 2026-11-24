@@ -42,17 +42,11 @@ class _Resp:
 
 def test_requests_ask_for_gzip_and_inflate_it(monkeypatch):
     """The catalogue is 173 KB plain and 42 KB gzipped; urllib asks for neither by default."""
-    seen = {}
     payload = json.dumps({"result": "OK", "data": {"1": {"id": 1}}}).encode()
-
-    def fake_urlopen(req, timeout):
-        seen.update(req.headers)
-        return _Resp(gzip.compress(payload), "gzip")
-
-    monkeypatch.setattr(tr.urllib.request, "urlopen", fake_urlopen)
+    sent = wire(monkeypatch, gzip.compress(payload), encoding="gzip")
     t = tr.Transport(token="x" * 36, keep_alive=False)
     assert t.webapi("regions/get-regions-list-2")["data"] == {"1": {"id": 1}}
-    assert seen.get("Accept-encoding") == "gzip"
+    assert sent[0].headers.get("Accept-encoding") == "gzip"
     assert t.traffic.requests == 1 and t.traffic.wire_bytes == len(gzip.compress(payload))
 
 
@@ -84,7 +78,8 @@ def test_writes_still_get_exactly_one_attempt(monkeypatch):
 
 
 class _Conn(tr.http.client.HTTPSConnection):
-    """A stand-in for HTTPSConnection. ``script`` is what each request does.
+    """A stand-in for HTTPSConnection. ``script`` is what each request does: bytes
+    are a 200, a tuple is a status and a ``Location``, an exception is raised.
 
     A subclass because building an opener reads attributes off the class; every
     method that would touch a socket is replaced.
@@ -105,13 +100,14 @@ class _Conn(tr.http.client.HTTPSConnection):
         self._body = action
 
     def getresponse(self):
-        body = self._body
+        answer = self._body
+        code, where = answer if isinstance(answer, tuple) else (200, None)
 
         class R:
-            status, reason, headers = 200, "OK", {}
+            status, reason, headers = code, "OK", {"Location": where} if where else {}
 
             def read(self):
-                return body
+                return answer if code == 200 else b"<html>"
 
             def getheader(self, name):
                 return None
@@ -149,6 +145,35 @@ def test_a_read_on_a_connection_the_server_closed_goes_again_on_a_fresh_one(conn
     assert len(conns.made) == 2
 
 
+@pytest.mark.parametrize("answer", [(302, "http://portal.example/in?token=" + "x" * 36),
+                                    (307, "/login"), (301, None), (304, None)], ids=str)
+def test_a_redirect_on_a_kept_alive_read_is_not_followed(conns, answer):
+    """Its body came back as the answer, so a redirect read as broken JSON."""
+    from wanderfill.api.errors import TransportError
+
+    for read in (lambda t: t.webapi("maps/get-visited-regions-ids-simple"),
+                 lambda t: t.ajax_json("V2/", action="getData", id=1)):
+        conns.made, conns.script = [], [answer, b'{"ok":1}']
+        t = tr.Transport(token="x" * 36)
+        with pytest.raises(TransportError, match=str(answer[0])) as info:
+            read(t)
+        assert [len(c.sent) for c in conns.made] == [1], "not retried and not followed"
+        assert "xxx" not in str(info.value) and "?" not in str(info.value)
+        assert ("portal.example" in str(info.value)) == ("portal" in str(answer[1]))
+
+
+def test_a_redirected_read_through_a_proxy_is_not_followed(conns, monkeypatch):
+    """With a proxy configured reads go through urllib, which followed it, token and all."""
+    from wanderfill.api.errors import TransportError
+
+    monkeypatch.setattr(tr.urllib.request, "getproxies", lambda: {"https": "http://p:3128"})
+    monkeypatch.setattr(tr.urllib.request, "proxy_bypass", lambda host: False)
+    sent = wire(monkeypatch, (302, "http://portal.example/"), b"{}")
+    with pytest.raises(TransportError, match="portal"):
+        tr.Transport(token="x" * 36).webapi("maps/get-visited-regions-ids-simple")
+    assert len(sent) == 1 and conns.made == []
+
+
 def test_writes_never_use_the_kept_alive_connection(conns, monkeypatch):
     """A write sent down a connection the server already closed has an unknown
     outcome. Writes open their own, exactly as before."""
@@ -174,9 +199,7 @@ def test_a_request_is_tunnelled_through_the_configured_proxy(conns, monkeypatch,
 
 def test_a_configured_proxy_is_not_bypassed(conns, monkeypatch):
     monkeypatch.setattr(tr.urllib.request, "getproxies", lambda: {"https": "http://p:3128"})
-    opened = []
-    monkeypatch.setattr(tr.urllib.request, "urlopen",
-                        lambda req, timeout: opened.append(req) or _Resp(b"{}", None))
+    opened = wire(monkeypatch, b"{}")
     tr.Transport(token="x" * 36).webapi("maps/get-visited-regions-ids-simple")
     assert len(opened) == 1 and conns.made == []
 

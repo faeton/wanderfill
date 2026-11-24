@@ -27,7 +27,8 @@ Every API call is a `POST` with an `application/x-www-form-urlencoded` body.
 A bearer token from `localStorage.getItem('token')` on nomadmania.com, mirrored
 into a `token` cookie. Issued by `user/login`, valid for a year. After first
 login the password is never needed — which is convenient, and exactly why the
-token should be treated as one.
+token should be treated as one. The client follows no redirect with it: urllib
+would resend the `NMTOKEN` header to wherever the redirect points.
 
 ```
 NMTOKEN: <uuid>

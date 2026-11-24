@@ -684,7 +684,8 @@ At apply time:
   trips are made. The transport enforces this — writes get one attempt and raise
   `UnknownWriteOutcome`, which leaves the journal entry open on purpose so the
   next run refuses to start until a human has reconciled it. A
-  redirect (a write never follows one), a 5xx, a 408, a body that is not JSON
+  redirect (no request with the token follows one: a redirected write is an
+  unknown outcome, a redirected read an error), a 5xx, a 408, a body that is not JSON
   and a toggle that does not say `OK` are no answer either. Only a refusal
   closes an entry — ours before sending, or the server's own (401/403, another
   4xx, an `ERROR` body); any other exception, a bug in this package included,

@@ -109,22 +109,40 @@ def _inflate(raw: bytes, encoding: str | None = None) -> bytes:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Leave a 3xx as the answer it is: urllib then raises it as an HTTPError."""
+    """Leave a 3xx as the answer it is: urllib then raises it as an HTTPError.
 
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+    The handlers themselves are replaced, not ``redirect_request``: before urllib
+    gets to that it parses the new address, and quotes it in an error of its own.
+    """
+
+    def http_error_302(self, *args: Any) -> None:
         return None
 
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
-def _open_write(req: urllib.request.Request, timeout: float) -> Any:
-    """``urlopen`` for a write: the same handlers and proxies, no redirects.
 
-    urllib answers a redirected POST by sending a GET to the new address, and
-    that GET's reply would pass for the write's: an ``OK`` that is not, or a
-    captive portal's 403 read as "the server rejected the token". It would also
-    carry the token there. The opener is built per write, so it sees the
-    proxies configured now.
+def _open(req: urllib.request.Request, timeout: float) -> Any:
+    """``urlopen`` for a request with the token: the same handlers and proxies, no redirects.
+
+    urllib sends a redirected request's headers to wherever it points, another
+    host and plain HTTP included, and ``NMTOKEN`` is one of them. It also answers
+    a redirected POST by sending a GET, and that GET's reply would pass for a
+    write's: an ``OK`` that is not, or a captive portal's 403 read as "the server
+    rejected the token". The opener is built per request, so it sees the proxies
+    configured now, and nothing process-wide changes: tiles and avatars carry no
+    token and still follow.
     """
     return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
+def _redirect_host(url: str, location: str | None) -> str:
+    """Which host a redirect of ``url`` names; nothing else of the address is safe to print."""
+    if not location:
+        return "no address"
+    try:
+        return urllib.parse.urlsplit(urllib.parse.urljoin(url, location)).hostname or "no host"
+    except ValueError:
+        return "an address that cannot be read"
 
 
 @dataclass
@@ -192,7 +210,7 @@ class Transport:
                 if reused and not fresh:
                     continue
                 raise
-            if resp.status >= 400:
+            if resp.status >= 300:  # http.client never follows a redirect either
                 raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
             return raw, resp.getheader("Content-Encoding") or ""
         raise AssertionError("unreachable")
@@ -216,8 +234,12 @@ class Transport:
         without an answer from the server raises :class:`UnknownWriteOutcome`,
         because "it did not happen" is not something we know. A 5xx or a 408 is
         no answer either: it is usually a gateway giving up on a server that may
-        have committed. Nor is a redirect, which a write never follows. Only
-        the other 4xx are a refusal.
+        have committed. Nor is a redirect. Only the other 4xx are a refusal.
+
+        No request from here follows a redirect, on any path: each one carries
+        the token, in a header or in the body, and following would hand it to
+        whatever the redirect names. A read raises :class:`TransportError`
+        with the status and the host, and is not retried.
         """
         body = urllib.parse.urlencode(
             {k: v for k, v in fields.items() if v is not None}
@@ -244,14 +266,19 @@ class Transport:
                 if pooled:
                     raw, _ = self._read_pooled(url, body, all_headers)
                 else:
-                    opening = urllib.request.urlopen if idempotent else _open_write
-                    with opening(req, timeout=self.timeout) as resp:
+                    with _open(req, timeout=self.timeout) as resp:
                         raw = resp.read()
                 self.traffic.add(label, len(raw), time.monotonic() - started)
                 return _inflate(raw)
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
                     raise AuthError(f"server rejected the token ({exc.code})") from exc
+                if idempotent and 300 <= exc.code < 400:
+                    where = _redirect_host(url, exc.headers.get("Location"))
+                    raise TransportError(
+                        f"{url} answered {exc.code}, a redirect to {where}. It was not followed, "
+                        "because the request carries the token. A captive portal does this."
+                    ) from None
                 last = exc
             except Exception as exc:
                 last = exc

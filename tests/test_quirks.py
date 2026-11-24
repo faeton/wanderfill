@@ -658,9 +658,10 @@ def test_a_redirect_on_a_write_is_an_unknown_outcome(monkeypatch, answer):
         lambda t: t.ajax_text("my_series/", action="toggle", item=1, state=1, series=1),
     ):
         t, calls = _answering(monkeypatch, answer, b'{"result":"OK"}')
-        with pytest.raises(UnknownWriteOutcome):
+        with pytest.raises(UnknownWriteOutcome) as info:
             write(t)
         assert [c.get_method() for c in calls] == ["POST"]
+        assert "javascript" not in str(info.value), "urllib quotes such an address, query and all"
 
 
 @pytest.mark.parametrize("code", [401, 403])
@@ -674,10 +675,55 @@ def test_a_redirect_to_a_403_is_not_the_server_rejecting_the_token(monkeypatch, 
     assert len(calls) == 1
 
 
-def test_a_redirect_on_a_read_is_still_followed(monkeypatch):
-    t, calls = _answering(monkeypatch, (302, PORTAL), b'{"result":"OK","ids":[1]}')
+TOKEN = "x" * 36
+READS = {
+    "webapi": lambda t: t.webapi("maps/get-visited-regions-ids-simple"),
+    "legacy": lambda t: t.ajax_json("V2/", action="getData", type="seriesSingle", id=1),
+}
+
+
+@pytest.mark.parametrize("read", READS)
+@pytest.mark.parametrize("answer", [*REDIRECTS, (302, f"{PORTAL}?token={TOKEN}"),
+                                    (302, f"http://{TOKEN}@portal.example/{TOKEN}"),
+                                    (302, "http://[bad/"), (307, "/login")], ids=str)
+def test_a_redirect_on_a_read_is_not_followed(monkeypatch, answer, read):
+    """urllib forwards NMTOKEN with the redirected read: to another host, over plain HTTP.
+    It is a year-long full-power credential."""
+    from wanderfill.api.errors import TransportError
+
+    t, calls = _answering(monkeypatch, answer, b'{"result":"OK","ids":[1]}')
+    with pytest.raises(TransportError) as info:
+        READS[read](t)
+    (req,) = calls
+    assert (req.get_method(), req.type, req.host) == ("POST", "https", "nomadmania.com")
+    code, where = answer if isinstance(answer, tuple) else (answer, "")
+    said = str(info.value)
+    assert str(code) in said and TOKEN not in said and "token=" not in said
+    assert ("portal.example" in said) == ("portal.example" in where)
+    assert info.value.__cause__ is None and info.value.__suppress_context__, "nor in a traceback"
+
+
+def test_a_read_after_a_redirect_elsewhere_still_works(monkeypatch):
+    """The error is the answer to one request; the transport is not left broken."""
+    from wanderfill.api.errors import TransportError
+
+    t, _ = _answering(monkeypatch, (302, PORTAL), b'{"result":"OK","ids":[1]}')
+    with pytest.raises(TransportError):
+        t.webapi("maps/get-visited-regions-ids-simple")
     assert t.webapi("maps/get-visited-regions-ids-simple")["ids"] == [1]
-    assert [c.get_method() for c in calls] == ["POST", "GET"]
+
+
+def test_a_redirected_tile_is_still_followed(monkeypatch, tmp_path):
+    """Tiles carry no token, and the rule must not become a process-wide opener."""
+    from wanderfill.geo.tiles import TileReader
+
+    t, _ = _answering(monkeypatch, (302, PORTAL), b"a tile")
+    with pytest.raises(Exception, match="302"):
+        t.webapi("maps/get-visited-regions-ids-simple")
+    sent = wire(monkeypatch, (302, "https://maps.example/tile"), b"a tile")
+    assert TileReader(tmp_path)._fetch("regions", 10, 1, 1) == b"a tile"
+    assert [r.host for r in sent][1:] == ["maps.example"]
+    assert all("Nmtoken" not in r.headers for r in sent)
 
 
 @pytest.mark.parametrize("answers", [((307, PORTAL),), ((303, PORTAL), 403)], ids=str)

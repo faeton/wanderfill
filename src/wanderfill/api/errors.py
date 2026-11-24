@@ -50,9 +50,11 @@ class UnreadableAnswer(WanderfillError, ValueError):
 
 
 class TransportError(WanderfillError):
-    """A write the server refused with a 4xx, or a read that failed every attempt.
+    """A write the server refused with a 4xx, or a read that got no answer.
 
-    Never a write whose outcome is in doubt: that is :class:`UnknownWriteOutcome`.
+    A read that failed every attempt, or was redirected: no request follows a
+    redirect, since each carries the token. Never a write whose outcome is in
+    doubt: that is :class:`UnknownWriteOutcome`.
     """
 
 
