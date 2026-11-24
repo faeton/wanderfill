@@ -1980,6 +1980,172 @@ def test_a_write_that_does_not_take_is_held_and_one_that_another_tab_changed_is_
     assert got[1] == 3
 
 
+NO_TEXT = ["undefined", "false", "0", "({})", "['y']", "new String('y')"]
+
+
+@needs_node
+@pytest.mark.parametrize("value", NO_TEXT)
+def test_a_read_after_a_press_that_is_no_text_holds_the_press(tmp_path, value):
+    """The write went through, and then nothing could be read: it is not known to be stored."""
+    m = manifest(EVERYTHING)
+    (two,) = stored(m, "22:2")
+    got = run(tmp_path, m, f"const two = {json.dumps(two)}, odd = () => {value};" + """
+      const storage = new Storage();
+      const p = open({storage});
+      p.openAll();
+      let n = 0;
+      storage.getItem = function (k) {
+        n += 1;
+        return n === 1 ? Storage.prototype.getItem.call(this, k) : odd();
+      };
+      p.press(p.item("Object 2"), "I was there");
+      const during = [p.pressed(), p.byId.kept.textContent.includes("not being kept"), n];
+      delete storage.getItem;
+      storage.held.set(two, "n");
+      p.tell("storage", {});
+      p.byId.download.click();
+      return [...during, JSON.parse(p.blobs[0].text).answers];
+    """)
+    assert got == [["I was there"], True, 2, {"22:2": "y"}]
+
+
+@needs_node
+@pytest.mark.parametrize("value", NO_TEXT)
+@pytest.mark.parametrize("odd_reads", [[1], [2], [1, 2]], ids=str)
+def test_a_clear_that_did_nothing_and_cannot_be_read_back_stays_cleared(
+        tmp_path, value, odd_reads):
+    """Before the write, after it, or both."""
+    m = manifest(EVERYTHING)
+    (two,) = stored(m, "22:2")
+    given = f"const two = {json.dumps(two)}, odd = () => {value}, odds = {odd_reads};"
+    got = run(tmp_path, m, given + """
+      const storage = new Storage();
+      storage.held.set(two, "y");
+      const p = open({storage});
+      p.openAll();
+      let n = 0;
+      storage.removeItem = () => {};
+      storage.getItem = function (k) {
+        n += 1;
+        return odds.includes(n) ? odd() : Storage.prototype.getItem.call(this, k);
+      };
+      const before = p.pressed();
+      p.press(p.item("Object 2"), "Clear this answer");
+      const out = [before];
+      const note = () => {
+        p.tell("storage", {});
+        p.byId.download.click();
+        out.push([p.pressed(), JSON.parse(p.blobs[p.blobs.length - 1].text).answers,
+                  p.byId.kept.textContent.includes("not being kept"), p.byId.unused.hidden]);
+      };
+      note();
+      delete storage.getItem; /* as it was, with the old answer still in it */
+      note();
+      delete storage.removeItem;
+      p.press(p.item("Object 2"), "Clear this answer");
+      note();
+      return [...out, storage.held.size];
+    """)
+    assert got == [["I was there"], [[], {}, True, True], [[], {}, True, True],
+                   [[], {}, False, True], 0]
+
+
+@needs_node
+@pytest.mark.parametrize("value", NO_TEXT)
+def test_a_pull_that_reads_no_text_keeps_what_was_read_before(tmp_path, value):
+    m = manifest(EVERYTHING)
+    (two, three) = stored(m, "22:2", "22:3")
+    given = f"const [two, three] = {json.dumps([two, three])}, odd = () => {value};"
+    got = run(tmp_path, m, given + """
+      const storage = new Storage();
+      storage.held.set(two, "y");
+      storage.held.set(three, "n");
+      const p = open({storage});
+      p.openAll();
+      storage.getItem = odd;
+      const out = [];
+      const note = () => {
+        p.tell("storage", {});
+        out.push([p.pressed(), p.byId.kept.textContent.includes("not being kept"),
+                  p.byId.unused.hidden]);
+      };
+      note();
+      delete storage.getItem;
+      storage.held.delete(two);
+      note();
+      return out;
+    """)
+    assert got == [[["I was there", "I was not there"], True, True],
+                   [["I was not there"], False, True]]
+
+
+@needs_node
+@pytest.mark.parametrize("press,later", [
+    ("Clear this answer", "older than this page"), (None, None),
+])
+def test_the_note_after_a_copy_is_about_what_was_copied(tmp_path, press, later):
+    """The browser takes its time, and the owner answers on."""
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, f"const word = {json.dumps(press)};" + """
+      let text = null, done = null;
+      const clipboard = {writeText: (t) => new Promise((ok) => { text = t; done = ok; })};
+      const p = open({clipboard});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      p.press(p.item("Object 3"), "I was there");
+      p.byId.copy.click();
+      const early = p.byId.said.textContent;
+      if (word) p.press(p.item("Object 2"), word);
+      done();
+      await null; await null; await null;
+      return [early, text, p.byId.said.textContent, p.byId.counts.textContent];
+    """)
+    assert got[0] == ""  # nothing is said to be copied before it is
+    assert load_answers(answers_file(tmp_path, got[1]), m) == {(22, 2): "y", (22, 3): "y"}
+    assert "Copied" in got[2] and "2 answers in it. 4 items" in got[2]
+    if later:
+        assert later in got[2] and "1 there" in got[3]
+    else:
+        assert "older" not in got[2] and "2 there" in got[3]
+
+
+@needs_node
+def test_a_copy_that_is_changed_and_changed_back_is_not_older(tmp_path):
+    got = run(tmp_path, manifest(EVERYTHING), """
+      let done = null;
+      const clipboard = {writeText: () => new Promise((ok) => { done = ok; })};
+      const p = open({clipboard});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      p.byId.copy.click();
+      p.press(p.item("Object 2"), "I was not there");
+      p.press(p.item("Object 2"), "I was there");
+      done();
+      await null; await null; await null;
+      return p.byId.said.textContent;
+    """)
+    assert "Copied" in got and "older" not in got and "1 answer in it" in got
+
+
+@needs_node
+def test_a_copy_refused_late_shows_the_answers_as_they_are_then(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      let refuse = null;
+      const clipboard = {writeText: () => new Promise((_, no) => { refuse = no; })};
+      const p = open({clipboard});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      p.byId.copy.click();
+      p.press(p.item("Object 2"), "Clear this answer");
+      refuse(new Error("no"));
+      await null; await null; await null;
+      return [p.byId.text.hidden, p.byId.text.value, p.byId.said.textContent];
+    """)
+    assert got[0] is False and load_answers(answers_file(tmp_path, got[1]), m) == {}
+    assert "0 answers in it" in got[2]
+
+
 @needs_node
 def test_a_store_takes_only_items_and_answers(tmp_path):
     m = manifest(EVERYTHING)

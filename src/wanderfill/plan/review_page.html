@@ -207,6 +207,14 @@ const Review = (() => {
     const unused = new Set(); /* stored, and no answer */
     let readable = true;
 
+    /* Text or null. Anything else is a storage that is not there, and as "nothing stored" it
+       would let go of a clear that was never made. */
+    function read(key) {
+      const text = where().getItem(nameOf(key));
+      if (text !== null && typeof text !== "string") throw new Error("not a stored value");
+      return text;
+    }
+
     function take(key, text) {
       const good = VALUES.includes(text);
       if (good) answers.set(key, text);
@@ -225,7 +233,7 @@ const Review = (() => {
       for (const key of known) {
         if (held.has(key)) continue;
         try {
-          take(key, where().getItem(nameOf(key)));
+          take(key, read(key));
         } catch {
           readable = false; /* what was read before stays */
         }
@@ -236,11 +244,10 @@ const Review = (() => {
       if (!known.has(key) || !(value === "" || VALUES.includes(value))) return;
       const wanted = value === "" ? null : value;
       try {
-        const storage = where();
-        const was = storage.getItem(nameOf(key));
-        if (wanted === null) storage.removeItem(nameOf(key));
-        else storage.setItem(nameOf(key), wanted);
-        const now = storage.getItem(nameOf(key));
+        const was = read(key);
+        if (wanted === null) where().removeItem(nameOf(key));
+        else where().setItem(nameOf(key), wanted);
+        const now = read(key);
         if (now !== wanted && now === was) {
           hold(key, value);
         } else {
@@ -636,13 +643,20 @@ const Review = (() => {
   /* What is shown is what is exported: another tab's answers are drawn before they go out. */
   function ready() {
     refresh();
-    return Review.exportText(data, store.answers());
+    return exported();
   }
 
-  const say = (text) => put("said", text + " " + Review.exportNote(data, store.answers()));
+  /* The text, and what is said of that text whatever is answered after it was taken. */
+  const exported = () => ({
+    text: Review.exportText(data, store.answers()),
+    note: Review.exportNote(data, store.answers()),
+  });
+
+  const say = (text, note) => put("said", text + " " + note);
 
   function download() {
-    const url = URL.createObjectURL(new Blob([ready()], { type: "application/json" }));
+    const { text, note } = ready();
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
     const a = el("a");
     a.hidden = true;
     a.setAttribute("href", url);
@@ -651,26 +665,29 @@ const Review = (() => {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000); /* some browsers read it after the click */
-    say("The file is " + Review.FILE + ". If none was saved, copy the answers instead.");
+    say("The file is " + Review.FILE + ". If none was saved, copy the answers instead.", note);
   }
 
   function showText() {
+    const { text, note } = ready();
     $("text").hidden = false;
-    $("text").value = ready();
+    $("text").value = text;
     $("text").focus();
     $("text").select();
-    say("Copy all of the text below into a file named " + Review.FILE + ".");
+    say("Copy all of the text below into a file named " + Review.FILE + ".", note);
   }
 
   async function copy() {
-    const text = ready();
+    const { text, note } = ready();
     try {
       await navigator.clipboard.writeText(text);
     } catch {
       showText();
       return;
     }
-    say("Copied. Paste it into a file named " + Review.FILE + ".");
+    say("Copied. Paste it into a file named " + Review.FILE + ".", note + (
+      exported().text === text ? "" :
+        " It is older than this page: the answers have changed, so copy them again."));
   }
 
   const stop = Review.incomplete(data);

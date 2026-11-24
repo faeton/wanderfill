@@ -176,6 +176,8 @@ function open({ storage = new Storage(), clipboard = "ok", observer = true } = {
     navigator:
       clipboard === "absent"
         ? {}
+        : typeof clipboard === "object"
+        ? { clipboard }
         : {
             clipboard: {
               writeText: async (text) => {
