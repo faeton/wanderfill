@@ -27,6 +27,9 @@ tiles/
 evidence/
 coords.json
 
+# `series review` writes a page of coordinates and dates from your own photos.
+review/
+
 # `share` writes cards with your name and face on them. Post them yourself.
 share/
 

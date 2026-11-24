@@ -19,7 +19,11 @@ A photo has four ways of not being one:
 
 Everything is a function of its arguments: photos, tiles and ticked lists in,
 candidates out, in one order whatever order the photos came in. Nothing is cached,
-and nothing here can write.
+and nothing here can write to the profile.
+
+A :class:`Manifest` is one such list with everything said beside it. The owner answers
+it on a local page, and the answers name its hash, so that they are never read as
+answers to another list.
 
 Objects that no photo is near do not leave this module, not as a list and not as
 the nearest one: a page that shows them has proposed them.
@@ -28,18 +32,20 @@ the nearest one: a page that shows them has proposed them.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+from importlib.resources import files
 from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal, get_args
 
 from ..api.errors import PlanInvalid
 from ..geo.tiles import SeriesPoint, haversine_km, neighbourhood
-from ..sources.photos_app import Origin, PhotoAsset
+from ..sources.photos_app import ORIGINS, Origin, PhotoAsset
 from .model import _r, parse_when
 from .series import AIRPORT_SERIES
 
@@ -293,6 +299,9 @@ def _shot(a: PhotoAsset, kind: Kind, spans: Sequence[Span], until: dt.date | Non
     return Shot(a.taken, a.taken_utc, a.lat, a.lon, a.origin, kind, use, late)
 
 
+_LEFT_OUT = ("fast", "conflict", "span_none", "span_airports", "after_until", "no_utc")
+
+
 def left_out(shots: Iterable[Shot]) -> dict[str, int]:
     """How many of these photos are no proof, by reason, for the page to say.
 
@@ -301,9 +310,7 @@ def left_out(shots: Iterable[Shot]) -> dict[str, int]:
     is left out of every series but the airports. Every reason is always there. A
     photo of another origin was never read, so counting those is the caller's.
     """
-    out = dict.fromkeys(
-        ("fast", "conflict", "span_none", "span_airports", "after_until", "no_utc"), 0
-    )
+    out = dict.fromkeys(_LEFT_OUT, 0)
     for s in shots:
         if s.taken_utc is None:
             out["no_utc"] += 1
@@ -596,11 +603,405 @@ def recall(
     return out
 
 
+# -- what the owner was shown --------------------------------------------------
+
+FORMAT = 1
+ANSWERS_FORMAT = 1
+MAX_ANSWERS_BYTES = 5_000_000
+
+Answer = Literal["y", "n", "q"]
+
+_PARAMS = ("since", "until", "radius_km", "origins", "skip", "speeds")
+_SPEEDS = ("fast_kmh", "min_leg_km", "impossible_kmh", "impossible_km", "burst_minutes")
+_RECALL = ("ticked", "located", "found", "no_photo")
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """One list of questions, with everything the owner was told beside it.
+
+    ``sha256`` is what an answer is bound to. It is of the canonical JSON of all the
+    fields but ``created``: the parameters, the coverage and the counts are part of the
+    question, and a list rebuilt with nothing changed is the same list.
+
+    ``params`` has ``since``, ``until`` (a date or ``None``), ``radius_km``, ``origins``,
+    ``skip`` and ``speeds``, the arguments of :func:`grade_shots` by name. ``coverage``
+    has ``tiles_read``, ``tiles_unread`` and ``recall``, which is what :func:`recall`
+    returns, where a row may also have a ``name``; and may have ``skipped``, from
+    :func:`count_skipped`. ``left_out`` is what :func:`left_out` returns, and may have
+    ``other_origin``, the photos that were not read.
+
+    Everything is checked here and put into the one form that is hashed, saved, loaded
+    and shown: ids as text where they are keys, times as ISO text with no zone, sets
+    sorted, coordinates to 5 decimals and distances to 3, so that no hash hangs on the
+    last bit of a float. What does not fit raises :class:`PlanInvalid`.
+    """
+
+    account: int
+    created: str
+    params: dict
+    coverage: dict
+    left_out: dict
+    candidates: list[Candidate]
+    format: int = FORMAT
+
+    def __post_init__(self) -> None:
+        try:
+            if type(self.format) is not int or self.format != FORMAT:
+                raise ValueError(f"format {_r(self.format)} is not {FORMAT}, the one this reads")
+            _whole(self.account, "account")
+            if not isinstance(self.candidates, (list, tuple)):
+                raise ValueError(f"candidates must be a list, not {_r(self.candidates)}")
+            clean = {
+                "created": _text(self.created, "created"),
+                "params": _params_of(self.params),
+                "coverage": _coverage_of(self.coverage),
+                "left_out": _left_out_of(self.left_out),
+                "candidates": [_candidate_of(_row_of(c), f"candidates[{i}]")
+                               for i, c in enumerate(self.candidates)],
+            }
+            seen: set[str] = set()
+            for c in clean["candidates"]:
+                if (key := _key(c)) in seen:  # one answer would stand for two questions
+                    raise ValueError(f"candidates: {key} is there twice")
+                seen.add(key)
+        except ValueError as exc:
+            raise PlanInvalid(str(exc)) from None
+        for name, value in clean.items():
+            object.__setattr__(self, name, value)
+
+    def _content(self) -> dict:
+        return {
+            "format": self.format, "account": self.account, "params": self.params,
+            "coverage": self.coverage, "left_out": self.left_out,
+            "candidates": [_row_of(c) for c in self.candidates],
+        }
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(_canonical(self._content()).encode("utf-8")).hexdigest()
+
+    def _stored(self) -> dict:
+        """The file, and the page's data: the content, and what is not hashed beside it."""
+        return {"sha256": self.sha256, "created": self.created, **self._content()}
+
+    def save(self, path: str | Path) -> Path:
+        p = Path(path)
+        p.write_text(json.dumps(self._stored(), indent=1, ensure_ascii=False, allow_nan=False),
+                     encoding="utf-8")
+        return p
+
+    @classmethod
+    def load(cls, path: str | Path) -> Manifest:
+        """Read what :meth:`save` wrote, or :class:`PlanInvalid` saying what is wrong with it.
+
+        Anything else is refused, a number spelt another way included: the list on disk
+        is the one the owner answered, or it is not.
+        """
+        raw = _read_json(path, "manifest")
+        try:
+            if not isinstance(raw, dict):
+                raise ValueError(f"a manifest is a JSON object, not {type(raw).__name__}")
+            # First, because a later format may have other fields and another hash.
+            if "format" in raw and (type(raw["format"]) is not int or raw["format"] != FORMAT):
+                raise ValueError(f"format {_r(raw['format'])} is not {FORMAT}, the one this reads")
+            _fields(raw, ("sha256", "created", "format", "account", "params", "coverage",
+                          "left_out", "candidates"), "the manifest")
+            rows = raw["candidates"]
+            if not isinstance(rows, list):
+                raise ValueError(f"candidates must be a list, not {_r(rows)}")
+            rest = {k: v for k, v in raw.items() if k not in ("sha256", "candidates")}
+            m = cls(**rest, candidates=[_candidate_of(row, f"candidates[{i}]")
+                                        for i, row in enumerate(rows)])
+            if _canonical(raw) != _canonical(m._stored()):
+                raise ValueError("its content is not what its sha256 was taken of; it was changed "
+                                 "after it was written, so build the list again")
+        except ValueError as exc:
+            raise PlanInvalid(f"{path}: {exc}") from None
+        return m
+
+
+def _canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
+
+
+def _key(c: Candidate) -> str:
+    """A candidate's name in the answers file, and in the page."""
+    return f"{c.series}:{c.item}"
+
+
+def _row_of(c: object) -> dict:
+    """A candidate as JSON has it. Checks nothing; :func:`_candidate_of` does."""
+    if not isinstance(c, Candidate):
+        raise PlanInvalid(f"candidates: {_r(c)} is not a candidate")
+    row = {f.name: getattr(c, f.name) for f in fields(c)}
+    if isinstance(c.at, dt.datetime):
+        row["at"] = c.at.isoformat()
+    if isinstance(c.origins, tuple):
+        row["origins"] = sorted(c.origins, key=str)
+    return row
+
+
+def _candidate_of(row: object, what: str) -> Candidate:
+    """The one reading of a candidate, whichever way it came in."""
+    _fields(row, [f.name for f in fields(Candidate)], what)
+    out = {}
+    for name in ("series", "item"):
+        out[name] = _whole(row[name], f"{what}.{name}")
+    for name in ("series_name", "name"):
+        out[name] = _text(row[name], f"{what}.{name}")
+    # Adding 0.0 makes -0.0 the zero it is.
+    out["lat"] = round(_number(row["lat"], f"{what}.lat", low=-90.0, high=90.0), 5) + 0.0
+    lon = round(_number(row["lon"], f"{what}.lon", low=-360.0, high=360.0), 5)
+    out["lon"] = round(_lon(lon), 5)  # a tile's edge reaches past the antimeridian
+    out["km"] = round(_number(row["km"], f"{what}.km"), 3)
+    out["at"] = _at(row["at"], f"{what}.at")
+    for name in ("photos", "days"):
+        out[name] = _whole(row[name], f"{what}.{name}", low=1)
+    if out["days"] > out["photos"]:
+        raise ValueError(f"{what}.days: {out['days']} days of {out['photos']} photos")
+    out["origins"] = tuple(_origins(row["origins"], f"{what}.origins"))
+    out["fast_near"] = _whole(row["fast_near"], f"{what}.fast_near", low=0)
+    for name in ("conflict", "thin", "one_spot"):
+        if type(row[name]) is not bool:
+            raise ValueError(f"{what}.{name} must be true or false, not {_r(row[name])}")
+        out[name] = row[name]
+    return Candidate(**out)
+
+
+def _params_of(raw: object) -> dict:
+    _fields(raw, _PARAMS, "params")
+    speeds = raw["speeds"]
+    _fields(speeds, _SPEEDS, "params.speeds")
+    return {
+        "since": _date(raw["since"], "params.since"),
+        "until": None if raw["until"] is None else _date(raw["until"], "params.until"),
+        "radius_km": _number(raw["radius_km"], "params.radius_km"),
+        "origins": _origins(raw["origins"], "params.origins"),
+        "skip": _whole_list(raw["skip"], "params.skip"),
+        "speeds": {k: _number(speeds[k], f"params.speeds.{k}") for k in _SPEEDS},
+    }
+
+
+def _coverage_of(raw: object) -> dict:
+    _fields(raw, ("tiles_read", "tiles_unread", "recall"), "coverage", ("skipped",))
+    out = {name: _whole(raw[name], f"coverage.{name}", low=0)
+           for name in ("tiles_read", "tiles_unread")}
+    out["recall"] = {series: _recall_of(row, f"coverage.recall[{series}]")
+                     for series, row in _by_id(raw["recall"], "coverage.recall").items()}
+    if "skipped" in raw:
+        out["skipped"] = {series: _whole(n, f"coverage.skipped[{series}]", low=0) for series, n
+                          in _by_id(raw["skipped"], "coverage.skipped").items()}
+    return out
+
+
+def _recall_of(row: object, what: str) -> dict:
+    _fields(row, _RECALL, what, ("name",))
+    if not isinstance(row["found"], Mapping):
+        raise ValueError(f"{what}.found must be an object, not {_r(row['found'])}")
+    found: dict[str, int] = {}
+    for radius, n in row["found"].items():
+        km = radius
+        if isinstance(radius, str):
+            try:
+                km = float(radius)
+            except ValueError:
+                pass
+        key = str(_number(km, f"{what}.found, a radius"))
+        if key in found or (isinstance(radius, str) and radius != key):
+            raise ValueError(f"{what}.found: {_r(radius)} is not a radius, or is there twice")
+        found[key] = _whole(n, f"{what}.found[{key}]", low=0)
+    out = {name: _whole(row[name], f"{what}.{name}", low=0) for name in ("ticked", "located")}
+    out |= {"found": found, "no_photo": _whole_list(row["no_photo"], f"{what}.no_photo")}
+    if "name" in row:
+        out["name"] = _text(row["name"], f"{what}.name")
+    return out
+
+
+def _left_out_of(raw: object) -> dict:
+    _fields(raw, _LEFT_OUT, "left_out", ("other_origin",))
+    return {name: _whole(n, f"left_out.{name}", low=0) for name, n in raw.items()}
+
+
+def _fields(row: object, wanted: Sequence[str], what: str, optional: Sequence[str] = ()) -> None:
+    if not isinstance(row, Mapping):
+        raise ValueError(f"{what} must be an object, not {_r(row)}")
+    for name in wanted:
+        if name not in row:
+            raise ValueError(f"{what} has no {name!r}")
+    for name in row:
+        if name not in wanted and name not in optional:
+            raise ValueError(f"{what} has a field {_r(name)}, which this version does not know")
+
+
+def _whole(value: object, what: str, *, low: int | None = None) -> int:
+    # Within what JavaScript counts exactly: the page reads ids and writes them back.
+    if type(value) is not int or abs(value) >= 2**53 or (low is not None and value < low):
+        least = "" if low is None else f" of {low} or more"
+        raise ValueError(f"{what} must be a whole number{least}, not {_r(value)}")
+    return value
+
+
+def _number(value: object, what: str, *, low: float = 0.0, high: float = math.inf) -> float:
+    if type(value) in (int, float):
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf
+        if math.isfinite(number) and low <= number <= high:
+            return number + 0.0
+    raise ValueError(f"{what} must be a number from {low:g} to {high:g}, not {_r(value)}")
+
+
+def _text(value: object, what: str) -> str:
+    """``value`` with what UTF-8 cannot hold replaced: half a surrogate pair is no reason
+    to refuse a list, and would be one to the file and to the hash."""
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be text, not {_r(value)}")
+    return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def _date(value: object, what: str) -> str:
+    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+        return value.isoformat()
+    try:
+        day = parse_when(value)
+    except ValueError as exc:
+        raise ValueError(f"{what}: {exc}") from None
+    if not isinstance(day, dt.date):
+        raise ValueError(f"{what}: {_r(value)} is not YYYY-MM-DD")
+    return day.isoformat()
+
+
+def _at(value: object, what: str) -> dt.datetime:
+    """A photo's own clock, which has no zone, in the one spelling it is hashed in."""
+    try:
+        at = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        at = None
+    if at is None or at.tzinfo is not None or at.isoformat() != value:
+        raise ValueError(f"{what} must be YYYY-MM-DDTHH:MM:SS with no zone, not {_r(value)}")
+    return at
+
+
+def _listed(value: object, what: str) -> list:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError(f"{what} must be a list, not {_r(value)}")
+    return list(value)
+
+
+def _origins(value: object, what: str) -> list[str]:
+    out = _listed(value, what)
+    if not out or any(not isinstance(o, str) or o not in ORIGINS for o in out):
+        raise ValueError(f"{what} must be some of {', '.join(sorted(ORIGINS))}, not {_r(value)}")
+    if len(set(out)) != len(out):
+        raise ValueError(f"{what}: {_r(value)} has one twice")
+    return sorted(out)
+
+
+def _whole_list(value: object, what: str) -> list[int]:
+    out = [_whole(v, what) for v in _listed(value, what)]
+    if len(set(out)) != len(out):
+        raise ValueError(f"{what}: {_r(value)} has one twice")
+    return sorted(out)
+
+
+def _by_id(value: object, what: str) -> dict[str, Any]:
+    """An object keyed by id, its keys as JSON has them."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{what} must be an object, not {_r(value)}")
+    out: dict[str, Any] = {}
+    for key, v in value.items():
+        try:
+            number = int(key) if isinstance(key, str) else key
+        except ValueError:
+            number = None
+        name = str(_whole(number, f"{what}, the id {_r(key)}"))
+        if name in out or (isinstance(key, str) and key != name):
+            raise ValueError(f"{what}: {_r(key)} is not an id, or is there twice")
+        out[name] = v
+    return out
+
+
+# -- the page, and what came back from it --------------------------------------
+
+_DATA = "__DATA__"
+_ESCAPES = {ord(c): f"\\u{ord(c):04x}" for c in "<>&\u2028\u2029"}
+
+
+def render_page(manifest: Manifest) -> str:
+    """The review page: one file that loads nothing, sends nothing and links to nothing.
+
+    The manifest goes in as JSON, in which those five characters occur only inside
+    strings, so escaping them changes no value and nothing in a name can end the script
+    element it is in. The page writes every text with ``textContent``.
+    """
+    template = files(__package__).joinpath("review_page.html").read_text(encoding="utf-8")
+    before, after = template.split(_DATA)  # exactly one, or this is another template
+    return before + _canonical(manifest._stored()).translate(_ESCAPES) + after
+
+
+def load_answers(path: str | Path, manifest: Manifest) -> dict[tuple[int, int], Answer]:
+    """What the owner answered about ``manifest``, by ``(series, item)``.
+
+    An item that is not in the file was not answered, and is not here: blank never
+    becomes "no". A file that answers another list, or is for another account, or holds
+    anything the page does not write, raises :class:`PlanInvalid`.
+    """
+    raw = _read_json(path, "answers file", limit=MAX_ANSWERS_BYTES)
+    known = {_key(c): (c.series, c.item) for c in manifest.candidates}
+    try:
+        _fields(raw, ("format", "account", "manifest", "answers"), "the answers file")
+        if type(raw["format"]) is not int or raw["format"] != ANSWERS_FORMAT:
+            raise ValueError(f"format {_r(raw['format'])} is not {ANSWERS_FORMAT}, "
+                             "the one this reads")
+        if type(raw["account"]) is not int or raw["account"] != manifest.account:
+            raise ValueError(f"these are answers for account {_r(raw['account'])}, and the list "
+                             f"is for account {manifest.account}")
+        if raw["manifest"] != manifest.sha256:
+            raise ValueError("these are answers to another list than this one; open the page that "
+                             "was made with this list, and answer that")
+        answers = raw["answers"]
+        if not isinstance(answers, dict):
+            raise ValueError(f"answers must be an object, not {_r(answers)}")
+        out: dict[tuple[int, int], Answer] = {}
+        for key, value in answers.items():
+            if key not in known:
+                raise ValueError(f"answers: {_r(key)} is not on this list")
+            if not isinstance(value, str) or value not in get_args(Answer):
+                raise ValueError(f"answers: {key} must be one of {', '.join(get_args(Answer))}, "
+                                 f"not {_r(value)}")
+            out[known[key]] = value
+    except ValueError as exc:
+        raise PlanInvalid(f"{path}: {exc}") from None
+    return out
+
+
+def _read_json(path: str | Path, what: str, *, limit: int | None = None) -> Any:
+    def no_number(text: str) -> None:
+        raise ValueError(f"{text} is not a number")
+
+    try:
+        with Path(path).open("rb") as f:
+            data = f.read() if limit is None else f.read(limit + 1)
+    except OSError as exc:
+        raise PlanInvalid(f"{path}: cannot be read ({exc.strerror or exc})") from None
+    if limit is not None and len(data) > limit:
+        raise PlanInvalid(f"{path}: over {limit // 1_000_000} MB, which is no {what}")
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_no_repeats,
+                          parse_constant=no_number)
+    except (ValueError, RecursionError) as exc:  # not JSON, not UTF-8, nested without end
+        raise PlanInvalid(f"{path}: not a readable {what} ({exc})") from None
+
+
 __all__ = [
     "RADIUS_KM",
     "SKIP_SERIES",
     "THIN_KM",
     "Candidate",
+    "Manifest",
     "SeriesInfo",
     "Shot",
     "Span",
@@ -609,6 +1010,8 @@ __all__ = [
     "grade_shots",
     "harvest",
     "left_out",
+    "load_answers",
     "load_spans",
     "recall",
+    "render_page",
 ]

@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Series review</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --back: #fafaf8; --card: #ffffff; --ink: #1c1c1a; --soft: #5b5b55; --line: #d5d5ce;
+  --accent: #0b5c8a; --on-accent: #ffffff;
+  --warn-back: #fff1d6; --warn-ink: #6b3d00; --stop-back: #a3180f; --stop-ink: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --back: #161614; --card: #21211e; --ink: #ecece6; --soft: #a8a89f; --line: #41413b;
+    --accent: #7cc3ee; --on-accent: #08222f;
+    --warn-back: #3b2c0c; --warn-ink: #ffd890; --stop-back: #ffb4ab; --stop-ink: #45070a;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-padding-bottom: 11rem; }
+body {
+  margin: 0; padding: 0 1rem 12rem; background: var(--back); color: var(--ink);
+  font: 16px/1.5 system-ui, sans-serif; overflow-wrap: anywhere;
+}
+main { max-width: 46rem; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 1.25rem 0 0.5rem; }
+h2 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+h3 { font-size: 1rem; margin: 1rem 0 0.5rem; unicode-bidi: isolate; }
+p, ul, dl { margin: 0.5rem 0; }
+ul { padding-left: 1.25rem; }
+.stop {
+  margin: 0 -1rem; padding: 0.9rem 1rem; background: var(--stop-back); color: var(--stop-ink);
+  font-weight: 600;
+}
+.note { border-left: 4px solid var(--accent); padding: 0.25rem 0 0.25rem 0.9rem; }
+.soft { color: var(--soft); }
+.wide { overflow-x: auto; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; border-bottom: 1px solid var(--line); }
+.filters { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.filters label { flex: 1 1 10rem; font-size: 0.9rem; }
+select, button, textarea {
+  font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line);
+  border-radius: 6px; min-height: 2.75rem; padding: 0.4rem 0.75rem;
+}
+select { width: 100%; display: block; }
+button { cursor: pointer; }
+button[aria-pressed="true"] {
+  background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600;
+}
+button.clear { background: none; border-color: transparent; color: var(--soft); text-decoration: underline; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+details.day { border-top: 1px solid var(--line); padding: 0.25rem 0; }
+summary { cursor: pointer; padding: 0.5rem 0; }
+.when { font-weight: 600; }
+.many { color: var(--soft); margin-left: 0.75rem; }
+.item {
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem;
+  margin: 0.6rem 0; content-visibility: auto; contain-intrinsic-size: auto 9rem;
+}
+.name { font-weight: 600; margin: 0; unicode-bidi: isolate; }
+.facts { margin: 0.25rem 0; color: var(--soft); font-size: 0.92rem; }
+.flags { list-style: none; padding: 0; margin: 0.4rem 0; }
+.flags li {
+  background: var(--warn-back); color: var(--warn-ink); border-radius: 4px; padding: 0.2rem 0.5rem;
+  margin: 0.25rem 0; font-size: 0.92rem;
+}
+.buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+.bar {
+  position: fixed; left: 0; right: 0; bottom: 0; max-height: 50vh; overflow-y: auto;
+  background: var(--card); border-top: 1px solid var(--line); padding: 0.6rem 1rem;
+}
+.bar > div { max-width: 46rem; margin: 0 auto; }
+.bar p { margin: 0.25rem 0; font-size: 0.92rem; }
+textarea { width: 100%; height: 8rem; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="incomplete" class="stop" role="alert" hidden></div>
+<main>
+<p id="start">This page has not started, and nothing has been answered. It needs JavaScript, which
+runs only inside this file. If it stays like this, the file is damaged: run the command again.</p>
+<h1>Were you there?</h1>
+<div class="note">
+<p>These are things near photos of yours that your profile does not have ticked. Answer from what
+you remember yourself.</p>
+<ul>
+<li>Leaving an item blank is fine and means no answer.</li>
+<li>A photo nearby does not prove that you went inside.</li>
+<li>Your answers change nothing by themselves. This page sends nothing anywhere: you save the
+answers as a file, and a plan is made from it for you to read first.</li>
+</ul>
+<p><strong>I was there</strong>: the item goes into that plan, to be ticked.<br>
+<strong>I was not there</strong>: the item stays unticked. It never removes anything from your profile.<br>
+<strong>I don't remember</strong>: a good final answer. The item stays unticked.</p>
+</div>
+
+<h2>What was looked at</h2>
+<ul id="about"></ul>
+<h2>What was left out, and why</h2>
+<p class="soft">Photos that did not count, and series that are not offered.</p>
+<ul id="left-out"></ul>
+<details>
+<summary>How much of what you have ticked these photos find</summary>
+<p id="recall-note" class="soft"></p>
+<div class="wide" role="region" aria-label="Found, by series and distance" tabindex="0">
+<table id="recall"></table>
+</div>
+</details>
+
+<h2>Your list</h2>
+<div class="filters">
+<label>Series <select id="by-series" autocomplete="off"></select></label>
+<label>Distance <select id="by-km" autocomplete="off"></select></label>
+<label>Answers <select id="by-answer" autocomplete="off">
+<option value="">Any</option>
+<option value="blank">No answer yet</option>
+<option value="answered">Answered</option>
+<option value="y">I was there</option>
+<option value="n">I was not there</option>
+<option value="q">I don't remember</option>
+</select></label>
+</div>
+<p id="shown" class="soft" role="status"></p>
+<div id="days"></div>
+</main>
+<div class="bar" id="bar"><div>
+<p id="counts"></p>
+<div class="buttons">
+<button type="button" id="download">Download answers</button>
+<button type="button" id="copy">Copy answers</button>
+<button type="button" id="show">Show the text</button>
+</div>
+<textarea id="text" readonly spellcheck="false" aria-label="Your answers, as text" hidden></textarea>
+<p id="said" role="status"></p>
+<p id="kept" class="soft"></p>
+</div></div>
+
+<script type="application/json" id="data">__DATA__</script>
+
+<script id="logic">
+/* What the page decides, with no document in it, so that it can be run without one. */
+const Review = (() => {
+  "use strict";
+
+  const FILE = "series-answers.json";
+  const WORDS = { y: "I was there", n: "I was not there", q: "I don't remember" };
+  const VALUES = Object.keys(WORDS);
+  const ORIGINS = {
+    "own-camera": "your own camera",
+    airdrop: "AirDrop, which may be somebody else's photo",
+    other: "another app, which may be somebody else's photo",
+    unknown: "not recorded",
+  };
+  const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  const plural = (n, one, many = one + "s") => n + " " + (n === 1 ? one : many);
+  const keyOf = (c) => c.series + ":" + c.item;
+  const knownKeys = (data) => new Set(data.candidates.map(keyOf));
+
+  /* A new map. An empty value is no answer; a key or a value that is not one changes nothing. */
+  function withAnswer(answers, known, key, value) {
+    const out = new Map(answers);
+    if (value === "") out.delete(key);
+    else if (known.has(key) && VALUES.includes(value)) out.set(key, value);
+    return out;
+  }
+
+  /* Text from the browser's storage, where anything may have written. Null when unreadable. */
+  function parseStored(text, known) {
+    let raw = null;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    let out = new Map();
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof value === "string" && value !== "") out = withAnswer(out, known, key, value);
+    }
+    return out;
+  }
+
+  const storedText = (answers) => JSON.stringify(Object.fromEntries(answers));
+  const storageName = (data) => "wanderfill-series-review:" + data.sha256;
+
+  /* The answers, kept under this list's own name. `where` gives the browser's storage, and it
+     and every use of it may throw: from then on this page alone has the answers, and says so.
+     Each write starts from what is stored, or a second tab of the same list would be undone. */
+  function openStore(where, data) {
+    const known = knownKeys(data);
+    const name = storageName(data);
+    let answers = new Map();
+    let kept = true;
+
+    function pull() {
+      if (!kept) return;
+      try {
+        answers = parseStored(where().getItem(name), known) || answers;
+      } catch {
+        kept = false;
+      }
+    }
+    function push() {
+      if (!kept) return;
+      try {
+        where().setItem(name, storedText(answers));
+        kept = where().getItem(name) === storedText(answers);
+      } catch {
+        kept = false;
+      }
+    }
+    pull();
+    return {
+      answers: () => answers,
+      kept: () => kept,
+      pull,
+      set(key, value) {
+        pull();
+        answers = withAnswer(answers, known, key, value);
+        push();
+      },
+    };
+  }
+
+  function counts(data, answers) {
+    const out = { y: 0, n: 0, q: 0, blank: 0 };
+    for (const c of data.candidates) out[answers.get(keyOf(c)) || "blank"] += 1;
+    return out;
+  }
+
+  /* Only what was answered, in the order of the list. */
+  function exportAnswers(data, answers) {
+    const out = {};
+    for (const c of data.candidates) {
+      if (answers.has(keyOf(c))) out[keyOf(c)] = answers.get(keyOf(c));
+    }
+    return { format: 1, account: data.account, manifest: data.sha256, answers: out };
+  }
+
+  const exportText = (data, answers) =>
+    JSON.stringify(exportAnswers(data, answers), null, 1) + "\n";
+
+  /* `filter` has series, km and answer, each "" for any. */
+  function matches(c, answer, filter) {
+    if (filter.series !== "" && String(c.series) !== filter.series) return false;
+    if (filter.km !== "" && c.km > Number(filter.km)) return false;
+    if (filter.answer === "") return true;
+    if (filter.answer === "blank") return !answer;
+    if (filter.answer === "answered") return Boolean(answer);
+    return answer === filter.answer;
+  }
+
+  const dayOf = (c) => c.at.slice(0, 10);
+
+  function dayTitle(day) {
+    const [y, m, d] = day.split("-").map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(y, m - 1, d);
+    return day + ", " + WEEKDAYS[date.getUTCDay()];
+  }
+
+  function inOrder(a, b) {
+    const flagged = (c) => Number(c.conflict || c.one_spot);
+    return (
+      (dayOf(a) < dayOf(b) ? -1 : Number(dayOf(a) > dayOf(b))) ||
+      a.series - b.series ||
+      flagged(a) - flagged(b) ||
+      a.km - b.km ||
+      a.item - b.item
+    );
+  }
+
+  function byDay(list) {
+    const days = new Map();
+    for (const c of [...list].sort(inOrder)) {
+      if (!days.has(dayOf(c))) days.set(dayOf(c), []);
+      days.get(dayOf(c)).push(c);
+    }
+    return [...days].map(([day, items]) => ({ day, items }));
+  }
+
+  /* The list in the parts it is shown in, each with a heading or "". One part, for now. */
+  function sections(list) {
+    return [{ title: "", days: byDay(list) }].filter((s) => s.days.length);
+  }
+
+  const kmText = (km) =>
+    km < 1 ? Math.round(km * 1000) + " m" : Number(km.toFixed(2)) + " km";
+
+  const originText = (origins) => origins.map((o) => ORIGINS[o] || o).join("; ");
+
+  function facts(c) {
+    return [
+      "Nearest photo: " + kmText(c.km) + " away, " + dayOf(c) + " " + c.at.slice(11, 16) +
+        " by the photo's own clock",
+      plural(c.photos, "photo") + " on " + plural(c.days, "day") + ", from " +
+        originText(c.origins),
+      "The item is at " + c.lat.toFixed(5) + ", " + c.lon.toFixed(5),
+    ];
+  }
+
+  function flags(c) {
+    const out = [];
+    if (c.conflict) out.push("Conflict: a photo that day has an impossible jump");
+    if (c.one_spot) {
+      out.push("One spot: every photo on several days has exactly the same coordinate: check it is not a frozen or false position");
+    }
+    if (c.thin) out.push("Thin: one photo, or over 1 km away");
+    if (c.fast_near) {
+      out.push("Fast: " + plural(c.fast_near, "photo") + " nearby " + (c.fast_near === 1
+        ? "was taken at travel speed and does not count"
+        : "were taken at travel speed and do not count"));
+    }
+    return out;
+  }
+
+  function incomplete(data) {
+    const { tiles_read: read, tiles_unread: unread } = data.coverage;
+    if (!unread) return "";
+    return "This list is incomplete. " + unread + " of " + (read + unread) + " map tiles could " +
+      "not be read, and things near your photos there may be missing from it. Run the command " +
+      "again; the answers you give here are for this list only.";
+  }
+
+  function about(data) {
+    const p = data.params;
+    return [
+      "Account " + data.account,
+      "Photos from " + p.since + " to " + (p.until || "the newest one"),
+      "Things within " + kmText(p.radius_km) + " of a photo taken on the ground",
+      "Photos from: " + originText(p.origins),
+      plural(data.candidates.length, "item") + " on this list",
+      plural(data.coverage.tiles_read, "map tile") + " read, " + data.coverage.tiles_unread +
+        " not read",
+      "Made " + data.created + ". List " + data.sha256.slice(0, 12),
+    ];
+  }
+
+  function leftOut(data) {
+    const { speeds, until, skip } = data.params;
+    const why = {
+      fast: "taken at travel speed, over " + speeds.fast_kmh + " km/h",
+      conflict: "beside an impossible jump, over " + speeds.impossible_kmh + " km/h",
+      no_utc: "with no absolute time, which cannot be shown to be on the ground",
+      after_until: "taken after " + (until || "the last day"),
+      span_none: "in a stretch you said not to use",
+      span_airports: "in a layover, used for airports only",
+      other_origin: "from another origin, which were not read",
+    };
+    const out = Object.keys(why).filter((k) => k in data.left_out)
+      .map((k) => plural(data.left_out[k], "photo") + " " + why[k]);
+    const skipped = data.coverage.skipped || {};
+    for (const id of Object.keys(skipped).map(Number).sort((a, b) => a - b)) {
+      out.push(plural(skipped[id], "thing") + " of series " + id + " near your photos, not offered");
+    }
+    if (skip.length) out.push("Series that are never offered: " + skip.join(", "));
+    return out;
+  }
+
+  const byNumber = (a, b) => Number(a) - Number(b);
+
+  /* The first row is the headings. */
+  function recallRows(data) {
+    const rows = data.coverage.recall;
+    const names = new Map(data.candidates.map((c) => [String(c.series), c.series_name]));
+    const ids = Object.keys(rows).sort(byNumber);
+    if (!ids.length) return [];
+    const radii = [...new Set(ids.flatMap((id) => Object.keys(rows[id].found)))].sort(byNumber);
+    return [
+      ["Series", "Ticked", "On the map read", ...radii.map((r) => "Within " + Number(r) + " km"),
+        "No photo near"],
+      ...ids.map((id) => [
+        rows[id].name || names.get(id) || "Series " + id,
+        rows[id].ticked,
+        rows[id].located,
+        ...radii.map((r) => (r in rows[id].found ? rows[id].found[r] : "")),
+        rows[id].no_photo.length,
+      ]),
+    ];
+  }
+
+  const recallNote = (data) =>
+    Object.keys(data.coverage.recall).length
+      ? "Of the things already ticked on your profile, how many the same photos find. Where few " +
+        "are found, this list will miss things too. It does not say how often the list is right."
+      : "Nothing is ticked yet in these series, so there is nothing to compare with, and no " +
+        "telling what this list will miss.";
+
+  function countsText(data, answers) {
+    const n = counts(data, answers);
+    return n.y + " there, " + n.n + " not there, " + n.q + " don't remember, " + n.blank +
+      " with no answer";
+  }
+
+  function exportNote(data, answers) {
+    const n = counts(data, answers);
+    return plural(answers.size, "answer") + " in it. " + plural(n.blank, "item") +
+      (n.blank === 1 ? " has" : " have") + " no answer and " +
+      (n.blank === 1 ? "is" : "are") + " not in it.";
+  }
+
+  function keptNote(store, before) {
+    if (!store.kept()) {
+      return "Your answers are not being kept by this browser. Download or copy them before you " +
+        "close or reload this page.";
+    }
+    return (before ? plural(before, "answer") + " you gave on this list before " +
+      (before === 1 ? "is" : "are") + " back. " : "") +
+      "Answers are kept by this browser, for this list only.";
+  }
+
+  return {
+    FILE, WORDS, VALUES, about, counts, countsText, dayTitle, exportAnswers, exportNote,
+    exportText, facts, flags, incomplete, keptNote, keyOf, knownKeys, leftOut, matches,
+    openStore, parseStored, plural, recallNote, recallRows, sections, withAnswer,
+  };
+})();
+</script>
+
+<script id="page">
+/* What the page draws. Every text of the data goes in through textContent. */
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const data = JSON.parse($("data").textContent);
+  const store = Review.openStore(() => window.localStorage, data);
+  const before = store.answers().size;
+  const openDays = new Set();
+  const OPEN_UP_TO = 40; /* so few are drawn at once; more wait for their day to be opened */
+  let redraw = new Map(); /* key to function, of the items and the days that are drawn */
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function button(cls, text, act) {
+    const b = el("button", cls, text);
+    b.setAttribute("type", "button");
+    b.addEventListener("click", act);
+    return b;
+  }
+
+  const option = (value, text) => {
+    const o = el("option", "", text);
+    o.value = value;
+    return o;
+  };
+
+  const lines = (texts) => texts.map((t) => el("li", "", t));
+
+  function drawItem(c, dayChanged) {
+    const key = Review.keyOf(c);
+    const box = el("div", "item");
+    const id = "name-" + key.replace(":", "-");
+    const name = el("p", "name", c.name || "(no name in the catalogue)");
+    name.setAttribute("id", id);
+    name.setAttribute("dir", "auto");
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-labelledby", id);
+    const said = el("div", "facts");
+    said.append(...Review.facts(c).map((f) => el("div", "", f)));
+    const flags = el("ul", "flags");
+    flags.append(...lines(Review.flags(c)));
+    const row = el("div", "buttons");
+    const answer = (value) => {
+      store.set(key, value);
+      redrawAll(key);
+      dayChanged();
+      $("said").textContent = ""; /* it was about a file without this answer */
+    };
+    const buttons = Review.VALUES.map((v) => [v, button("", Review.WORDS[v], () => answer(v))]);
+    row.append(...buttons.map(([, b]) => b),
+      button("clear", "Clear this answer", () => answer("")));
+    const draw = () => {
+      for (const [v, b] of buttons) {
+        b.setAttribute("aria-pressed", String(store.answers().get(key) === v));
+      }
+    };
+    draw();
+    redraw.set(key, draw);
+    box.append(name, said, flags, row);
+    return box;
+  }
+
+  function drawDay(where, { day, items }, open) {
+    const box = el("details", "day");
+    const head = el("summary");
+    const many = el("span", "many");
+    const body = el("div");
+    let filled = false;
+    const count = () => {
+      const done = items.filter((c) => store.answers().has(Review.keyOf(c))).length;
+      many.textContent = Review.plural(items.length, "item") + ", " + done + " answered";
+    };
+    const fill = () => {
+      if (filled) return;
+      filled = true;
+      let series = null;
+      for (const c of items) {
+        if (c.series !== series) {
+          const title = el("h3", "", c.series_name || "Series " + c.series);
+          title.setAttribute("dir", "auto");
+          body.append(title);
+          series = c.series;
+        }
+        body.append(drawItem(c, count));
+      }
+    };
+    count();
+    redraw.set(where, count);
+    head.append(el("span", "when", Review.dayTitle(day)), many);
+    box.append(head, body);
+    box.addEventListener("toggle", () => {
+      if (box.open) {
+        openDays.add(where);
+        fill();
+      } else {
+        openDays.delete(where);
+      }
+    });
+    if (open || openDays.has(where)) {
+      box.open = true;
+      fill();
+    }
+    return box;
+  }
+
+  function drawList() {
+    const filter = {
+      series: $("by-series").value, km: $("by-km").value, answer: $("by-answer").value,
+    };
+    store.pull();
+    const list = data.candidates.filter(
+      (c) => Review.matches(c, store.answers().get(Review.keyOf(c)), filter));
+    const parts = Review.sections(list);
+    redraw = new Map();
+    const nodes = [];
+    parts.forEach((part, n) => {
+      if (part.title) nodes.push(el("h2", "", part.title));
+      for (const day of part.days) {
+        nodes.push(drawDay(n + " " + day.day, day, list.length <= OPEN_UP_TO));
+      }
+    });
+    $("days").replaceChildren(...nodes);
+    $("shown").textContent = list.length
+      ? "Showing " + list.length + " of " + Review.plural(data.candidates.length, "item") +
+        ", each under the day of its nearest photo. An item you answer stays in view until you " +
+        "change a filter."
+      : data.candidates.length ? "No items match these filters." : "No items on this list.";
+    drawState();
+  }
+
+  function drawState() {
+    $("counts").textContent = Review.countsText(data, store.answers());
+    $("kept").textContent = Review.keptNote(store, before);
+    if (!$("text").hidden) $("text").value = Review.exportText(data, store.answers());
+  }
+
+  /* One item and the totals, or with no key everything that is drawn. */
+  function redrawAll(key) {
+    if (key === undefined) redraw.forEach((draw) => draw());
+    else redraw.get(key)();
+    drawState();
+  }
+
+  /* What is shown is what is exported: another tab's answers are drawn before they go out. */
+  function ready() {
+    store.pull();
+    redrawAll();
+    return Review.exportText(data, store.answers());
+  }
+
+  const say = (text) => {
+    $("said").textContent = text + " " + Review.exportNote(data, store.answers());
+  };
+
+  function download() {
+    const url = URL.createObjectURL(new Blob([ready()], { type: "application/json" }));
+    const a = el("a");
+    a.hidden = true;
+    a.setAttribute("href", url);
+    a.setAttribute("download", Review.FILE);
+    $("bar").append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000); /* some browsers read it after the click */
+    say("The file is " + Review.FILE + ". If none was saved, copy the answers instead.");
+  }
+
+  function showText() {
+    $("text").hidden = false;
+    $("text").value = ready();
+    $("text").focus();
+    $("text").select();
+    say("Copy all of the text above into a file named " + Review.FILE + ".");
+  }
+
+  async function copy() {
+    const text = ready();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      showText();
+      return;
+    }
+    say("Copied. Paste it into a file named " + Review.FILE + ".");
+  }
+
+  const stop = Review.incomplete(data);
+  $("incomplete").textContent = stop;
+  $("incomplete").hidden = !stop;
+  $("about").replaceChildren(...lines(Review.about(data)));
+  $("left-out").replaceChildren(...lines(Review.leftOut(data)));
+  $("recall-note").textContent = Review.recallNote(data);
+  $("recall").replaceChildren(...Review.recallRows(data).map((cells, n) => {
+    const row = el("tr");
+    row.append(...cells.map((cell, i) => {
+      const e = el(n && i ? "td" : "th", "", String(cell));
+      if (!n || !i) e.setAttribute("scope", n ? "row" : "col");
+      return e;
+    }));
+    return row;
+  }));
+
+  const series = new Map(data.candidates.map((c) => [c.series, c.series_name]));
+  $("by-series").replaceChildren(option("", "All series"), ...[...series]
+    .sort((a, b) => a[0] - b[0]).map(([id, name]) => option(String(id), name || "Series " + id)));
+  $("by-km").replaceChildren(option("", "Any"), ...[0.2, 0.5, 1, 2, 5]
+    .filter((km) => km < data.params.radius_km)
+    .map((km) => option(String(km), "Within " + km + " km")));
+  for (const id of ["by-series", "by-km", "by-answer"]) $(id).addEventListener("change", drawList);
+
+  $("download").addEventListener("click", download);
+  $("copy").addEventListener("click", copy);
+  $("show").addEventListener("click", showText);
+  window.addEventListener("storage", () => {
+    store.pull();
+    redrawAll();
+  });
+
+  drawList();
+  $("start").hidden = true;
+})();
+</script>
+</body>
+</html>

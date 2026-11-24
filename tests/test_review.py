@@ -7,10 +7,17 @@ somebody else's, one from an aircraft, one with a frozen or a spoofed coordinate
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
+import hashlib
+import inspect
 import json
 import math
 import random
+import re
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +27,8 @@ from wanderfill.plan import review
 from wanderfill.plan.model import Op, Plan, validate
 from wanderfill.plan.review import (
     SKIP_SERIES,
+    Candidate,
+    Manifest,
     SeriesInfo,
     Shot,
     Span,
@@ -28,8 +37,10 @@ from wanderfill.plan.review import (
     grade_shots,
     harvest,
     left_out,
+    load_answers,
     load_spans,
     recall,
+    render_page,
 )
 from wanderfill.sources.photos_app import PhotoAsset
 
@@ -967,3 +978,896 @@ def test_show_prints_proof_whatever_shape_it_is(tmp_path, capsys, proof, wanted)
     Plan(account=1, ops=[tick()]).save(path)
     assert cli.main(["show", str(path), "-v"]) == 0
     assert "proof" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ the manifest: what was shown
+
+HOSTILE = ("</script><script>boom()</script><!--\"'&amp;"
+           "\u2028\u2029\u202e 東京 \U0001f5fc $& \\u003c")
+
+
+def candidate(item=1, series=22, **kw):
+    return Candidate(**{
+        "series": series, "item": item, "series_name": f"Series {series}",
+        "name": f"Object {item}", "lat": 10.0, "lon": 20.0, "km": 0.5,
+        "at": dt.datetime(2026, 5, 1, 14, 5, 9), "photos": 3, "days": 2,
+        "origins": ("own-camera",), "fast_near": 0, "conflict": False, "thin": False,
+        "one_spot": False,
+    } | kw)
+
+
+PARAMS = {
+    "since": "2026-05-01", "until": "2026-05-31", "radius_km": 2.0, "origins": ["own-camera"],
+    "skip": [-2, 12, 17, 60],
+    "speeds": {"fast_kmh": 120.0, "min_leg_km": 1.0, "impossible_kmh": 1200.0,
+               "impossible_km": 100.0, "burst_minutes": 10.0},
+}
+RECALL = {22: {"ticked": 4, "located": 3, "found": {0.2: 1, 2.0: 2}, "no_photo": [7, 9]}}
+COVERAGE = {"tiles_read": 12, "tiles_unread": 0, "recall": RECALL}
+LEFT_OUT = {"fast": 5, "conflict": 2, "span_none": 3, "span_airports": 1, "after_until": 4,
+            "no_utc": 6}
+
+
+def manifest(candidates=None, **kw):
+    return Manifest(**{
+        "account": 1, "created": "2026-06-01T10:00:00+00:00", "params": PARAMS,
+        "coverage": COVERAGE, "left_out": LEFT_OUT,
+        "candidates": [candidate(1), candidate(2)] if candidates is None else candidates,
+    } | kw)
+
+
+EVERYTHING = [
+    candidate(1, name=HOSTILE, series_name=HOSTILE),
+    candidate(2, km=1.5, thin=True, photos=1, days=1, at=dt.datetime(2026, 5, 1, 9, 0, 0, 25)),
+    candidate(3, one_spot=True, at=dt.datetime(2026, 5, 2, 8)),
+    candidate(4, conflict=True, at=dt.datetime(2026, 5, 2, 8)),
+    candidate(5, fast_near=2, origins=("airdrop", "own-camera"), km=0.0),
+    candidate(1, series=-7, name="", lat=-90.0, lon=-180.0, at=dt.datetime(2026, 5, 3, 0, 0)),
+]
+
+
+def test_a_manifest_comes_back_from_disk_as_it_was(tmp_path):
+    m = manifest(EVERYTHING, coverage=COVERAGE | {"skipped": {12: 3}},
+                 left_out=LEFT_OUT | {"other_origin": 8}, params=PARAMS | {"until": None})
+    back = Manifest.load(m.save(tmp_path / "m.json"))
+    assert back == m and back.sha256 == m.sha256
+    assert back.candidates == EVERYTHING  # ids, times, tuples and flags, all of one type
+    assert Manifest.load(back.save(tmp_path / "n.json")) == m
+
+
+def test_the_hash_is_of_the_canonical_json_of_all_but_created(tmp_path):
+    m = manifest([candidate(1, name="東京")])
+    stored = json.loads(m.save(tmp_path / "m.json").read_text(encoding="utf-8"))
+    said = stored.pop("sha256")
+    del stored["created"]
+    text = json.dumps(stored, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert "東京" in text and '"at":"2026-05-01T14:05:09"' in text
+    assert said == m.sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_the_hash_does_not_depend_on_when_or_on_the_order_of_keys(tmp_path):
+    m = manifest()
+    assert manifest(created="another day").sha256 == m.sha256
+    assert manifest(params=dict(reversed(PARAMS.items()))).sha256 == m.sha256
+    assert manifest(params=PARAMS | {"origins": ("own-camera",), "skip": SKIP_SERIES}
+                    ).sha256 == m.sha256
+    text = json.loads(m.save(tmp_path / "m.json").read_text(encoding="utf-8"))
+    text["candidates"] = [dict(reversed(c.items())) for c in text["candidates"]]
+    path = tmp_path / "n.json"
+    path.write_text(json.dumps(dict(reversed(text.items()))), encoding="utf-8")
+    assert Manifest.load(path) == m
+
+
+OTHER = {
+    "series": 23, "item": 9, "series_name": "x", "name": "x", "lat": 10.00001, "lon": 20.00001,
+    "km": 0.501, "at": dt.datetime(2026, 5, 1, 14, 5, 10), "photos": 4, "days": 3,
+    "origins": ("airdrop",), "fast_near": 1, "conflict": True, "thin": True, "one_spot": True,
+}
+
+
+def test_every_field_of_a_candidate_is_in_the_hash():
+    assert set(OTHER) == {f.name for f in dataclasses.fields(Candidate)}
+    hashes = {manifest([candidate(), candidate(**{"item": 2, k: v})]).sha256
+              for k, v in OTHER.items()}
+    assert len(hashes) == len(OTHER) and manifest().sha256 not in hashes
+
+
+def test_everything_else_shown_is_in_the_hash():
+    speeds = PARAMS["speeds"]
+    row = RECALL[22]
+    others = [
+        {"account": 2}, {"candidates": []}, {"candidates": [candidate(2), candidate(1)]},
+        *({"params": PARAMS | p} for p in (
+            {"since": "2026-05-02"}, {"until": None}, {"radius_km": 2.5}, {"skip": []},
+            {"origins": ["airdrop", "own-camera"]},
+            *({"speeds": speeds | {k: v + 1}} for k, v in speeds.items()))),
+        *({"coverage": COVERAGE | c} for c in (
+            {"tiles_read": 13}, {"tiles_unread": 1}, {"recall": {}}, {"skipped": {}},
+            {"skipped": {12: 1}}, {"recall": {23: row}},
+            *({"recall": {22: row | r}} for r in (
+                {"ticked": 5}, {"located": 4}, {"found": {0.2: 1}}, {"no_photo": [7]},
+                {"name": "x"})))),
+        *({"left_out": LEFT_OUT | {k: v + 1}} for k, v in LEFT_OUT.items()),
+        {"left_out": LEFT_OUT | {"other_origin": 0}},
+    ]
+    hashes = {manifest(**kw).sha256 for kw in others} | {manifest().sha256}
+    assert len(hashes) == len(others) + 1
+
+
+def test_float_noise_does_not_reach_the_hash():
+    a = manifest([candidate(lat=10.000012, lon=0.000001, km=0.1234)])
+    b = manifest([candidate(lat=10.0000120000001, lon=-0.000001, km=0.12340000001)])
+    assert a.sha256 == b.sha256
+    (c,) = a.candidates
+    assert (c.lat, c.lon, c.km) == (10.00001, 0.0, 0.123)
+    a, b = (manifest([candidate(lat=lat, km=km)]) for lat, km in ((1e-9, 0.0), (-1e-9, -0.0)))
+    assert a.sha256 == b.sha256
+    assert manifest([candidate(km=1, lat=10)]).sha256 == manifest(
+        [candidate(km=1.0, lat=10.0)]).sha256
+    assert manifest(params=PARAMS | {"radius_km": 2}).sha256 == manifest().sha256
+
+
+def test_an_object_in_the_edge_of_the_last_tile_is_where_it_is():
+    """A tile reaches past its own bounds, at the antimeridian past 180."""
+    for lon, wanted in ((180.01, -179.99), (-180.01, 179.99), (180.0, -180.0), (-180.0, -180.0),
+                        (179.999999, -180.0), (20.00001, 20.00001)):
+        assert manifest([candidate(lon=lon)]).candidates[0].lon == wanted
+
+
+@pytest.mark.parametrize("change", [
+    {"series": True}, {"series": "22"}, {"series": 2**53}, {"item": 1.0}, {"item": None},
+    {"series_name": None}, {"name": 5}, {"name": ["x"]},
+    {"lat": float("nan")}, {"lat": float("inf")}, {"lat": 90.1}, {"lat": "10"}, {"lat": True},
+    {"lat": 10**400}, {"lon": float("-inf")}, {"lon": 360.1}, {"lon": None},
+    {"km": float("nan")}, {"km": float("inf")}, {"km": -0.1}, {"km": "1"},
+    {"at": "2026-05-01T14:05:09Z"}, {"at": dt.date(2026, 5, 1)}, {"at": 5}, {"at": "2026-05-01"},
+    {"at": dt.datetime(2026, 5, 1, tzinfo=UTC)}, {"at": "2026-05-01 14:05:09"}, {"at": None},
+    {"photos": 0}, {"photos": True}, {"photos": 1.0}, {"days": 0}, {"days": 4},
+    {"origins": ()}, {"origins": "own-camera"}, {"origins": ("nobody",)}, {"origins": (1,)},
+    {"origins": ("own-camera", "own-camera")},
+    {"fast_near": -1}, {"fast_near": False}, {"conflict": 0}, {"thin": None}, {"one_spot": "no"},
+])
+def test_a_candidate_of_another_shape_is_refused(change):
+    with pytest.raises(PlanInvalid, match=rf"candidates\[1\].*{next(iter(change))}"):
+        manifest([candidate(1), candidate(**{"item": 2} | change)])
+
+
+@pytest.mark.parametrize("change", [
+    {"account": True}, {"account": "1"}, {"account": None}, {"account": 1.0},
+    {"created": None}, {"created": 5}, {"format": 2}, {"format": True}, {"format": "1"},
+    {"format": 1.0}, {"params": None}, {"params": []}, {"candidates": 5}, {"candidates": {}},
+    {"candidates": ["x"]}, {"coverage": []}, {"left_out": None},
+    *({"params": PARAMS | p} for p in (
+        {"since": None}, {"since": "2026"}, {"since": "20260501"}, {"since": 5}, {"until": ""},
+        {"until": "soon"}, {"radius_km": float("nan")}, {"radius_km": float("inf")},
+        {"radius_km": -1}, {"radius_km": "2"}, {"radius_km": True}, {"origins": "own-camera"},
+        {"origins": []}, {"origins": ["nobody"]}, {"skip": [1.5]}, {"skip": ["x"]}, {"skip": 5},
+        {"skip": [True]}, {"skip": [5, 5]}, {"speeds": {}}, {"speeds": None},
+        {"speeds": PARAMS["speeds"] | {"fast_kmh": float("nan")}},
+        {"speeds": PARAMS["speeds"] | {"warp": 1.0}}, {"cached": True})),
+    *({"params": {k: v for k, v in PARAMS.items() if k != gone}} for gone in PARAMS),
+    *({"coverage": COVERAGE | c} for c in (
+        {"tiles_read": -1}, {"tiles_read": True}, {"tiles_unread": None}, {"tiles_unread": 1.0},
+        {"recall": []}, {"recall": {"x": RECALL[22]}}, {"recall": {22: []}}, {"recall": {22: {}}},
+        {"recall": {22: RECALL[22] | {"found": {"x": 1}}}},
+        {"recall": {22: RECALL[22] | {"found": {float("nan"): 1}}}},
+        {"recall": {22: RECALL[22] | {"found": {2.0: -1}}}},
+        {"recall": {22: RECALL[22] | {"no_photo": ["7"]}}},
+        {"recall": {22: RECALL[22] | {"name": 5}}}, {"recall": {22: RECALL[22] | {"odd": 5}}},
+        {"recall": {22: RECALL[22], "22": RECALL[22]}}, {"recall": {"022": RECALL[22]}},
+        {"skipped": {12: -1}}, {"skipped": [12]}, {"odd": 1})),
+    *({"coverage": {k: v for k, v in COVERAGE.items() if k != gone}} for gone in COVERAGE),
+    {"left_out": LEFT_OUT | {"fast": -1}}, {"left_out": LEFT_OUT | {"fast": True}},
+    {"left_out": LEFT_OUT | {"fast": "5"}}, {"left_out": LEFT_OUT | {"bored": 1}},
+    {"left_out": {}},
+])
+def test_a_manifest_of_another_shape_is_refused(change):
+    with pytest.raises(PlanInvalid, match=next(iter(change))):
+        manifest(**change)
+
+
+def test_one_object_cannot_be_asked_twice():
+    """One answer would stand for two questions."""
+    with pytest.raises(PlanInvalid, match="22:1"):
+        manifest([candidate(1), candidate(2), candidate(1, km=0.1)])
+    assert manifest([candidate(1, series=5), candidate(1, series=22)])
+
+
+def test_a_name_no_file_can_hold_is_mended_once(tmp_path):
+    m = manifest([candidate(1, name="half \ud83d of a pair", series_name="\udc00")])
+    assert m.candidates[0].name == "half � of a pair"
+    assert Manifest.load(m.save(tmp_path / "m.json")) == m
+    assert "� of a pair" in render_page(m)
+
+
+def test_the_manifest_records_every_speed_there_is():
+    wanted = [n for n, p in inspect.signature(grade_shots).parameters.items()
+              if p.kind is p.KEYWORD_ONLY and n != "until"]
+    assert sorted(manifest().params["speeds"]) == sorted(wanted)
+    assert set(left_out([])) == set(LEFT_OUT)
+
+
+def test_what_the_functions_return_goes_in_as_it_is(tmp_path):
+    shots = [shot(10.0, 20.0 + 0.5 * KM), shot(10.0, 20.0 + 1.2 * KM, day=2)]
+    objects = obj(10.0, 20.0) | obj(10.0, 20.0, item=2) | obj(10.0, 20.0, item=3, series=12)
+    cat = {22: catalogue(objects)[22]}
+    ticked = {22: {2}, 12: set()}
+    m = manifest(
+        find_candidates(shots, objects, cat, ticked), left_out=left_out(shots),
+        coverage={"tiles_read": 9, "tiles_unread": 0,
+                  "recall": recall(shots, objects, ticked, catalogue=cat),
+                  "skipped": count_skipped(shots, objects, ticked)},
+        params=PARAMS | {"since": dt.date(2026, 5, 1), "skip": SKIP_SERIES,
+                         "origins": {"own-camera"}})
+    assert [c.item for c in m.candidates] == [1]
+    assert m.coverage["recall"]["22"]["found"] == {"0.2": 0, "0.5": 1, "1.0": 1, "2.0": 1}
+    assert m.coverage["skipped"] == {"12": 1} and m.params["since"] == "2026-05-01"
+    assert Manifest.load(m.save(tmp_path / "m.json")) == m
+
+
+# -- load
+
+
+def saved(tmp_path, m=None):
+    return json.loads((m or manifest()).save(tmp_path / "m.json").read_text(encoding="utf-8"))
+
+
+def written(tmp_path, raw):
+    path = tmp_path / "m.json"
+    path.write_text(raw if isinstance(raw, str) else json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def rehashed(raw):
+    """The file as somebody who can count sha256 would have altered it."""
+    content = {k: v for k, v in raw.items() if k not in ("sha256", "created")}
+    text = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return raw | {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
+@pytest.mark.parametrize("field", OTHER)
+def test_load_refuses_an_altered_candidate(tmp_path, field):
+    raw = saved(tmp_path)
+    value = OTHER[field]
+    raw["candidates"][1][field] = (value.isoformat() if field == "at" else
+                                   list(value) if field == "origins" else value)
+    with pytest.raises(PlanInvalid, match=r"m\.json.*sha256"):
+        Manifest.load(written(tmp_path, raw))
+    Manifest.load(written(tmp_path, rehashed(raw)))  # the hash was all that was wrong
+
+
+@pytest.mark.parametrize("change", [
+    {"account": 2}, {"params": PARAMS | {"radius_km": 3.0}}, {"left_out": LEFT_OUT | {"fast": 0}},
+    {"candidates": []}, {"sha256": "0" * 64}, {"sha256": None}, {"sha256": 5},
+])
+def test_load_refuses_any_other_altered_field(tmp_path, change):
+    with pytest.raises(PlanInvalid, match=r"m\.json.*sha256"):
+        Manifest.load(written(tmp_path, saved(tmp_path) | change))
+
+
+@pytest.mark.parametrize("change", [
+    {"lat": 10.000001}, {"km": 0.5001}, {"lat": -0.0}, {"at": "2026-05-01T14:05:09+00:00"},
+    {"at": "2026-05-01T14:05:09.000000"}, {"at": 5}, {"lat": 10}, {"odd": 1},
+    {"origins": ["own-camera", "airdrop"]}, {"origins": "own-camera"}, {"item": 1},
+    {"item": "2"}, {"conflict": 0},
+])
+def test_load_takes_only_what_save_writes(tmp_path, change):
+    raw = saved(tmp_path)
+    raw["candidates"][1].update(change)
+    for bad in (raw, rehashed(raw)):  # the hash it had, and the hash of what it says now
+        with pytest.raises(PlanInvalid, match=r"m\.json"):
+            Manifest.load(written(tmp_path, bad))
+
+
+def test_load_refuses_unknown_and_missing_fields(tmp_path):
+    raw = saved(tmp_path)
+    for bad in (raw | {"note": "x"}, *({k: v for k, v in raw.items() if k != gone}
+                                       for gone in raw)):
+        with pytest.raises(PlanInvalid, match=r"m\.json"):
+            Manifest.load(written(tmp_path, rehashed(bad) if "sha256" in bad else bad))
+    del raw["candidates"][0]["thin"]
+    with pytest.raises(PlanInvalid, match="thin"):
+        Manifest.load(written(tmp_path, rehashed(raw)))
+
+
+def test_load_says_a_later_format_is_one(tmp_path):
+    """Before the hash, which a later format may count over something else."""
+    with pytest.raises(PlanInvalid, match="format 2"):
+        Manifest.load(written(tmp_path, saved(tmp_path) | {"format": 2, "more": 1}))
+
+
+@pytest.mark.parametrize("content", [
+    "", "{", "null", "[]", "5", "{}", "[" * 100_000, '{"format": 1, "format": 1}',
+    '{"account": NaN}', '{"account": Infinity}', '{"account": ' + "9" * 5000 + "}",
+])
+def test_load_refuses_a_file_that_is_not_a_manifest(tmp_path, content):
+    with pytest.raises(PlanInvalid, match=r"m\.json"):
+        Manifest.load(written(tmp_path, content))
+
+
+def test_load_refuses_a_file_it_cannot_open_or_read(tmp_path):
+    (tmp_path / "bytes.json").write_bytes(b"\xff\xfe")
+    for path in (tmp_path / "absent.json", tmp_path, tmp_path / "bytes.json"):
+        with pytest.raises(PlanInvalid, match=re.escape(str(path))):
+            Manifest.load(path)
+
+
+def test_load_refuses_a_repeated_key_and_a_number_that_is_none(tmp_path):
+    text = json.dumps(saved(tmp_path))
+    for bad, why in ((text.replace('"km": 0.5', '"km": 0.5, "km": 0.5', 1), "'km' twice"),
+                     (text.replace('"km": 0.5', '"km": NaN', 1), "NaN"),
+                     (text.replace('"km": 0.5', '"km": 1e999', 1), "km")):
+        assert bad != text
+        with pytest.raises(PlanInvalid, match=why):
+            Manifest.load(written(tmp_path, bad))
+
+
+# ------------------------------------------------------------------ the page
+
+CSP = ("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+       "base-uri 'none'; form-action 'none'")
+DATA = re.compile(r'(<script type="application/json" id="data">)(.*?)(</script>)', re.S)
+
+
+def embedded(page):
+    (match,) = DATA.findall(page)
+    return match[1]
+
+
+def test_the_page_holds_the_manifest_and_its_hash():
+    m = manifest(EVERYTHING)
+    data = json.loads(embedded(render_page(m)))
+    assert data["sha256"] == m.sha256 and data["account"] == 1 and data["format"] == 1
+    assert data["created"] == m.created
+    assert [c["name"] for c in data["candidates"]] == [c.name for c in EVERYTHING]
+    assert data["candidates"][0]["at"] == "2026-05-01T14:05:09"
+
+
+def test_a_hostile_name_stays_inside_the_data():
+    page, plain = render_page(manifest(EVERYTHING)), render_page(manifest([]))
+    for mark in ("<script", "</script", "<!--"):
+        assert page.count(mark) == plain.count(mark)
+    assert "boom()" in embedded(page) and "boom()" not in DATA.sub("", page)
+    assert not set("<>&\u2028\u2029") & set(embedded(page))
+    assert json.loads(embedded(page))["candidates"][0]["name"] == HOSTILE
+    assert DATA.sub("", page) == DATA.sub("", plain)  # the names changed nothing around them
+
+
+@pytest.mark.parametrize("name", ["$&", "\\g<0>", "{data}", "%s", "/*DATA*/", "__DATA__"])
+def test_a_name_that_looks_like_a_template_is_a_name(name):
+    page = render_page(manifest([candidate(1, name=name)]))
+    assert json.loads(embedded(page))["candidates"][0]["name"] == name
+    assert DATA.sub("", page) == DATA.sub("", render_page(manifest([])))
+
+
+def test_the_page_reaches_for_nothing():
+    """Nothing in it can load, send or lead anywhere, so the coordinates stay here."""
+    url = "http://a.test/x //b.test fetch import src= href="
+    page = render_page(manifest([candidate(1, name=url)]))
+    assert "http://a.test/x //b.test" in embedded(page)
+    meta = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+    assert page.count(meta) == 1
+    rest = DATA.sub("", page).replace(meta, "").lower()  # the policy is spelt with http
+    for word in ("http", "//", "fetch", "import", "src=", "href=", "xmlhttp", "websocket",
+                 "eventsource", "beacon", "worker", "eval", "new function", "<form",
+                 "<iframe", "<img", "<link", "<a ", "ping=", "window.open", "location"):
+        assert word not in rest, word
+    assert "url(" not in rest.split("<style>")[1].split("</style>")[0]
+
+
+def test_the_policy_comes_before_anything_it_governs():
+    page = render_page(manifest())
+    at = page.index("Content-Security-Policy")
+    assert all(at < page.index(tag) for tag in ("<style", "<script", "<body"))
+    assert page.index('<meta charset="utf-8">') < at and page.startswith("<!doctype html>")
+
+
+def test_text_goes_in_as_text():
+    rest = DATA.sub("", render_page(manifest()))
+    for word in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+                 "createContextualFragment", "DOMParser", "setHTML", "srcdoc"):
+        assert word not in rest
+    assert "textContent" in rest
+
+
+def test_nothing_is_preselected_and_nothing_answers_in_bulk():
+    rest = DATA.sub("", render_page(manifest(EVERYTHING)))
+    for word in ('aria-pressed="true"', "checked", " selected", "autofocus", "accesskey",
+                 "keydown", "keyup", "keypress"):
+        assert word not in rest.split("</style>")[1], word
+    assert not re.search(r"(select|mark|answer|tick|clear|choose)\W+(them\W+)?(all|every)\b", rest,
+                         re.I)
+
+
+def test_the_page_says_what_an_answer_means():
+    rest = re.sub(r"\s+", " ", DATA.sub("", render_page(manifest())))
+    for copy in ("I was there", "I was not there", "I don't remember", "Clear this answer",
+                 "Leaving an item blank is fine and means no answer.",
+                 "A photo nearby does not prove that you went inside.",
+                 "never removes anything from your profile",
+                 "one photo, or over 1 km away",
+                 "every photo on several days has exactly the same coordinate: check it is not "
+                 "a frozen or false position",
+                 "a photo that day has an impossible jump"):
+        assert copy in rest, copy
+
+
+def test_the_template_is_in_the_package():
+    page = Path(review.__file__).with_name("review_page.html")
+    assert page.is_file() and "src/wanderfill/plan" in page.as_posix()
+    assert 'packages = ["src/wanderfill"]' in (
+        Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+
+
+# -- the page's own scripts, run
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="no node on this machine")
+
+
+def run(tmp_path, m, body):
+    """What `body` returns, run in node with the scripts of the rendered page itself."""
+    page, code = tmp_path / "page.html", tmp_path / "body.js"
+    page.write_text(render_page(m), encoding="utf-8")
+    code.write_text(body, encoding="utf-8")
+    done = subprocess.run([NODE, str(Path(__file__).with_name("review_page_dom.js")),
+                           str(page), str(code)], capture_output=True, encoding="utf-8",
+                          timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def answers_file(tmp_path, raw):
+    path = tmp_path / "series-answers.json"
+    if isinstance(raw, bytes):
+        path.write_bytes(raw)
+    else:
+        path.write_text(raw if isinstance(raw, str) else json.dumps(raw), encoding="utf-8")
+    return path
+
+
+@needs_node
+def test_the_pages_export_is_what_load_answers_reads(tmp_path):
+    m = manifest(EVERYTHING)
+    text, given = run(tmp_path, m, """
+      const known = logic.knownKeys(data);
+      let a = new Map();
+      for (const [k, v] of [["22:5", "q"], ["-7:1", "n"], ["22:1", "y"], ["22:2", "y"],
+                            ["22:2", ""], ["22:9", "y"], ["22:3", "yes"], ["22:4", true]]) {
+        a = logic.withAnswer(a, known, k, v);
+      }
+      return [logic.exportText(data, a), a.size];
+    """)
+    assert given == 3  # what is no item and what is no answer was never taken
+    assert json.loads(text) == {"format": 1, "account": 1, "manifest": m.sha256,
+                                "answers": {"22:1": "y", "22:5": "q", "-7:1": "n"}}
+    assert load_answers(answers_file(tmp_path, text), m) == {
+        (22, 1): "y", (22, 5): "q", (-7, 1): "n"}
+
+
+@needs_node
+def test_an_untouched_page_exports_no_answer(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      return [logic.exportText(data, new Map()), logic.counts(data, new Map()),
+              logic.counts(data, new Map([["22:1", "y"], ["22:2", "n"], ["22:3", "q"]]))];
+    """)
+    assert load_answers(answers_file(tmp_path, got[0]), m) == {}
+    assert got[1:] == [{"y": 0, "n": 0, "q": 0, "blank": 6}, {"y": 1, "n": 1, "q": 1, "blank": 3}]
+
+
+def test_the_embedded_data_is_enough_to_answer_by(tmp_path):
+    """The export without node: the same four fields, from what the page was given."""
+    m = manifest(EVERYTHING)
+    data = json.loads(embedded(render_page(m)))
+    keys = [f"{c['series']}:{c['item']}" for c in data["candidates"]]
+    raw = {"format": data["format"], "account": data["account"], "manifest": data["sha256"],
+           "answers": dict.fromkeys(keys, "q")}
+    assert list(load_answers(answers_file(tmp_path, raw), m)) == [
+        (c.series, c.item) for c in m.candidates]
+
+
+@needs_node
+def test_the_page_opens_with_nothing_answered(tmp_path):
+    got = run(tmp_path, manifest(EVERYTHING), """
+      const p = open();
+      p.openAll();
+      const states = p.byId.days.all((e) => e.tag === "button")
+        .map((e) => e.getAttribute("aria-pressed")).filter((s) => s !== null);
+      return [p.items().length, states, p.storage.held.size, p.byId.start.hidden];
+    """)
+    assert got == [6, ["false"] * 18, 0, True]
+
+
+@needs_node
+def test_names_and_facts_are_shown_as_they_are(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const p = open();
+      p.openAll();
+      return p.items().map((i) => [i.cls("name")[0].textContent, i.textContent]);
+    """)
+    shown = dict(got)
+    assert set(shown) == {HOSTILE, "Object 2", "Object 3", "Object 4", "Object 5",
+                          "(no name in the catalogue)"}
+    flags = {
+        "one photo, or over 1 km away": {"Object 2"},
+        "every photo on several days has exactly the same coordinate: check it is not a frozen "
+        "or false position": {"Object 3"},
+        "a photo that day has an impossible jump": {"Object 4"},
+        "2 photos nearby were taken at travel speed and do not count": {"Object 5"},
+    }
+    for flag, names in flags.items():
+        assert {n for n, text in shown.items() if flag in text} == names, flag
+    for fact in ("500 m away", "2026-05-01 14:05", "by the photo's own clock",
+                 "3 photos on 2 days", "your own camera"):
+        assert fact in shown[HOSTILE], fact
+    assert "1.5 km away" in shown["Object 2"] and "1 photo on 1 day" in shown["Object 2"]
+    assert "AirDrop" in shown["Object 5"]
+
+
+@needs_node
+def test_items_are_by_day_then_series_then_distance_with_the_flagged_last(tmp_path):
+    day = dt.datetime(2026, 5, 2, 9)
+    m = manifest([candidate(1, km=0.9), candidate(2, km=0.1, conflict=True),
+                  candidate(3, km=0.2, one_spot=True), candidate(4, km=0.3),
+                  candidate(5, series=5, km=1.9), candidate(6, at=day), candidate(7, km=0.3)])
+    got = run(tmp_path, m, """
+      const p = open();
+      p.openAll();
+      return p.days().map((d) => [d.cls("when")[0].textContent,
+                                  d.cls("name").map((n) => n.textContent)]);
+    """)
+    assert got == [
+        ["2026-05-01, Friday", [f"Object {n}" for n in (5, 4, 7, 1, 2, 3)]],
+        ["2026-05-02, Saturday", ["Object 6"]],
+    ]
+
+
+@needs_node
+def test_an_answer_is_given_changed_cleared_and_counted(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const p = open();
+      p.openAll();
+      const out = [];
+      const note = () => out.push([p.pressed(), p.byId.counts.textContent]);
+      p.press(p.item("Object 2"), "I was there"); note();
+      p.press(p.item("Object 2"), "I was there"); note();
+      p.press(p.item("Object 2"), "I was not there"); note();
+      p.press(p.item("Object 3"), "I don't remember"); note();
+      p.press(p.item("Object 2"), "Clear this answer"); note();
+      return out;
+    """)
+    words = [g[0] for g in got]
+    assert words == [["I was there"], ["I was there"], ["I was not there"],
+                     ["I was not there", "I don't remember"], ["I don't remember"]]
+    assert "1 there" in got[1][1] and "5 with no answer" in got[1][1]
+    assert "0 there" in got[4][1] and "1 don't remember" in got[4][1]
+
+
+@needs_node
+def test_download_and_copy_give_the_same_file(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const p = open();
+      p.openAll();
+      p.press(p.item("Object 4"), "I was there");
+      p.byId.download.click();
+      const during = p.revoked.length;
+      p.timers.forEach((f) => f());
+      p.byId.copy.click();
+      await null; await null;
+      const a = p.clicked[0], said = p.byId.said.textContent;
+      p.press(p.item("Object 3"), "I was there");
+      return {text: p.blobs[0].text, type: p.blobs[0].type, name: a.getAttribute("download"),
+              link: a.getAttribute("href"), during, revoked: p.revoked, copied: p.copied,
+              said, after: p.byId.said.textContent};
+    """)
+    assert load_answers(answers_file(tmp_path, got["text"]), m) == {(22, 4): "y"}
+    assert got["copied"] == [got["text"]] and got["type"] == "application/json"
+    assert got["name"] == "series-answers.json" and got["link"] == "blob:1"
+    assert got["during"] == 0 and got["revoked"] == ["blob:1"]
+    assert "1 answer" in got["said"] and "5 items have no answer" in got["said"]
+    assert got["after"] == ""  # what was said is not about a file with the later answer
+
+
+@needs_node
+@pytest.mark.parametrize("clipboard", ["absent", "refused"])
+def test_without_a_clipboard_the_text_is_there_to_select(tmp_path, clipboard):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, f"const clipboard = '{clipboard}';" + """
+      const p = open({clipboard});
+      p.openAll();
+      const before = p.byId.text.hidden;
+      p.byId.copy.click();
+      await null; await null; await null;
+      const shown = [p.byId.text.hidden, p.byId.text.value];
+      p.press(p.item("Object 4"), "I was there");
+      return [before, ...shown, p.byId.text.value];
+    """)
+    assert got[:2] == [True, False]
+    assert load_answers(answers_file(tmp_path, got[2]), m) == {}
+    assert load_answers(answers_file(tmp_path, got[3]), m) == {(22, 4): "y"}  # never out of date
+
+
+@needs_node
+def test_answers_come_back_on_a_reload_and_on_no_other_page(tmp_path):
+    one, two = manifest(EVERYTHING), manifest(EVERYTHING, account=2)
+    held, pressed = run(tmp_path, one, """
+      const storage = new Storage();
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 4"), "I was there");
+      const again = open({storage});
+      again.openAll();
+      return [[...storage.held], [again.pressed(), again.byId.kept.textContent]];
+    """)
+    assert pressed[0] == ["I was there"] and "1 answer" in pressed[1]
+    ((key, text),) = held
+    assert one.sha256 in key and json.loads(text) == {"22:4": "y"}
+
+    def found(m, text):
+        given = f"const name = {json.dumps(key)}, text = {json.dumps(text)};"
+        return run(tmp_path, m, given + """
+          const storage = new Storage();
+          storage.setItem(name, text);
+          const p = open({storage});
+          p.openAll();
+          return p.pressed();
+        """)
+
+    assert found(two, text) == [] and found(one, text) == ["I was there"]
+    for bad in ('{"22:4": true, "22:9": "y", "__proto__": "y", "22:3": "maybe"}', "null", "[",
+                '["22:4"]', '"y"', "5", '{"22:4": ["y"]}', ""):
+        assert found(one, bad) == [], bad
+
+
+@needs_node
+def test_two_tabs_do_not_lose_each_others_answers(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      const a = open({storage}), b = open({storage});
+      a.openAll(); b.openAll();
+      a.press(a.item("Object 2"), "I was there");
+      b.press(b.item("Object 3"), "I was not there");
+      const early = a.pressed();
+      a.tell("storage", {});
+      const late = a.pressed();
+      b.press(b.item("Object 2"), "Clear this answer");
+      a.byId.download.click();
+      return [early, late, a.blobs[0].text, a.pressed()];
+    """)
+    assert got[0] == ["I was there"] and got[1] == ["I was there", "I was not there"]
+    assert load_answers(answers_file(tmp_path, got[2]), m) == {(22, 3): "n"}
+    assert got[3] == ["I was not there"]  # the page shows what it exported
+
+
+@needs_node
+@pytest.mark.parametrize("storage", [
+    "null", "{getItem() { throw 1; }, setItem() { throw 1; }}",
+    "{getItem: () => null, setItem() { throw 1; }}", "{getItem: () => null, setItem() {}}",
+])
+def test_the_page_works_without_storage_and_says_so(tmp_path, storage):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, f"const storage = {storage};" + """
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      p.press(p.item("Object 3"), "I was not there");
+      p.byId.download.click();
+      return [p.pressed(), p.blobs[0].text, p.byId.kept.textContent];
+    """)
+    assert got[0] == ["I was there", "I was not there"]
+    assert load_answers(answers_file(tmp_path, got[1]), m) == {(22, 2): "y", (22, 3): "n"}
+    assert "not being kept" in got[2]
+
+
+@needs_node
+def test_storage_that_stops_working_keeps_the_answers_given_since(tmp_path):
+    got = run(tmp_path, manifest(EVERYTHING), """
+      const storage = new Storage();
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      storage.setItem = () => { throw new Error("full"); };
+      p.press(p.item("Object 3"), "I was there");
+      p.press(p.item("Object 4"), "I was there");
+      p.byId.download.click();
+      return [p.pressed().length, Object.keys(JSON.parse(p.blobs[0].text).answers)];
+    """)
+    assert got == [3, ["22:2", "22:3", "22:4"]]
+
+
+@needs_node
+def test_an_incomplete_list_says_so_above_everything(tmp_path):
+    read = """
+      const p = open();
+      return [p.order[0], p.byId.incomplete.hidden, p.byId.incomplete.textContent];
+    """
+    whole = run(tmp_path, manifest(), read)
+    assert whole == ["incomplete", True, ""]
+    part = run(tmp_path, manifest(coverage=COVERAGE | {"tiles_unread": 3}), read)
+    assert part[:2] == ["incomplete", False]
+    for words in ("This list is incomplete", "3 of 15", "again"):
+        assert words in part[2]
+    body = render_page(manifest()).split("<body>")[1].lstrip()
+    assert body.startswith('<div id="incomplete"')
+
+
+@needs_node
+def test_the_header_says_what_was_read_and_what_was_left_out(tmp_path):
+    m = manifest(EVERYTHING, left_out=LEFT_OUT | {"other_origin": 8}, coverage=COVERAGE | {
+        "skipped": {12: 31}, "recall": {22: RECALL[22], 23: RECALL[22] | {"name": "Bridges"}}})
+    got = run(tmp_path, m, """
+      const p = open();
+      return [p.byId.about.textContent, p.byId["left-out"].textContent,
+              p.byId.recall.textContent, p.byId["recall-note"].textContent];
+    """)
+    for words in ("Account 1", "2026-05-01", "2026-05-31", "2 km", "your own camera",
+                  m.sha256[:12], "6 items", "12 map tiles"):
+        assert words in got[0], words
+    for words in ("5 photos taken at travel speed, over 120 km/h", "2 photos beside an impossible",
+                  "3 photos in a stretch", "1 photo in a layover", "6 photos with no absolute",
+                  "4 photos taken after 2026-05-31", "8 photos from another origin",
+                  "31 things of series 12", "never offered: -2, 12, 17, 60"):
+        assert words in got[1], words
+    assert "Bridges" in got[2] and "0.2 km" in got[2] and "2 km" in got[2]
+    assert "will miss" in got[3]
+
+
+@needs_node
+def test_a_page_with_nothing_in_it_says_so(tmp_path):
+    m = manifest([], params=PARAMS | {"until": None},
+                 coverage=COVERAGE | {"recall": {}, "tiles_unread": 1})
+    got = run(tmp_path, m, """
+      const p = open();
+      return [p.byId.shown.textContent, p.byId.about.textContent, p.byId.incomplete.hidden];
+    """)
+    assert "No items" in got[0] and "0 items" in got[1] and got[2] is False
+
+
+@needs_node
+def test_a_day_is_built_when_it_is_opened(tmp_path):
+    m = manifest([candidate(n, at=dt.datetime(2026, 5, 1 + n % 25, 12)) for n in range(3000)])
+    got = run(tmp_path, m, """
+      const p = open();
+      const before = p.items().length;
+      p.days()[0].toggle(true);
+      const one = p.items().length;
+      p.days()[0].toggle(false);
+      p.days()[0].toggle(true);
+      return [p.days().length, before, one, p.items().length];
+    """)
+    assert got == [25, 0, 120, 120]
+
+
+@needs_node
+def test_filters_narrow_the_list_and_never_move_an_item_being_answered(tmp_path):
+    m = manifest([candidate(1, km=0.1), candidate(2, km=0.45), candidate(3, series=5, km=1.2),
+                  candidate(4, series=5, km=0.2)])
+    got = run(tmp_path, m, """
+      const p = open();
+      const names = () => {
+        p.openAll();
+        return p.items().map((i) => i.cls("name")[0].textContent);
+      };
+      const pick = (id, value) => { p.byId[id].value = value; p.byId[id].fire("change"); };
+      const out = {all: names()};
+      pick("by-series", "5"); out.series = names();
+      pick("by-km", "0.5"); out.both = names();
+      pick("by-series", ""); out.km = names();
+      pick("by-km", ""); pick("by-answer", "blank"); out.blank = names();
+      p.press(p.item("Object 1"), "I was there"); out.still = names();
+      pick("by-answer", "blank"); out.gone = names();
+      pick("by-answer", "y"); out.there = names();
+      pick("by-answer", "n"); out.not = names();
+      pick("by-answer", "answered"); out.answered = names();
+      out.exported = Object.keys(logic.exportAnswers(data, new Map([["22:2", "n"]])).answers);
+      out.counts = p.byId.counts.textContent;
+      out.options = p.byId["by-series"].children.map((o) => o.textContent);
+      return out;
+    """)
+    assert got["all"] == ["Object 4", "Object 3", "Object 1", "Object 2"]
+    assert got["series"] == ["Object 4", "Object 3"] and got["both"] == ["Object 4"]
+    assert got["km"] == ["Object 4", "Object 1", "Object 2"]
+    assert got["blank"] == got["still"] == got["all"]
+    assert got["gone"] == ["Object 4", "Object 3", "Object 2"]
+    assert got["there"] == got["answered"] == ["Object 1"] and got["not"] == []
+    assert got["exported"] == ["22:2"] and "3 with no answer" in got["counts"]
+    assert got["options"] == ["All series", "Series 5", "Series 22"]
+
+
+# ------------------------------------------------------------------ the answers
+
+def answers(m=None, **kw):
+    m = m or manifest()
+    return {"format": 1, "account": 1, "manifest": m.sha256, "answers": {"22:1": "y"}} | kw
+
+
+def test_answers_are_read_and_blank_ones_are_absent(tmp_path):
+    m = manifest([candidate(n) for n in range(1, 5)])
+    raw = answers(m, answers={"22:3": "q", "22:1": "y", "22:2": "n"})
+    assert load_answers(answers_file(tmp_path, raw), m) == {
+        (22, 3): "q", (22, 1): "y", (22, 2): "n"}
+    assert load_answers(answers_file(tmp_path, answers(m, answers={})), m) == {}
+
+
+def test_answers_to_the_same_list_made_another_day_are_good(tmp_path):
+    path = answers_file(tmp_path, answers())
+    assert load_answers(path, manifest(created="tomorrow")) == {(22, 1): "y"}
+
+
+@pytest.mark.parametrize("change,why", [
+    ({"manifest": "0" * 64}, "another list"), ({"manifest": None}, "another list"),
+    ({"manifest": ""}, "another list"), ({"manifest": ["x"]}, "another list"),
+    ({"account": 2}, "account"), ({"account": True}, "account"), ({"account": "1"}, "account"),
+    ({"account": 1.0}, "account"), ({"account": None}, "account"),
+    ({"format": 2}, "format"), ({"format": True}, "format"), ({"format": "1"}, "format"),
+    ({"format": 1.0}, "format"),
+    ({"answers": {"22:9": "y"}}, "22:9"), ({"answers": {"23:1": "y"}}, "23:1"),
+    ({"answers": {"022:1": "y"}}, "022:1"), ({"answers": {" 22:1": "y"}}, "22:1"),
+    ({"answers": {"22:+1": "y"}}, "22:"), ({"answers": {"1": "y"}}, "'1'"),
+    ({"answers": {"": "y"}}, "''"), ({"answers": {"22:1:1": "y"}}, "22:1:1"),
+    *(({"answers": {"22:1": v}}, "22:1") for v in (
+        "Y", "yes", "", " y", "a", None, True, 1, ["y"], {"y": 1}, "yn")),
+    ({"answers": None}, "answers"), ({"answers": []}, "answers"), ({"answers": "y"}, "answers"),
+    ({"answers": [["22:1", "y"]]}, "answers"), ({"note": "x"}, "note"),
+])
+def test_answers_that_do_not_fit_are_refused(tmp_path, change, why):
+    with pytest.raises(PlanInvalid, match=rf"series-answers\.json.*{re.escape(why)}"):
+        load_answers(answers_file(tmp_path, answers(**change)), manifest())
+
+
+@pytest.mark.parametrize("gone", ["format", "account", "manifest", "answers"])
+def test_answers_without_a_field_are_refused(tmp_path, gone):
+    raw = {k: v for k, v in answers().items() if k != gone}
+    with pytest.raises(PlanInvalid, match=gone):
+        load_answers(answers_file(tmp_path, raw), manifest())
+
+
+@pytest.mark.parametrize("field", ["lat", "at", "name", "thin"])
+def test_answers_to_a_list_since_changed_are_refused(tmp_path, field):
+    path = answers_file(tmp_path, answers())
+    changed = manifest([candidate(1), candidate(2, **{field: OTHER[field]})])
+    with pytest.raises(PlanInvalid, match="another list"):
+        load_answers(path, changed)
+
+
+@pytest.mark.parametrize("content", [
+    "", "{", "null", "[]", '"y"', "5", "[" * 100_000, b"\xff\xfe", b"\x00",
+    '{"answers": NaN}', '{"answers": -Infinity}', '{"account": ' + "9" * 5000 + "}",
+])
+def test_a_file_that_is_not_answers_is_refused(tmp_path, content):
+    with pytest.raises(PlanInvalid, match=r"series-answers\.json"):
+        load_answers(answers_file(tmp_path, content), manifest())
+
+
+def test_a_repeated_answer_is_refused(tmp_path):
+    """json keeps the last of two, and the owner may have meant the first."""
+    text = json.dumps(answers())
+    for bad, why in ((text.replace('"22:1": "y"', '"22:1": "y", "22:1": "n"'), "22:1"),
+                     (text.replace('"format": 1', '"format": 1, "format": 1'), "format")):
+        with pytest.raises(PlanInvalid, match=f"'{why}' twice"):
+            load_answers(answers_file(tmp_path, bad), manifest())
+
+
+def test_a_huge_answers_file_is_refused_unread(tmp_path):
+    text = json.dumps(answers())
+    path = answers_file(tmp_path, text + " " * (5_000_000 - len(text)))
+    assert load_answers(path, manifest())
+    path.write_text(text + " " * (5_000_001 - len(text)), encoding="utf-8")
+    with pytest.raises(PlanInvalid, match="5 MB"):
+        load_answers(path, manifest())
+
+
+def test_an_answers_file_that_cannot_be_opened_is_refused(tmp_path):
+    for path in (tmp_path / "absent.json", tmp_path):
+        with pytest.raises(PlanInvalid, match="cannot be read"):
+            load_answers(path, manifest())
+
+
+def test_review_output_is_never_committed():
+    root = Path(__file__).parents[1]
+    assert "review/" in (root / ".gitignore").read_text(encoding="utf-8").splitlines()

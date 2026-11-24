@@ -1,0 +1,190 @@
+"use strict";
+/* Runs a rendered review page without a browser: its own scripts, cut out of the page,
+   against the few DOM calls they make. Usage: node review_page_dom.js PAGE BODY, where
+   BODY is the inside of a function of (open, logic, data) whose result is printed. */
+
+const fs = require("fs");
+const vm = require("vm");
+
+const [, , pagePath, bodyPath] = process.argv;
+const html = fs.readFileSync(pagePath, "utf8");
+
+const cut = (id) => {
+  const m = new RegExp(`<script[^>]* id="${id}"[^>]*>([\\s\\S]*?)</script>`).exec(html);
+  if (!m) throw new Error(`the page has no script ${id}`);
+  return m[1];
+};
+const data = JSON.parse(cut("data"));
+
+class El {
+  constructor(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.attrs = {};
+    this.on = {};
+    this.own = "";
+    this.hidden = false;
+    this.open = false;
+    this.value = "";
+    this.className = "";
+  }
+  get textContent() {
+    return this.own + this.children.map((c) => c.textContent).join("");
+  }
+  set textContent(text) {
+    this.children = [];
+    this.own = String(text);
+  }
+  set innerHTML(_) {
+    throw new Error("innerHTML");
+  }
+  set outerHTML(_) {
+    throw new Error("outerHTML");
+  }
+  append(...nodes) {
+    for (const n of nodes) {
+      if (!(n instanceof El)) throw new Error("append takes elements here");
+      this.children.push(n);
+    }
+  }
+  replaceChildren(...nodes) {
+    this.own = "";
+    this.children = [];
+    this.append(...nodes);
+  }
+  setAttribute(name, value) {
+    this.attrs[name] = String(value);
+  }
+  getAttribute(name) {
+    return name in this.attrs ? this.attrs[name] : null;
+  }
+  addEventListener(type, f) {
+    (this.on[type] = this.on[type] || []).push(f);
+  }
+  fire(type) {
+    for (const f of this.on[type] || []) f({ type, target: this });
+  }
+  click() {
+    this.fire("click");
+    if (this.tag === "a") El.clicked.push(this);
+  }
+  focus() {}
+  select() {}
+  remove() {}
+  /* A browser fires this once the box is open. */
+  toggle(open = !this.open) {
+    this.open = open;
+    this.fire("toggle");
+  }
+  all(test) {
+    const found = test(this) ? [this] : [];
+    return found.concat(...this.children.map((c) => c.all(test)));
+  }
+  cls(name) {
+    return this.all((e) => e.className.split(" ").includes(name));
+  }
+}
+El.clicked = [];
+
+class Storage {
+  constructor() {
+    this.held = new Map();
+  }
+  getItem(k) {
+    return this.held.has(k) ? this.held.get(k) : null;
+  }
+  setItem(k, v) {
+    this.held.set(k, String(v));
+  }
+}
+
+/* A page opened with this storage: `null` is a browser that refuses even to name it. */
+function open({ storage = new Storage(), clipboard = "ok" } = {}) {
+  const byId = {};
+  const order = [];
+  const body = html.replace(/<(script|style)[\s\S]*?<\/\1>/g, "");
+  for (const m of body.matchAll(/<(\w+)([^>]*) id="([\w-]+)"([^>]*)>/g)) {
+    const e = new El(m[1]);
+    e.hidden = /\shidden(\s|$)/.test(m[2] + " " + m[4]);
+    byId[m[3]] = e;
+    order.push(m[3]);
+  }
+  byId.data = new El("script");
+  byId.data.textContent = cut("data");
+  const listeners = {};
+  const blobs = [];
+  const revoked = [];
+  const timers = [];
+  const copied = [];
+  El.clicked = [];
+  const window = {
+    addEventListener: (type, f) => (listeners[type] = listeners[type] || []).push(f),
+  };
+  Object.defineProperty(window, "localStorage", {
+    get() {
+      if (storage === null) throw new Error("storage is off");
+      return storage;
+    },
+  });
+  const box = {
+    window,
+    document: {
+      createElement: (tag) => new El(tag),
+      getElementById: (id) => byId[id] || null,
+    },
+    navigator:
+      clipboard === "absent"
+        ? {}
+        : {
+            clipboard: {
+              writeText: async (text) => {
+                if (clipboard === "refused") throw new Error("no");
+                copied.push(text);
+              },
+            },
+          },
+    Blob: class {
+      constructor(parts, options) {
+        this.text = parts.join("");
+        this.type = options.type;
+      }
+    },
+    URL: {
+      createObjectURL: (b) => `blob:${blobs.push(b)}`,
+      revokeObjectURL: (u) => revoked.push(u),
+    },
+    setTimeout: (f) => timers.push(f),
+  };
+  vm.createContext(box);
+  vm.runInContext(cut("logic"), box);
+  vm.runInContext(cut("page"), box);
+  const days = byId.days;
+  return {
+    byId, order, blobs, revoked, timers, copied, storage,
+    clicked: El.clicked,
+    tell: (type, event) => (listeners[type] || []).forEach((f) => f(event)),
+    days: () => days.cls("day"),
+    openAll: () => days.cls("day").forEach((d) => d.toggle(true)),
+    items: () => days.cls("item"),
+    item: (name) => days.cls("item").find((i) => i.cls("name")[0].textContent === name),
+    press: (item, word) =>
+      item.all((e) => e.tag === "button" && e.textContent === word)[0].click(),
+    pressed: () =>
+      days.all((e) => e.getAttribute("aria-pressed") === "true").map((e) => e.textContent),
+  };
+}
+
+const alone = vm.createContext({});
+vm.runInContext(cut("logic"), alone); /* with no document and no window */
+const logic = vm.runInContext("Review", alone);
+
+const AsyncFunction = (async () => {}).constructor;
+new AsyncFunction("open", "logic", "data", "Storage", fs.readFileSync(bodyPath, "utf8"))(
+  open, logic, data, Storage,
+).then(
+  (result) => process.stdout.write(JSON.stringify(result)),
+  (error) => {
+    process.stderr.write(String(error && error.stack));
+    process.exitCode = 1;
+  },
+);
