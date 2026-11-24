@@ -156,7 +156,14 @@ def match_series(
     *,
     min_recall: float = MIN_RECALL,
 ) -> SeriesVerdict:
-    """Apply the right rule for this series, validate it, then propose."""
+    """Apply the right rule for this series, validate it, then propose.
+
+    The 25% that the gate stopped the airports at was measured on a day-level track, with
+    one point per city per day, and a day's one point is seldom at the airport. Distance
+    from each photo, as :mod:`wanderfill.plan.review` takes it, can do better. Either is
+    recall, not precision: how much of what is ticked a rule finds again, and nothing
+    about how often a thing it offers was visited.
+    """
     is_airport = series_id in AIRPORT_SERIES
     is_city = series_id in PRESENCE_SERIES
     rule = (

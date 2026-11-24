@@ -48,6 +48,7 @@ from wanderfill.plan.review import (
     recall,
     render_page,
 )
+from wanderfill.plan.series import AIRPORT_SERIES, match_series
 from wanderfill.sources.photos_app import PhotoAsset
 
 UTC = dt.timezone.utc
@@ -3547,3 +3548,240 @@ def test_what_the_commands_write_is_never_committed():
     lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert {"review/", "review-*.json", "review-*.html", "series-answers*.json",
             "plan*.json"} <= set(lines)
+
+
+# ------------------------------------------------------------------ airports
+
+
+def test_airports_are_unflagged_first_then_thin_then_distance():
+    shots, objects = [], {}
+    for n, places in {
+        1: [(0.5, 1), (0.6, 1)],  # plain
+        2: [(0.1, 1)],  # thin: one photo
+        3: [(0.05, 1), (0.05, 2)],  # one spot
+        4: [(1.5, 1), (1.5, 2)],  # one spot and thin
+        5: [(1.2, 1), (1.3, 1)],  # thin: far
+        6: [(0.4, 1), (0.45, 1)],  # plain, nearer
+    }.items():
+        for series in (5, 22):
+            objects |= obj(float(n), 20.0, item=n, series=series)
+        shots += [shot(n + km * KM, 20.0, day=day) for km, day in places]
+    got = offered(shots, objects)
+    assert [c.item for c in got if c.series == 5] == [6, 1, 2, 5, 3, 4]
+    assert [c.item for c in got if c.series == 22] == [2, 6, 1, 5, 3, 4]
+    assert [c.series for c in got] == [5] * 6 + [22] * 6
+    flagged = [c.conflict or c.one_spot for c in got if c.series == 5]
+    assert flagged == sorted(flagged)
+
+
+def test_a_layover_offers_an_airport_and_nothing_beside_it():
+    objects = obj(10.0, 20.0, series=5) | obj(10.0, 20.0, series=22) | obj(10.0, 20.0, series=1)
+    (c,) = offered([shot(10.0, 20.0, use="airports")], objects)
+    assert c.series == 5
+
+
+def test_a_fast_photo_offers_no_airport_and_no_nearest_one():
+    """A photo from a window is over an airport, and over many other things."""
+    objects = obj(10.0, 20.0, series=5) | obj(10.0 + 5 * KM, 20.0, item=2, series=5)
+    fast = [shot(10.0, 20.0, kind="fast"), shot(10.0, 20.0, kind="fast", day=2)]
+    assert offered(fast, objects) == []
+    (c,) = offered([*fast, shot(10.0 + 5.5 * KM, 20.0)], objects)
+    assert (c.item, c.photos, c.fast_near) == (2, 1, 0)
+    (c,) = offered([*fast, shot(10.0 + 1.0 * KM, 20.0)], obj(10.0, 20.0, series=5))
+    assert (c.photos, c.days, c.fast_near, c.thin) == (1, 1, 2, True)
+
+
+AIRPORTS = {1: "Alder Field", 2: "Birch Field", 3: "Cedar Field", 4: "Dogwood Field"}
+
+
+def test_recall_names_the_ticked_airports_no_photo_is_near_and_no_other_series():
+    objects = obj(10.0, 20.0, item=1, series=5) | obj(50.0, 20.0, item=2, series=5)
+    cat = {5: SeriesInfo("Airports", AIRPORTS), 22: SeriesInfo("x", {7: "Glass Hall"})}
+    got = recall([shot(10.0, 20.0)], objects, {5: {1, 2, 3, 99}, 22: {7}}, catalogue=cat)
+    assert got[5]["no_photo"] == [2, 3, 99]
+    assert got[5]["no_photo_names"] == {2: "Birch Field", 3: "Cedar Field"}
+    assert "no_photo_names" not in got[22] and got[22]["no_photo"] == [7]
+
+
+def airports_row(**kw):
+    return {"ticked": 4, "located": 2, "found": {0.2: 0, 2.0: 1}, "no_photo": [2, 3, 99],
+            "no_photo_names": {2: "Birch Field", 3: "Cedar Field"}, "name": "Airports"} | kw
+
+
+def airports_manifest(candidates=(), **kw):
+    return manifest(list(candidates), coverage=COVERAGE | {
+        "recall": {1: RECALL[22], 5: airports_row(**kw), 22: RECALL[22]}})
+
+
+def test_names_of_airports_are_in_the_list_and_in_its_hash(tmp_path):
+    m = airports_manifest()
+    row = m.coverage["recall"]["5"]
+    assert row["no_photo_names"] == {"2": "Birch Field", "3": "Cedar Field"}
+    assert Manifest.load(m.save(tmp_path / "m.json")) == m
+    assert airports_manifest(no_photo_names={2: "Birch Field", 3: "C"}).sha256 != m.sha256
+
+
+@pytest.mark.parametrize("names", [{4: "Dogwood Field"}, {2: 5}, {2: None}, ["Birch Field"],
+                                   {"x": "y"}, {"02": "Birch Field"}, {2: "a", "2": "b"}, "x"])
+def test_only_names_of_what_is_ticked_and_has_no_photo_are_taken(names):
+    """Any other name would be one of an unticked thing without a photo."""
+    with pytest.raises(PlanInvalid, match="no_photo_names"):
+        airports_manifest(no_photo_names=names)
+
+
+def test_names_are_of_airports_only():
+    with pytest.raises(PlanInvalid, match="no_photo_names"):
+        manifest(coverage=COVERAGE | {"recall": {22: airports_row()}})
+
+
+@pytest.fixture
+def flights(world):
+    """Airports, one of them ticked with a photo, two ticked without; and two series more."""
+    world.reader.points += [
+        SeriesPoint(1, 5, "", 10.0, 20.0), SeriesPoint(2, 5, "", 10.2, 20.2),
+        SeriesPoint(4, 5, "", 10.0 + 0.1 * KM, 20.0), SeriesPoint(5, 5, "", 10.3, 20.3),
+        SeriesPoint(1, 1, "", 10.0, 20.0)]
+    world.series[5] = Site.reply("Airports", AIRPORTS | {5: "Elm Field"}, [1, 2, 3])
+    world.series[1] = Site.reply("Series 1", {1: "Zinc Pier"}, [1])
+    return world
+
+
+def test_review_prints_airports_first_and_what_it_would_miss(flights, capsys):
+    flights.series[5]["items2"][1]["name"] = "Birch\u202e \x1bField"
+    assert do_review() == 0
+    out = capsys.readouterr().out
+    rows = [line.split()[0] for line in out.splitlines() if re.match(r"  \d+ \S", line)]
+    assert rows == ["5", "1", "22"]
+    part = out[out.index("ticked airports"):]
+    assert "Birch Field" in part and "Cedar Field" in part and "2 ticked airports" in out
+    for name in ("Alder Field", "Dogwood Field", "Elm Field"):  # found; offered; nothing of it
+        assert name not in out
+    assert "\u202e" not in out and "\x1b" not in out
+    _, m = written_by()
+    assert [(c.series, c.item, c.thin) for c in m.candidates if c.series == 5] == [(5, 4, True)]
+    assert "Elm Field" not in json.dumps(m._stored())
+
+
+def test_review_says_nothing_of_airports_it_did_not_read(flights, capsys):
+    assert do_review("--series", "22") == 0
+    assert "airport" not in capsys.readouterr().out.replace("used for airports only", "")
+    flights.series[5]["visited"] = [1]
+    assert do_review(out="again") == 0
+    assert "ticked airports" not in capsys.readouterr().out
+
+
+@needs_node
+def test_the_page_puts_airports_first_in_recall_and_names_what_is_missed(tmp_path):
+    bad = "Birch\u202e Field"
+    m = airports_manifest(no_photo_names={2: bad, 3: "\u2066"})
+    got = run(tmp_path, m, """
+      const p = open();
+      return [p.byId.recall.children.map((r) => r.children[0].textContent),
+              p.byId["airports-note"].textContent, p.byId["airports-note"].hidden,
+              p.byId["airports-missed"].children.map((e) => e.textContent)];
+    """)
+    assert got[0] == ["Series", "Airports (5)", "Series 1", "Series 22"]
+    assert "3 airports you have ticked" in got[1] and "not complete" in got[1] and not got[2]
+    assert got[3] == ["Birch Field", "Airport 3, with no name in the catalogue",
+                      "Airport 99, with no name in the catalogue"]
+
+
+@needs_node
+@pytest.mark.parametrize("recall_of", [
+    {22: RECALL[22]}, {}, {5: airports_row(no_photo=[], no_photo_names={})}])
+def test_the_page_says_nothing_of_airports_where_none_is_missed(tmp_path, recall_of):
+    got = run(tmp_path, manifest(coverage=COVERAGE | {"recall": recall_of}), """
+      const p = open();
+      return [p.byId["airports-note"].textContent, p.byId["airports-note"].hidden,
+              p.byId["airports-missed"].children.length];
+    """)
+    assert got == ["", True, 0]
+
+
+THIN_AIRPORTS = "Airports: one photo, or over 1 km away"
+MARKED_AIRPORTS = "Airports: with a conflict or one spot"
+
+
+def mixed():
+    day = dt.datetime(2026, 5, 2, 9)
+    def a(item, **kw):
+        return candidate(item, series=5, **kw)
+    return [a(1, km=0.9), a(2, km=0.1, thin=True), a(3, km=0.05, conflict=True),
+            a(4, km=0.01, one_spot=True, thin=True), a(5, km=1.5, thin=True), a(6, km=0.2),
+            a(7, km=0.3, thin=True, at=day), a(8, km=0.02, one_spot=True),
+            candidate(9, thin=True, km=0.1), candidate(10, km=0.2),
+            candidate(11, conflict=True, km=0.1), candidate(12, series=1, thin=True)]
+
+
+@needs_node
+def test_thin_airports_are_under_a_heading_of_their_own_before_the_flagged(tmp_path):
+    got = run(tmp_path, manifest(mixed()), """
+      const p = open();
+      p.openAll();
+      const names = (d) => d.cls("name").map((n) => Number(n.textContent.split(" ")[1]));
+      return p.byId.days.children.map((e) => e.tag === "h2" ? e.textContent : names(e));
+    """)
+    assert got == [[12, 6, 1, 9, 10, 11], THIN_AIRPORTS, [2, 5], [7],
+                   MARKED_AIRPORTS, [8, 3, 4]]
+
+
+@needs_node
+def test_the_page_and_the_list_have_one_order(tmp_path):
+    """Series by series, and on one day, they are the same."""
+    keyed = [dataclasses.replace(c, at=dt.datetime(2026, 5, 1, 9)) for c in mixed()]
+    want = [c.item for c in sorted(keyed, key=review._rank) if c.series == 5]
+    assert want == [6, 1, 2, 7, 5, 8, 3, 4]
+    got = run(tmp_path, manifest(keyed), """
+      return logic.sections(data.candidates).flatMap((s) => s.days.flatMap((d) => d.items))
+        .filter((c) => c.series === 5).map((c) => c.item);
+    """)
+    assert got == want
+
+
+@needs_node
+def test_a_heading_with_nothing_under_it_is_not_there_and_days_stay_open(tmp_path):
+    got = run(tmp_path, manifest(mixed()), """
+      const p = open();
+      p.openAll();
+      const heads = () => p.byId.days.children.filter((e) => e.tag === "h2")
+        .map((e) => e.textContent);
+      const pick = (series) => {
+        p.byId["by-series"].value = series;
+        p.tell("pageshow", {persisted: false});
+        return heads();
+      };
+      const opened = () => p.days().every((d) => d.open);
+      return [pick("22"), pick("5"), opened(), pick("1"), pick("")];
+    """)
+    assert got == [[], [THIN_AIRPORTS, MARKED_AIRPORTS], True, [],
+                   [THIN_AIRPORTS, MARKED_AIRPORTS]]
+
+
+@needs_node
+def test_a_day_opened_under_one_heading_is_not_open_under_another(tmp_path):
+    m = manifest([candidate(n, series=22) for n in range(1, 200)]
+                 + [candidate(n, series=5, thin=True) for n in range(1, 200)])
+    got = run(tmp_path, m, """
+      const p = open();
+      const opened = () => p.days().map((d) => d.open);
+      const first = opened();
+      p.days()[0].toggle(true);
+      p.byId["by-series"].value = "5";
+      p.tell("pageshow", {persisted: false});
+      const thin = opened();
+      p.byId["by-series"].value = "";
+      p.tell("pageshow", {persisted: false});
+      return [first, thin, opened()];
+    """)
+    assert got == [[False, False], [False], [True, False]]
+
+
+def test_the_page_knows_which_series_is_airports():
+    page = (Path(review.__file__).parent / "review_page.html").read_text(encoding="utf-8")
+    assert f"const AIRPORTS = {next(iter(AIRPORT_SERIES))};" in page and len(AIRPORT_SERIES) == 1
+
+
+def test_match_series_says_what_its_recall_was():
+    text = " ".join(match_series.__doc__.split())
+    for words in ("25%", "day-level", "photo", "recall", "not precision"):
+        assert words in text, words

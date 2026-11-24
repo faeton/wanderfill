@@ -627,7 +627,8 @@ Oceania. Those match on **place name**, not distance. Airports get the opposite
 rule, matching on distance only, because their objects are named after their
 cities. Every rule is scored against what is already ticked before it may add
 anything; on the original run, that gate stopped the Airports rule at 25% recall
-on its own.
+on its own. That 25% was measured with one point per city per day; distance from each
+photo, below, can do better. Both are recall, not precision.
 
 ### Answering a page instead
 
@@ -672,6 +673,13 @@ A time "by the photo's own clock" is UTC for a photo with no recorded zone.
 It prints how much of what you have ticked already the same photos find. That says
 what the list will miss, and not how often it is right. Things that no photo is near
 are not listed anywhere.
+
+Airports come first in that table, and the ticked ones with no photo near are named,
+because they are ticked: few people photograph every airport, and the list is not all
+of them. A layover span counts for airports and for nothing else. A photo from the air
+offers no airport, and no nearest one is guessed. The airports with one photo, or none
+within a kilometre, are under their own heading after the other items, and the ones with
+a conflict or one spot after those.
 
 On the page you answer "I was there", "I was not there" or "I don't remember", or
 nothing. The page loads nothing and sends nothing; it saves a file of answers, which

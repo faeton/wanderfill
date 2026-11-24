@@ -1136,6 +1136,7 @@ def _write_new(path: Path, text: str) -> None:
 def _print_review(m, ground: int) -> None:
     """Counts. No item is named here, and none without a photo anywhere."""
     from ..plan.review import shown
+    from ..plan.series import AIRPORT_SERIES
 
     p = m.params
     print(f"account {m.account}: photos from {p['since']} to {p['until'] or 'the newest one'}, "
@@ -1162,12 +1163,22 @@ def _print_review(m, ground: int) -> None:
         print(f"  {'series':<34}{'ticked':>7}{'on map':>7}"
               + "".join(f"{f'{float(r):g} km':>8}" for r in radii) + f"{'no photo':>10}"
               + f"{'offered':>9}")
-        for series, row in sorted(rows.items(), key=lambda e: int(e[0])):
+        for series, row in sorted(
+            rows.items(), key=lambda e: (int(e[0]) not in AIRPORT_SERIES, int(e[0]))
+        ):
             offered = sum(c.series == int(series) for c in m.candidates)
             title = f"{series} {shown(row['name'])}"
             print(f"  {title[:32]:<34}{row['ticked']:>7}{row['located']:>7}"
                   + "".join(f"{row['found'][r]:>8}" for r in radii)
                   + f"{len(row['no_photo']):>10}{offered:>9}")
+        for series in AIRPORT_SERIES:
+            row = rows.get(str(series))
+            if row and row["no_photo"]:
+                n, names = len(row["no_photo"]), row.get("no_photo_names", {})
+                print(f"\n{n} ticked airport{'' if n == 1 else 's'} with no photo near, so the "
+                      "airports on this list are not complete:")
+                for item in row["no_photo"]:
+                    print(f"  {shown(names.get(str(item), ''), f'item {item}')}")
         print("\noffered, by distance to the nearest photo:")
         for r in radii:
             print(f"  within {float(r):g} km: {sum(c.km <= float(r) for c in m.candidates):,}")

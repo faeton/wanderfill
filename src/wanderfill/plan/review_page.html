@@ -110,12 +110,14 @@ answers as a file, and a plan is made from it for you to read first.</li>
 <h2>What was left out, and why</h2>
 <p class="soft">Photos that did not count, and series that are not offered.</p>
 <ul id="left-out"></ul>
+<p id="airports-note" hidden></p>
 <details>
 <summary>How much of what you have ticked these photos find</summary>
 <p id="recall-note" class="soft"></p>
 <div class="wide" role="region" aria-label="Found, by series and distance" tabindex="0">
 <table id="recall"></table>
 </div>
+<ul id="airports-missed" aria-label="Ticked airports with no photo near"></ul>
 </details>
 
 <h2>Your list</h2>
@@ -161,6 +163,7 @@ const Review = (() => {
   const FILE = "series-answers.json";
   const WORDS = { y: "I was there", n: "I was not there", q: "I don't remember" };
   const VALUES = Object.keys(WORDS);
+  const AIRPORTS = 5;
   const ORIGINS = {
     "own-camera": "your own camera",
     airdrop: "AirDrop, which may be somebody else's photo",
@@ -306,12 +309,15 @@ const Review = (() => {
     return day + ", " + WEEKDAYS[date.getUTCDay()];
   }
 
+  const flagged = (c) => c.conflict || c.one_spot;
+  const thinAirport = (c) => c.series === AIRPORTS && c.thin;
+
   function inOrder(a, b) {
-    const flagged = (c) => Number(c.conflict || c.one_spot);
     return (
       (dayOf(a) < dayOf(b) ? -1 : Number(dayOf(a) > dayOf(b))) ||
       a.series - b.series ||
       flagged(a) - flagged(b) ||
+      thinAirport(a) - thinAirport(b) ||
       a.km - b.km ||
       a.item - b.item
     );
@@ -326,9 +332,18 @@ const Review = (() => {
     return [...days].map(([day, items]) => ({ day, items }));
   }
 
-  /* The list in the parts it is shown in, each with a heading or "". One part, for now. */
+  /* The list in the parts it is shown in, each with a heading or "". The thin airports are on
+     their own, and the flagged ones after them, for no flagged item of a series is put before
+     one that has no flag. */
   function sections(list) {
-    return [{ title: "", days: byDay(list) }].filter((s) => s.days.length);
+    const flaggedAirport = (c) => c.series === AIRPORTS && flagged(c);
+    const parts = [
+      ["", (c) => !thinAirport(c) && !flaggedAirport(c)],
+      ["Airports: one photo, or over 1 km away", (c) => thinAirport(c) && !flagged(c)],
+      ["Airports: with a conflict or one spot", flaggedAirport],
+    ];
+    return parts.map(([title, has]) => ({ title, days: byDay(list.filter(has)) }))
+      .filter((s) => s.days.length);
   }
 
   const kmText = (km) =>
@@ -410,7 +425,8 @@ const Review = (() => {
   function recallRows(data) {
     const rows = data.coverage.recall;
     const names = new Map(data.candidates.map((c) => [String(c.series), c.series_name]));
-    const ids = Object.keys(rows).sort(byNumber);
+    const last = (id) => Number(Number(id) !== AIRPORTS);
+    const ids = Object.keys(rows).sort((a, b) => last(a) - last(b) || byNumber(a, b));
     if (!ids.length) return [];
     const radii = [...new Set(ids.flatMap((id) => Object.keys(rows[id].found)))].sort(byNumber);
     return [
@@ -424,6 +440,21 @@ const Review = (() => {
         rows[id].no_photo.length,
       ]),
     ];
+  }
+
+  /* By name, because they are ticked. Nothing else without a photo is named anywhere. */
+  function airportsMissed(data) {
+    const row = data.coverage.recall[AIRPORTS];
+    if (!row) return [];
+    return row.no_photo.map((id) => shown((row.no_photo_names || {})[id] || "",
+      "Airport " + id + ", with no name in the catalogue"));
+  }
+
+  function airportsNote(data) {
+    const n = airportsMissed(data).length;
+    return n ? plural(n, "airport") + " you have ticked " + (n === 1 ? "has" : "have") +
+      " no photo near, so the airports on this list are not complete. They are named under " +
+      "\"How much of what you have ticked\", below." : "";
   }
 
   const recallNote = (data) =>
@@ -462,7 +493,7 @@ const Review = (() => {
     : "";
 
   return {
-    FILE, WORDS, VALUES, about, counts, countsText, dayTitle, exportAnswers, exportNote,
+    FILE, WORDS, VALUES, about, airportsMissed, airportsNote, counts, countsText, dayTitle, exportAnswers, exportNote,
     exportText, facts, flags, incomplete, itemTitle, keptNote, keyOf, leftOut, matches,
     openStore, plural, recallNote, recallRows, sections, seriesTitle, unusedNote,
   };
@@ -604,10 +635,10 @@ const Review = (() => {
     const parts = Review.sections(list);
     redraw = new Map();
     const nodes = [];
-    parts.forEach((part, n) => {
+    parts.forEach((part) => {
       if (part.title) nodes.push(el("h2", "", part.title));
       for (const day of part.days) {
-        nodes.push(drawDay(n + " " + day.day, day, list.length <= OPEN_UP_TO));
+        nodes.push(drawDay(part.title + " " + day.day, day, list.length <= OPEN_UP_TO));
       }
     });
     $("days").replaceChildren(...nodes);
@@ -706,6 +737,10 @@ const Review = (() => {
     }));
     return row;
   }));
+
+  $("airports-note").textContent = Review.airportsNote(data);
+  $("airports-note").hidden = !Review.airportsNote(data);
+  $("airports-missed").replaceChildren(...lines(Review.airportsMissed(data)));
 
   const series = new Map(data.candidates.map((c) => [c.series, c.series_name]));
   $("by-series").replaceChildren(option("", "All series"), ...[...series]

@@ -532,6 +532,12 @@ def _ids(
     return out
 
 
+def _rank(c: Candidate) -> tuple:
+    """The order of a list: see :func:`find_candidates`. The page has it by day as well."""
+    return (c.series, c.conflict or c.one_spot, c.thin and c.series in AIRPORT_SERIES, c.km,
+            c.item)
+
+
 def find_candidates(
     shots: Iterable[Shot],
     objects: Mapping[tuple[int, int], SeriesPoint],
@@ -544,10 +550,11 @@ def find_candidates(
     """The unticked catalogue objects with a ground photo in the radius.
 
     Sorted by series, then the ones with no ``conflict`` and no ``one_spot`` before the
-    ones with, then distance and id. An object the catalogue does not list is not
-    offered, whatever the tile says: a tick on it could not be read back. A catalogue
-    series absent from ``ticked`` is one whose list was not read, and raises
-    :class:`PlanInvalid`; a series with nothing ticked has an empty entry.
+    ones with, then distance and id. Of the airports the ``thin`` ones come last in each of
+    the two, for a single photo near one is what a transfer leaves. An object the catalogue
+    does not list is not offered, whatever the tile says: a tick on it could not be read
+    back. A catalogue series absent from ``ticked`` is one whose list was not read, and
+    raises :class:`PlanInvalid`; a series with nothing ticked has an empty entry.
     """
     near, done = _Near(shots, radius_km), _ids(ticked, catalogue)
     out = []
@@ -572,7 +579,7 @@ def find_candidates(
             thin=len(proof) == 1 or km > THIN_KM,
             one_spot=len(days) > 1 and len({(s.lat, s.lon) for _, s in proof}) == 1,
         ))
-    return sorted(out, key=lambda c: (c.series, c.conflict or c.one_spot, c.km, c.item))
+    return sorted(out, key=_rank)
 
 
 def count_skipped(
@@ -614,7 +621,9 @@ def recall(
     an object for; ``found`` is, for each radius, how many of them a ground photo is
     near, by the rule the offers use. ``no_photo`` is the ids of the ticked items not
     found at the widest radius, the ones without an object included: those were in no
-    tile that was read, which is no photo near or a tile that failed.
+    tile that was read, which is no photo near or a tile that failed. The airports also
+    have ``no_photo_names``, the catalogue's names of those, so that nobody reads the list
+    as complete. They are ticked: an unticked thing without a photo is named nowhere.
 
     A catalogue series absent from ``ticked`` is one whose list was not read, and raises
     :class:`PlanInvalid`: a recall printed without it would look complete.
@@ -637,6 +646,10 @@ def recall(
             "found": {r: sum(km <= r for km in nearest.values()) for r in radii},
             "no_photo": [i for i in sorted(items) if i not in nearest],
         }
+        if series in AIRPORT_SERIES and series in catalogue:
+            names = catalogue[series].items
+            out[series]["no_photo_names"] = {
+                i: names[i] for i in out[series]["no_photo"] if i in names}
     return out
 
 
@@ -664,7 +677,8 @@ class Manifest:
     ``params`` has ``since``, ``until`` (a date or ``None``), ``radius_km``, ``origins``,
     ``skip`` and ``speeds``, the arguments of :func:`grade_shots` by name. ``coverage``
     has ``tiles_read``, ``tiles_unread`` and ``recall``, which is what :func:`recall`
-    returns, where a row may also have a ``name``; and may have ``skipped``, from
+    returns, where a row may also have a ``name``, and ``no_photo_names`` may hold names of
+    ids in ``no_photo`` of the airports and no others; and may have ``skipped``, from
     :func:`count_skipped`. ``left_out`` is what :func:`left_out` returns, and may have
     ``other_origin``, the photos of another origin, which were not used.
 
@@ -829,6 +843,9 @@ def _coverage_of(raw: object) -> dict:
            for name in ("tiles_read", "tiles_unread")}
     out["recall"] = {series: _recall_of(row, f"coverage.recall[{series}]")
                      for series, row in _by_id(raw["recall"], "coverage.recall").items()}
+    for series, row in out["recall"].items():
+        if "no_photo_names" in row and int(series) not in AIRPORT_SERIES:
+            raise ValueError(f"coverage.recall[{series}].no_photo_names: only airports have them")
     if "skipped" in raw:
         out["skipped"] = {series: _whole(n, f"coverage.skipped[{series}]", low=0) for series, n
                           in _by_id(raw["skipped"], "coverage.skipped").items()}
@@ -836,7 +853,7 @@ def _coverage_of(raw: object) -> dict:
 
 
 def _recall_of(row: object, what: str) -> dict:
-    _fields(row, _RECALL, what, ("name",))
+    _fields(row, _RECALL, what, ("name", "no_photo_names"))
     if not isinstance(row["found"], Mapping):
         raise ValueError(f"{what}.found must be an object, not {_r(row['found'])}")
     found: dict[str, int] = {}
@@ -855,6 +872,13 @@ def _recall_of(row: object, what: str) -> dict:
     out |= {"found": found, "no_photo": _whole_list(row["no_photo"], f"{what}.no_photo")}
     if "name" in row:
         out["name"] = _text(row["name"], f"{what}.name")
+    if "no_photo_names" in row:
+        at = f"{what}.no_photo_names"
+        out["no_photo_names"] = names = {
+            i: _text(name, f"{at}[{i}]") for i, name in _by_id(row["no_photo_names"], at).items()}
+        # A name of anything else would be of a thing that nobody has a photo near.
+        if others := sorted(set(names) - set(map(str, out["no_photo"]))):
+            raise ValueError(f"{at}: {', '.join(others)} not in no_photo")
     return out
 
 

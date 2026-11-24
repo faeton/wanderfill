@@ -385,7 +385,9 @@ What the marks on an item mean. They are facts for the owner, not grades for you
 is at one end of a jump nobody makes, so a coordinate is wrong. `one spot`: on two days
 or more every photo has exactly one coordinate, as a false or a stale position does.
 `fast`: photos near were taken at travel speed, and do not count. Within a series the
-items with `conflict` or `one spot` come last.
+items with `conflict` or `one spot` come last, and of the airports the thin ones come
+after the others and before those. The ticked airports with no photo near are named: they
+show what the list misses, and are no questions.
 
 What the flags mean. `--origin` other than `own-camera` lets in photos that may be
 somebody else's, so only when the owner asks. `--spans` is the owner's file of
