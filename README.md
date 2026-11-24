@@ -288,7 +288,7 @@ they spent:
 - **Progress every couple of seconds** on stderr, `-v` for every request, and a
   closing `network: N requests, X KB` line.
 
-`plan`, `apply`, `check`, `delete`, `sync-header` and `export` never use the cache: a drift
+`plan`, `series`, `apply`, `check`, `delete`, `sync-header` and `export` never use the cache: a drift
 check, a deletion read-back or a rollback reference read from a cache would
 pass for the wrong reason. A test fails if a cache reaches any of them.
 
@@ -412,6 +412,11 @@ wanderfill history trips --since 10y --exclude uk-form,uk --first
 
 # see what each trip-segmentation setting produces before choosing one
 wanderfill sweep track.csv regions.json
+
+# a page of unticked series items with one of your photos near; you answer it, and
+# the answers become a plan, one series each
+wanderfill series review --since 2024-01-01
+wanderfill series plan review/review-<hash>.json series-answers.json --series 22
 
 # read a plan
 wanderfill show plan.json --verbose
@@ -623,6 +628,71 @@ rule, matching on distance only, because their objects are named after their
 cities. Every rule is scored against what is already ticked before it may add
 anything; on the original run, that gate stopped the Airports rule at 25% recall
 on its own.
+
+### Answering a page instead
+
+`wanderfill series` turns photos into questions, and your answers into plans. It
+sends nothing to the profile.
+
+```bash
+wanderfill series review --since 2024-01-01            # writes a page and its list
+wanderfill series plan review/review-<hash>.json series-answers.json --series 22
+wanderfill series named --series 22 --name "Exact Catalogue Name" \
+    --said "your own words"
+```
+
+**`review`** reads your Photos library, the map tiles and the live series, and
+writes two files into `review/`: a page to open in a browser, and the list it was
+made from. An item is on it only if it is not ticked and a photo taken **on the
+ground** is within 2 km. A photo does not count if the speed around it says it was
+taken on the way, if it is beside a jump no aircraft makes, or if it has no absolute
+time. Only photos from your own camera count, unless `--origin` names others, and
+each origin is graded on its own. A library that does not record where its photos
+came from is refused.
+
+| flag | what it does |
+|---|---|
+| `--since`, `--until` | the first and the last day, by the photo's own clock. `--until` is for a stay that is not over |
+| `--radius KM` | how near a photo has to be; 2 unless you say |
+| `--origin NAME` | `own-camera`, `airdrop`, `other` or `unknown`, and again for another. All but the first may be somebody else's photos |
+| `--spans FILE` | stretches of photos that prove nothing, or only an airport |
+| `--series ID` | only this series, and again for another |
+| `--library`, `--out` | another Photos library, another directory |
+
+A spans file is a JSON list. `use` is `"none"` for a false position or a photo that
+is not yours, and `"airports"` for a layover. `bbox` is west, south, east, north:
+
+```json
+[{"from": "2024-02-01", "to": "2024-02-02", "bbox": [10.0, 20.0, 11.0, 21.0],
+  "why": "the receiver was wrong", "use": "none"}]
+```
+
+It prints how much of what you have ticked already the same photos find. That says
+what the list will miss, and not how often it is right. Things that no photo is near
+are not listed anywhere.
+
+On the page you answer "I was there", "I was not there" or "I don't remember", or
+nothing. The page loads nothing and sends nothing; it saves a file of answers, which
+fits that list and no other.
+
+**`plan`** takes the list, the answers and one series. Only "I was there" becomes a
+tick. It reads the account and the series again: what is ticked by now is left out
+and named, and an item that is gone or has another name refuses the whole plan.
+**`named`** is for one place you remember yourself. The name has to be the
+catalogue's, letter for letter, and your words go into the plan as the evidence. If
+it does not match, nothing is suggested. Both write `plan-series-<ID>.json`, or
+`--plan FILE`, and never replace a file. Then `show -v`, `check` and `apply`, as for
+any plan.
+
+| exit | `series review` | `series plan`, `series named` |
+|---:|---|---|
+| 0 | both files written, also when the list is empty | the plan is written, or nothing is left to tick and none is |
+| 1 | no token | no token; a list or answers that cannot be used, a series that is not on the list, a name that does not match, nothing said |
+| 2 | an error, and no file | an error, another account, an item that is gone, a plan file that exists |
+| 3 | both files written, and a map tile could not be read, so the list is incomplete: run it again | |
+
+The files in `review/` hold coordinates and dates. They are readable by you alone and
+ignored by git.
 
 ---
 

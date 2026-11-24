@@ -124,9 +124,12 @@ class Plan:
 
     # -- io ---------------------------------------------------------------
 
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=1, ensure_ascii=False)
+
     def save(self, path: str | Path) -> Path:
         p = Path(path)
-        p.write_text(json.dumps(asdict(self), indent=1, ensure_ascii=False), encoding="utf-8")
+        p.write_text(self.to_json(), encoding="utf-8")
         return p
 
     @classmethod

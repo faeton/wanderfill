@@ -28,7 +28,11 @@ evidence/
 coords.json
 
 # `series review` writes a page of coordinates and dates from your own photos.
+# The page saves the answers, wherever the browser puts them, as the last of these.
 review/
+review-*.json
+review-*.html
+series-answers*.json
 
 # `share` writes cards with your name and face on them. Post them yourself.
 share/

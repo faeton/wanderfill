@@ -8,6 +8,8 @@ The command set encodes the safety model rather than merely documenting it:
     evidence   index the photo library against what you claim — for verification
     sweep      show what each trip-segmentation setting produces
     plan       write a plan file. Never touches the server's state.
+    series     a page of series items near your photos, to answer; a plan from the
+               answers, one series each; or a plan for one item you name yourself
     show       print a plan for a human to read
     apply      execute a plan file, and only a plan file
     share      draw your UN / UN+ / NM numbers as an image. Reads only.
@@ -65,6 +67,7 @@ from ..evidence import (
     MIN_SMALL_SPOTS,
     SMALL_REGION_KM,
 )
+from ..sources.photos_app import ORIGINS
 
 DEFAULT_WORKDIR = Path.home() / ".local" / "share" / "wanderfill"
 # Kept here rather than imported so ``--help`` does not load the history module.
@@ -952,6 +955,264 @@ def cmd_check(args) -> int:
     return 0
 
 
+def cmd_series_review(args) -> int:
+    """Write the page of questions and its list. Reads only; see :mod:`wanderfill.plan.review`.
+
+    Exits 3 if a map tile could not be read: the two files are there, and the list in
+    them is not complete. Any error is 2, and leaves no file.
+    """
+    try:
+        return _series_review(args)
+    except PlanInvalid as exc:  # a spans file, mostly; 1 is for the files of `plan`
+        raise WanderfillError(str(exc)) from None
+
+
+def _series_review(args) -> int:
+    import sqlite3
+
+    from ..geo.tiles import TileReader
+    from ..plan.review import (
+        RADIUS_KM,
+        SKIP_SERIES,
+        Manifest,
+        count_skipped,
+        default_speeds,
+        find_candidates,
+        grade_by_origin,
+        harvest,
+        left_out,
+        load_spans,
+        read_series,
+        read_ticked,
+        recall,
+    )
+    from ..sources.photos_app import DEFAULT_LIBRARY, PhotosAppSource
+
+    if args.until and args.until < args.since:
+        raise WanderfillError(f"--until {args.until} is before --since {args.since}")
+    for n in args.series or ():
+        if n in SKIP_SERIES:
+            raise WanderfillError(f"series {n} is one of those that are never offered")
+        if n <= 0:
+            raise WanderfillError(f"{n} is not the id of a series")
+    spans = load_spans(args.spans) if args.spans else []
+    origins = sorted(set(args.origin or ["own-camera"]))
+    radius = RADIUS_KM if args.radius is None else args.radius
+    radii = sorted({r for r in (0.2, 0.5, 1.0, 2.0) if r < radius} | {radius})
+    speeds = default_speeds()
+
+    c = _client(args)  # no cache: what is ticked has to be what is ticked now
+
+    library = Path(args.library) if args.library else DEFAULT_LIBRARY
+    if not library.exists():
+        raise WanderfillError(f"there is no Photos library at {library}")
+    # One reading, with no dates and no origins: the photo before `--since` says whether
+    # the first one after it had just landed, and another origin's photos are counted.
+    src = PhotosAppSource(library=library)
+    print(f"reading {library}...", file=sys.stderr)
+    try:
+        assets = list(src.assets())
+    except (OSError, sqlite3.Error, ValueError, OverflowError) as exc:
+        raise WanderfillError(f"{library} cannot be read: {exc}") from None
+    if not src.importer_column:
+        raise WanderfillError(
+            f"{library} does not record which app imported a photo, so it cannot say which are "
+            "from your own camera. Nothing was written."
+        )
+    shots, other = grade_by_origin(
+        assets, spans, origins, since=args.since, until=args.until, **speeds)
+
+    tiles = 0
+    show = _progress_printer()
+
+    def on_tile(done: int, total: int) -> None:
+        nonlocal tiles
+        tiles = total
+        show("map tiles", done, total)
+
+    try:
+        objects, unread = harvest(shots, TileReader(), radius_km=radius, on_progress=on_tile)
+    except ImportError as exc:
+        raise WanderfillError(f"map tiles need the geo extra: pip install 'wanderfill[geo]' ({exc})"
+                              ) from None
+    except OSError as exc:
+        raise WanderfillError(f"the map tile cache cannot be used: {exc}") from None
+
+    there = {series for series, _ in objects}
+    wanted = sorted(set(args.series) if args.series else there - SKIP_SERIES)
+    skipped = [] if args.series else sorted(there & SKIP_SERIES)
+    account = c.account_id()
+    catalogue, ticked = {}, {}
+    for n, series in enumerate(wanted, 1):
+        catalogue[series], ticked[series] = read_series(c, series)
+        show("series", n, len(wanted) + len(skipped))
+    of_skipped = {series: read_ticked(c, series) for series in skipped}
+
+    rows = recall(shots, objects, ticked, radii, catalogue=catalogue)
+    for series, row in rows.items():
+        row["name"] = catalogue[series].name
+    coverage = {"tiles_read": tiles - unread, "tiles_unread": unread, "recall": rows}
+    if not args.series:
+        coverage["skipped"] = count_skipped(shots, objects, of_skipped, radius_km=radius)
+    manifest = Manifest(
+        account=account,
+        created=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        params={"since": args.since, "until": args.until, "radius_km": radius,
+                "origins": origins, "skip": sorted(SKIP_SERIES), "speeds": speeds},
+        coverage=coverage,
+        left_out=left_out(shots) | {"other_origin": other},
+        candidates=find_candidates(shots, objects, catalogue, ticked, radius_km=radius),
+    )
+    paths = _write_review(Path(args.out), manifest)
+    _print_review(manifest, sum(s.kind == "ground" and s.use != "none" for s in shots))
+    print("\nthe page, to open and answer, and the list it was made from:")
+    for path in paths:
+        print(f"  {path}")
+    return 3 if unread else 0
+
+
+def _write_review(out: Path, manifest) -> tuple[Path, Path]:
+    """The page and the list, named by the list's hash, so that no other list is replaced."""
+    from ..plan.review import Manifest, render_page
+
+    name = f"review-{manifest.sha256[:12]}"
+    page, stored = out / f"{name}.html", out / f"{name}.json"
+    html, text = render_page(manifest), manifest.to_json()
+    try:
+        out.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for path in (page, stored):
+            if path.is_symlink():
+                raise WanderfillError(f"{path} is a symbolic link; nothing is written through one")
+        if stored.exists():
+            try:
+                same = Manifest.load(stored).sha256 == manifest.sha256
+            except PlanInvalid:
+                same = False
+            if not same:
+                raise WanderfillError(f"{stored} is there and is not this list; move it away")
+        for path, content in ((stored, text), (page, html)):
+            _write_private(path, content)
+    except OSError as exc:
+        raise WanderfillError(f"{out} cannot be written: {exc}") from None
+    return page, stored
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace ``path`` whole, by a file nobody else can read."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.part")
+    try:
+        _write_new(tmp, text)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _write_new(path: Path, text: str) -> None:
+    """Make ``path``, private, and raise :class:`FileExistsError` if anything is there."""
+    data = text.encode("utf-8")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+        f.write(data)
+
+
+def _print_review(m, ground: int) -> None:
+    """Counts. No item is named here, and none without a photo anywhere."""
+    from ..plan.review import shown
+
+    p = m.params
+    print(f"account {m.account}: photos from {p['since']} to {p['until'] or 'the newest one'}, "
+          f"{', '.join(p['origins'])}")
+    print(f"{ground:,} photo(s) on the ground" if ground else
+          "No photo on the ground is left, so nothing is offered.")
+    print("\nleft out:")
+    for name, why in (
+        ("fast", "at travel speed"), ("conflict", "beside an impossible jump"),
+        ("no_utc", "with no absolute time"), ("after_until", "after --until"),
+        ("span_none", "in a span of use none"),
+        ("span_airports", "in a layover span, used for airports only"),
+        ("other_origin", "from another origin than asked for"),
+    ):
+        print(f"  {m.left_out[name]:>7,}  {why}")
+    for series, n in m.coverage.get("skipped", {}).items():
+        print(f"  {n:>7,}  thing(s) of series {series} near your photos, never offered")
+
+    rows = m.coverage["recall"]
+    if rows:
+        radii = sorted({r for row in rows.values() for r in row["found"]}, key=float)
+        print("\nof what is ticked already, how much these photos find (what the list will miss,"
+              "\nnot how often it is right), and how many are offered:")
+        print(f"  {'series':<34}{'ticked':>7}{'on map':>7}"
+              + "".join(f"{f'{float(r):g} km':>8}" for r in radii) + f"{'no photo':>10}"
+              + f"{'offered':>9}")
+        for series, row in sorted(rows.items(), key=lambda e: int(e[0])):
+            offered = sum(c.series == int(series) for c in m.candidates)
+            title = f"{series} {shown(row['name'])}"
+            print(f"  {title[:32]:<34}{row['ticked']:>7}{row['located']:>7}"
+                  + "".join(f"{row['found'][r]:>8}" for r in radii)
+                  + f"{len(row['no_photo']):>10}{offered:>9}")
+        print("\noffered, by distance to the nearest photo:")
+        for r in radii:
+            print(f"  within {float(r):g} km: {sum(c.km <= float(r) for c in m.candidates):,}")
+    read, unread = m.coverage["tiles_read"], m.coverage["tiles_unread"]
+    print(f"\nmap tiles: {read:,} read, {unread:,} not read")
+    if unread:
+        print("This list is incomplete: things near your photos there may be missing from it. "
+              "Run it again.")
+
+
+def cmd_series_plan(args) -> int:
+    """The plan for one series, from a list and its answers. Writes one file, or none."""
+    from ..plan.review import Manifest, plan_for_series, read_answers, shown, yes_items
+
+    path = _new_plan_path(args)
+    manifest = Manifest.load(args.manifest)
+    answers, sha256 = read_answers(args.answers, manifest)
+    c = _client(args)
+    plan = plan_for_series(manifest, answers, args.series, c, answers_sha256=sha256)
+    planned = {op.item for op in plan.ops}
+    for item in yes_items(manifest, answers, args.series):
+        if item.item not in planned:
+            print(f"already ticked, left out: {shown(item.name, '(no name)')} ({item.item})")
+    if manifest.coverage["tiles_unread"]:
+        print(f"The list was incomplete: {manifest.coverage['tiles_unread']} map tile(s) could "
+              "not be read when it was made.")
+    if not plan.ops:
+        print(f"Nothing in series {args.series} is left to tick. No plan was written.")
+        return 0
+    return _write_plan(path, plan, args.series)
+
+
+def cmd_series_named(args) -> int:
+    """The plan for one item the owner named, in their own words. Writes one file, or none."""
+    from ..plan.review import plan_for_named, shown
+
+    path = _new_plan_path(args)
+    plan = plan_for_named(args.series, args.name, args.said, _client(args))
+    if not plan.ops:
+        print(f"{shown(args.name)} is already ticked in series {args.series}. "
+              "No plan was written.")
+        return 0
+    return _write_plan(path, plan, args.series)
+
+
+def _new_plan_path(args) -> Path:
+    """Where the plan goes. Never where something is, a dangling link included."""
+    path = Path(args.plan or f"plan-series-{args.series}.json")
+    if os.path.lexists(path):
+        raise WanderfillError(f"{path} exists and is not replaced; name another with --plan")
+    return path
+
+
+def _write_plan(path: Path, plan, series: int) -> int:
+    try:
+        _write_new(path, plan.to_json())
+    except OSError as exc:  # also if something came to be there meanwhile
+        raise WanderfillError(f"{path} cannot be written: {exc.strerror or exc}") from None
+    print(f"{path}: {len(plan.ops)} tick(s) in series {series} for account {plan.account}. "
+          "Nothing was sent.")
+    print("one series; read it with `show -v`, then `check`")
+    return 0
+
+
 def cmd_state(args) -> int:
     """Read-only view of the hand-ticked lists, which nothing derives for you.
 
@@ -1575,6 +1836,83 @@ def _net_flags(parser) -> None:
                         help="print every request with its size and time")
 
 
+def _day_arg(text: str) -> dt.date:
+    """One spelling of a day: Python's own parser reads more than one."""
+    with contextlib.suppress(ValueError):
+        if (day := dt.date.fromisoformat(text)).isoformat() == text:
+            return day
+    raise argparse.ArgumentTypeError(f"{text!r} is not YYYY-MM-DD")
+
+
+def _km_arg(text: str) -> float:
+    with contextlib.suppress(ValueError):
+        if 0 <= (km := float(text)) < float("inf"):
+            return km
+    raise argparse.ArgumentTypeError(f"{text!r} is not a distance in kilometres")
+
+
+def _series_parser(sub) -> None:
+    se = sub.add_parser(
+        "series",
+        help="a page of unticked series items near your photos, and plans from your answers",
+        description="Reads the profile and your photos, writes local files, and sends nothing.",
+    )
+    ssub = se.add_subparsers(dest="series_command", required=True)
+    r = ssub.add_parser(
+        "review", help="write the page to answer: unticked items with a photo on the ground near",
+        description=(
+            "Writes one page and the list behind it. You answer the page in a browser; it loads "
+            "and sends nothing. Exits 3, with both files written, if a map tile could not be "
+            "read and the list is not complete."
+        ),
+    )
+    r.add_argument("--since", required=True, type=_day_arg, metavar="DATE",
+                   help="YYYY-MM-DD, the first day of photos, by the photo's own clock")
+    r.add_argument("--until", type=_day_arg, metavar="DATE",
+                   help="YYYY-MM-DD, the last day: for a stay that is not over")
+    r.add_argument("--radius", type=_km_arg, metavar="KM",
+                   help="how near a photo has to be, in km (default: 2)")
+    r.add_argument("--origin", action="append", choices=sorted(ORIGINS),
+                   help="whose photos count, and may be given again (default: own-camera). "
+                        "Others may be somebody else's photos")
+    r.add_argument("--spans", metavar="FILE",
+                   help="JSON list of your own: dates and boxes whose photos prove nothing "
+                        "(use none) or only an airport (use airports)")
+    r.add_argument("--series", action="append", type=int, metavar="ID",
+                   help="only this series, and may be given again (default: all on the map near)")
+    r.add_argument("--library", metavar="PATH",
+                   help="path to a .photoslibrary (default: the standard one)")
+    r.add_argument("--out", default="review", metavar="DIR",
+                   help="directory for the two files. They hold coordinates and dates")
+    r.set_defaults(func=cmd_series_review)
+
+    pl = ssub.add_parser(
+        "plan", help="make the plan for one series from the list and your answers",
+        description=(
+            "Only items you answered 'I was there' to become ticks. One series per plan; it is "
+            "read, checked and applied like any other plan."
+        ),
+    )
+    pl.add_argument("manifest", metavar="MANIFEST", help="the .json that `review` wrote")
+    pl.add_argument("answers", metavar="ANSWERS", help="the file the page saved")
+    nm = ssub.add_parser(
+        "named", help="make the plan for one item you name yourself",
+        description=(
+            "For a place you remember without being asked. The name has to be the catalogue's, "
+            "letter for letter. The words are your own words, kept as you said them. The tool "
+            "never proposes a name or a word, and does not say what is near."
+        ),
+    )
+    nm.add_argument("--name", required=True, help="the item's exact name in the catalogue")
+    nm.add_argument("--said", required=True, help="what you remember, in your own words")
+    for q, func in ((pl, cmd_series_plan), (nm, cmd_series_named)):
+        q.add_argument("--series", required=True, type=int, metavar="ID")
+        q.add_argument("--plan", metavar="FILE",
+                       help="where to write it (default: plan-series-<ID>.json); an existing "
+                            "file is never replaced")
+        q.set_defaults(func=func)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wanderfill",
@@ -1738,6 +2076,8 @@ def build_parser() -> argparse.ArgumentParser:
     ck.add_argument("plan")
     ck.add_argument("--workdir", default=str(DEFAULT_WORKDIR))
     ck.set_defaults(func=cmd_check)
+
+    _series_parser(sub)
 
     st = sub.add_parser("state", help="read-only: KYE, series and YES as the server has them")
     st.add_argument("--series", type=int, help="one series id, e.g. 1 for World Capitals")

@@ -392,7 +392,7 @@ const Review = (() => {
       after_until: "taken after " + (until || "the last day"),
       span_none: "in a stretch you said not to use",
       span_airports: "in a layover, used for airports only",
-      other_origin: "from another origin, which were not read",
+      other_origin: "from another origin, which were not used",
     };
     const out = Object.keys(why).filter((k) => k in data.left_out)
       .map((k) => plural(data.left_out[k], "photo") + " " + why[k]);

@@ -16,15 +16,20 @@ import math
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
-from wanderfill.api.errors import PlanInvalid
+from wanderfill.api.client import NomadMania
+from wanderfill.api.errors import DriftError, PlanInvalid, VerificationFailed
+from wanderfill.cli import main as cli
 from wanderfill.geo.tiles import SeriesPoint, deg2tile, haversine_km
 from wanderfill.plan import review
-from wanderfill.plan.model import Op, Plan, validate
+from wanderfill.plan.apply import apply_plan
+from wanderfill.plan.model import Op, Plan, basis_of, fingerprint, validate
 from wanderfill.plan.review import (
     SKIP_SERIES,
     Candidate,
@@ -2530,3 +2535,865 @@ def test_an_answers_file_that_cannot_be_opened_is_refused(tmp_path):
 def test_review_output_is_never_committed():
     root = Path(__file__).parents[1]
     assert "review/" in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+# ------------------------------------------------------------------ the commands
+
+ITEMS = {1: "Glass Hall", 2: "Tin Bridge", 3: "Paper Mill", 4: "Salt Tower"}
+
+
+class Site:
+    """The server as the commands read it. A write fails the test that sent it."""
+
+    def __init__(self, account=1, regions=(4, 5), dare=(9,)):
+        self.account, self.sent = account, []
+        self.regions, self.dare = list(regions), list(dare)
+        self.token, self.lang = "sekrit-token", "en"
+        self.series = {22: self.reply("Series 22", ITEMS)}
+
+    @staticmethod
+    def reply(title, items, visited=()):
+        return {"title": title, "items2": [{"id": i, "name": n} for i, n in items.items()],
+                "visited": list(visited)}
+
+    def webapi(self, action, **fields):
+        self.sent.append((action, fields))
+        return {
+            "user/status-quick": {"uid": self.account},
+            "maps/get-visited-regions-ids-simple": {"ids": self.regions},
+            "maps/get-visited-dare-ids-simple": {"ids": self.dare},
+        }[action]
+
+    def ajax_json(self, path, **fields):
+        self.sent.append((path, fields))
+        assert (path, fields["action"]) == ("V2/", "getData")
+        return self.series.get(fields["id"], {"result": "OK"})
+
+    def ajax_text(self, path, **fields):
+        raise AssertionError(f"a write was sent: {path} {fields}")
+
+    def client(self):
+        return NomadMania("fake", transport=self)
+
+    def read(self, series):
+        return sum(f.get("id") == series for _, f in self.sent)
+
+
+@pytest.fixture
+def site(monkeypatch, tmp_path):
+    """One fake server, no token looked for, and a directory of its own to run in."""
+    s = Site()
+    s.asked = []
+
+    def client_for(args, **kw):
+        s.asked.append(kw)
+        return s.client()
+
+    monkeypatch.setattr(cli, "_client", client_for)
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", tmp_path / "home")
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    return s
+
+
+def run_cli(*argv):
+    try:
+        return cli.main([str(a) for a in argv])
+    except SystemExit as exc:
+        return exc.code
+
+
+def last_line(capsys):
+    return capsys.readouterr().err.splitlines()[-1]  # after the progress
+
+
+# -- the two readings of one series
+
+
+def test_a_series_is_one_request_and_gives_names_and_ticks():
+    s = Site()
+    s.series[22]["items2"].append({"id": "5", "name": "Lead Gate", "more": 1})
+    s.series[22]["visited"] = ["2", 3]
+    info, ticked = review.read_series(s.client(), 22)
+    assert info == SeriesInfo("Series 22", ITEMS | {5: "Lead Gate"}) and ticked == {2, 3}
+    assert len(s.sent) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"visited": None}, {"visited": {}}, {"visited": "1"}, {"visited": [1, None]},
+    {"visited": [True]}, {"visited": [{"id": 1, "name": "Secret Cave"}]}, {"visited": ["1.0"]},
+    {"items2": None}, {"items2": {}}, {"items2": []}, {"items2": [7]},
+    {"items2": [{"id": 1}]}, {"items2": [{"name": "Secret Cave"}]},
+    {"items2": [{"id": 1, "name": 5}]}, {"items2": [{"id": None, "name": "Secret Cave"}]},
+    {"items2": [{"id": True, "name": "Secret Cave"}]},
+    {"items2": [{"id": 1, "name": "Secret Cave"}, {"id": "1", "name": "Other Cave"}]},
+    {"title": None}, {"title": 5},
+], ids=str)
+def test_a_series_reply_of_another_shape_is_refused_and_not_quoted(change):
+    s = Site()
+    s.series[22] = {"title": "Secret Cave", "a": "Secret Cave"} | s.series[22] | change
+    with pytest.raises(VerificationFailed) as e:
+        review.read_series(s.client(), 22)
+    assert "series 22" in str(e.value)
+    assert "Cave" not in str(e.value) and "Glass" not in str(e.value)
+
+
+@pytest.mark.parametrize("reply", [None, [], "x", 5, {}, {"result": "ERROR", "why": "Glass Hall"}])
+def test_a_series_reply_that_is_no_series_is_refused(reply):
+    s = Site()
+    s.series[22] = reply
+    for read in (review.read_series, review.read_ticked):
+        with pytest.raises(VerificationFailed) as e:
+            read(s.client(), 22)
+        assert "Glass" not in str(e.value)
+
+
+def test_only_the_ticked_list_of_a_skipped_series_is_needed():
+    s = Site()
+    s.series[12] = {"visited": ["4"]}
+    assert review.read_ticked(s.client(), 12) == {4}
+
+
+# -- names in a terminal
+
+
+@pytest.mark.parametrize("code", CONTROLS, ids=hex)
+def test_controls_are_taken_out_of_a_name_for_the_terminal(code):
+    bad = chr(code)
+    assert review.shown(f"{bad}Tin {bad}Bridge{bad}") == "Tin Bridge"
+    assert review.shown(bad, "item 3") == "item 3"
+
+
+def test_the_terminal_and_the_page_take_out_the_same():
+    page = (Path(review.__file__).parent / "review_page.html").read_text(encoding="utf-8")
+    listed = re.search(r"const CONTROLS = (\[.*?\]);", page, re.S).group(1)
+    pairs = [tuple(int(x, 16) for x in p)
+             for p in re.findall(r"\[(0x[0-9a-f]+), (0x[0-9a-f]+)\]", listed)]
+    for n in range(0x3000):
+        out = any(low <= n <= high for low, high in pairs)
+        assert review.shown("a" + chr(n) + "b") == ("ab" if out else "a" + chr(n) + "b"), hex(n)
+
+
+# -- grading what was read
+
+
+def test_each_origin_is_graded_on_its_own():
+    """Two phones a country apart, taking turns: nobody flew between them."""
+    mine = [photo(10.0, 20.0, m, uuid=f"a{m}") for m in (0, 20, 40)]
+    theirs = [photo(30.0, 60.0, m, importer="com.apple.sharingd", uuid=f"b{m}")
+              for m in (10, 30, 50)]
+    since = dt.date(2026, 1, 1)
+    shots, other = review.grade_by_origin([*mine, *theirs], (), {"own-camera", "airdrop"},
+                                          since=since)
+    assert [s.kind for s in shots] == ["ground"] * 6 and other == 0
+    assert sorted(s.origin for s in shots) == ["airdrop"] * 3 + ["own-camera"] * 3
+    assert set(kinds(*mine, *theirs)) == {"conflict"}  # what grading them as one would say
+    shots, other = review.grade_by_origin([*mine, *theirs], (), {"airdrop"}, since=since)
+    assert [s.origin for s in shots] == ["airdrop"] * 3 and other == 3
+
+
+def test_a_flight_that_began_before_since_is_still_a_flight():
+    """The photo it left from is before the first day asked for, and is still read."""
+    flight = [photo(10.0, 20.0, -13 * 60), photo(10.0, 30.0, -11.9 * 60)]
+    theirs = [photo(12.0, 60.0, m, importer=None) for m in (-3000, 600)]
+    shots, other = review.grade_by_origin(flight + theirs, (), {"own-camera"},
+                                          since=dt.date(2026, 5, 1))
+    assert [(s.kind, s.taken.day) for s in shots] == [("fast", 1)] and other == 1
+
+
+def test_until_is_passed_on_and_its_photos_are_counted():
+    shots, _ = review.grade_by_origin(
+        [photo(10.0, 20.0), photo(10.0, 20.0, 24 * 60)], (), {"own-camera"},
+        since=dt.date(2026, 5, 1), until=dt.date(2026, 5, 1))
+    assert [s.late for s in shots] == [False, True]
+
+
+# -- review
+
+
+class Library:
+    """A Photos library that remembers how it was read."""
+
+    photos: ClassVar[list] = []
+    column = True
+    opened: ClassVar[list] = []
+    error = None
+
+    def __init__(self, library=None, since=None, until=None, origins=None):
+        self.importer_column = None
+        Library.opened.append((library, since, until, origins))
+
+    def assets(self):
+        if Library.error:
+            raise Library.error
+        self.importer_column = Library.column
+        yield from Library.photos
+
+
+@pytest.fixture
+def world(site, monkeypatch, tmp_path):
+    """Photos at three things of series 22, one of them ticked, and one thing with none."""
+    from wanderfill.geo import tiles
+    from wanderfill.sources import photos_app
+
+    step = 24 * 60
+    monkeypatch.setattr(Library, "opened", [])
+    monkeypatch.setattr(Library, "error", None)
+    monkeypatch.setattr(Library, "column", True)
+    monkeypatch.setattr(Library, "photos", [
+        photo(10.0, 20.0, 0), photo(10.5, 20.5, step), photo(10.5, 20.5, step + 30, uuid="u"),
+        photo(11.0, 21.0, 2 * step),
+        photo(12.0, 22.0, 3 * step, importer="com.apple.sharingd"),
+    ])
+    site.reader = FakeReader([
+        SeriesPoint(1, 22, "", 10.0 + 0.1 * KM, 20.0), SeriesPoint(2, 22, "", 10.5, 20.5),
+        SeriesPoint(3, 22, "", 11.0 + 1.5 * KM, 21.0), SeriesPoint(4, 22, "", 10.0, 20.2),
+        SeriesPoint(8, 12, "", 10.0, 20.0), SeriesPoint(9, 12, "", 10.0, 20.0),
+    ])
+    site.series[22]["visited"] = [2]
+    site.series[12] = {"visited": [9]}
+    (tmp_path / "lib").mkdir()
+    monkeypatch.setattr(photos_app, "PhotosAppSource", Library)
+    monkeypatch.setattr(tiles, "TileReader", lambda *a, **kw: site.reader)
+    return site
+
+
+def do_review(*extra, out="out", since="2026-05-01"):
+    return run_cli("series", "review", "--since", since, "--library", "../lib",
+                   "--out", out, *extra)
+
+
+def written_by(out="out"):
+    paths = sorted(Path(out).iterdir())
+    assert [p.suffix for p in paths] == [".html", ".json"]
+    return paths[0], Manifest.load(paths[1])
+
+
+def test_review_writes_its_two_files_and_sends_no_write(world, capsys, tmp_path):
+    before = sorted(p for p in tmp_path.rglob("*"))
+    assert do_review() == 0
+    out = capsys.readouterr().out
+    page, m = written_by()
+    new = [p for p in sorted(tmp_path.rglob("*")) if p not in before]
+    cwd = tmp_path / "cwd"
+    assert new == [cwd / "out", cwd / page, cwd / page.with_suffix(".json")]
+    assert page.stem == f"review-{m.sha256[:12]}"
+    assert page.read_text(encoding="utf-8") == render_page(m)
+    assert str(page) in out and str(page.with_suffix(".json")) in out
+    assert [(c.item, c.name) for c in m.candidates] == [(1, "Glass Hall"), (3, "Paper Mill")]
+    assert world.asked == [{}]  # no cached client
+
+
+def test_review_files_are_the_owners_alone(world):
+    assert do_review() == 0
+    page, _ = written_by()
+    assert Path("out").stat().st_mode & 0o777 == 0o700
+    for p in (page, page.with_suffix(".json")):
+        assert p.stat().st_mode & 0o777 == 0o600
+
+
+def test_review_reads_live_once_per_series_of_the_harvest_and_after_it(world, monkeypatch):
+    order = []
+    points, ask = world.reader.series_points, Site.ajax_json
+    monkeypatch.setattr(world.reader, "series_points",
+                        lambda *a: order.append("tile") or points(*a))
+    monkeypatch.setattr(Site, "ajax_json",
+                        lambda self, p, **f: order.append("read") or ask(self, p, **f))
+    assert do_review() == 0
+    assert order == sorted(order, reverse=True) and order.count("read") == 2
+    assert (world.read(22), world.read(12)) == (1, 1)
+
+
+def test_review_records_what_it_did(world, tmp_path):
+    spans = tmp_path / "s.json"
+    spans.write_text(json.dumps([{"from": "2026-05-03", "to": "2026-05-03", "use": "none",
+                                  "bbox": [20.9, 10.9, 21.1, 11.1], "why": "x"}]))
+    assert do_review("--until", "2026-05-03", "--spans", spans, "--radius", "1.5") == 0
+    _, m = written_by()
+    assert m.account == 1 and [c.item for c in m.candidates] == [1]
+    assert m.params == {
+        "since": "2026-05-01", "until": "2026-05-03", "radius_km": 1.5,
+        "origins": ["own-camera"], "skip": [-2, 12, 17, 60], "speeds": PARAMS["speeds"]}
+    assert m.left_out == dict.fromkeys(left_out([]), 0) | {"span_none": 1, "other_origin": 1}
+    assert m.coverage["skipped"] == {"12": 1}
+    assert m.coverage["tiles_read"] == len(set(world.reader.asked))
+    assert m.coverage["recall"] == {"22": {
+        "ticked": 1, "located": 1, "no_photo": [], "name": "Series 22",
+        "found": {"0.2": 1, "0.5": 1, "1.0": 1, "1.5": 1}}}
+
+
+def test_the_speeds_recorded_are_the_speeds_used(world, monkeypatch):
+    assert review.default_speeds() == PARAMS["speeds"]
+    slow = PARAMS["speeds"] | {"fast_kmh": 2.0}
+    monkeypatch.setattr(review, "default_speeds", lambda: slow)
+    assert do_review() == 0
+    _, m = written_by()
+    assert m.params["speeds"]["fast_kmh"] == 2.0 and m.left_out["fast"] > 0
+
+
+@pytest.mark.parametrize("radius,items", [("1", [1]), ("2", [1, 3]), ("0.05", [])])
+def test_the_radius_is_the_one_asked_for(world, radius, items):
+    assert do_review("--radius", radius) == 0
+    assert [c.item for c in written_by()[1].candidates] == items
+
+
+def test_review_reads_the_library_whole_so_that_no_leg_is_cut(world):
+    assert do_review("--until", "2026-05-02") == 0
+    ((library, since, until, _),) = Library.opened
+    assert (Path(library), since, until) == (Path("../lib"), None, None)
+    _, m = written_by()
+    assert m.left_out["after_until"] == 1
+
+
+def test_review_prints_counts_and_no_name_without_a_photo(world, capsys):
+    assert do_review() == 0
+    both = capsys.readouterr()
+    for words in ("Series 22", "account 1", "other origin", "series 12"):
+        assert words in both.out, words
+    assert "Salt Tower" not in both.out + both.err
+    page, _ = written_by()
+    assert "Salt Tower" not in page.read_text() + page.with_suffix(".json").read_text()
+    assert "sekrit" not in both.out + both.err
+
+
+def test_review_prints_a_hostile_title_without_its_controls(world, capsys):
+    world.series[22]["title"] = "Ser\u202eies\x1b[31m 22"
+    assert do_review() == 0
+    out = capsys.readouterr().out
+    assert "Series[31m 22" in out and "\u202e" not in out and "\x1b" not in out
+
+
+def test_an_unread_tile_is_exit_three_and_the_files_are_still_written(world, capsys):
+    x, y = deg2tile(11.0, 21.0, 9)
+    world.reader.broken = {(x, y)}
+    assert do_review() == 3
+    both = capsys.readouterr()
+    assert "incomplete" in both.out + both.err
+    _, m = written_by()
+    assert m.coverage["tiles_unread"] == 1 and [c.item for c in m.candidates] == [1]
+    assert m.coverage["tiles_read"] == len(set(world.reader.asked)) - 1
+
+
+def test_no_photos_is_an_answer_and_unread_tiles_are_not_hidden_by_it(world, capsys):
+    Library.photos = []
+    assert do_review() == 0
+    assert "no photo" in capsys.readouterr().out.lower()
+    _, m = written_by()
+    assert m.candidates == [] and m.coverage["tiles_read"] == 0
+    flight = [photo(10.0, 20.0, 0), photo(10.0, 30.0, 60)]
+    Library.photos = flight
+    world.reader.broken = {deg2tile(10.0, 20.0, 9)}
+    assert do_review(out="again") == 3
+    assert "no photo" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("origin", [(), ("--origin", "unknown")])
+def test_a_library_that_cannot_say_whose_a_photo_is_is_refused(world, capsys, origin):
+    Library.column = False
+    Library.photos = [dataclasses.replace(p, importer=None) for p in Library.photos]
+    assert do_review(*origin) == 2
+    assert "import" in capsys.readouterr().err
+    assert not Path("out").exists() and world.sent == []
+
+
+@pytest.mark.parametrize("error", [None, FileNotFoundError("no Photos database at x"),
+                                   PermissionError("denied"), sqlite3.DatabaseError("not one"),
+                                   ValueError("year 99999 is out of range")])
+def test_a_library_that_cannot_be_read_is_a_plain_error(world, capsys, error):
+    Library.error = error
+    library = "../lib" if error else "../nowhere"
+    assert run_cli("series", "review", "--since", "2026-05-01", "--library", library) == 2
+    assert last_line(capsys).startswith("error: ")
+    assert not Path("review").exists()
+
+
+def test_a_real_library_without_the_column_and_one_that_is_not_there(site, tmp_path, capsys):
+    from test_quirks import _photos_library
+
+    lib = _photos_library(tmp_path, [(dt.datetime(2026, 5, 1, 12), 0, 10.0, 20.0)])
+    for path in (lib, tmp_path / "no.photoslibrary"):
+        assert run_cli("series", "review", "--since", "2026-05-01", "--library", path) == 2
+        assert last_line(capsys).startswith("error: ")
+    assert not Path("review").exists() and site.sent == []
+
+
+@pytest.mark.parametrize("change", [
+    {"visited": None}, {"items2": None}, {"items2": []}, {"title": None}], ids=str)
+def test_a_series_that_cannot_be_read_stops_review(world, capsys, change):
+    """An unread list must not read as "nothing ticked"."""
+    world.series[22] |= change
+    assert do_review() == 2
+    assert last_line(capsys).startswith("error: ") and not Path("out").exists()
+
+
+def test_a_skipped_series_that_cannot_be_read_stops_review(world, capsys):
+    world.series[12] = {"title": "x"}
+    assert do_review() == 2
+    assert "series 12" in capsys.readouterr().err and not Path("out").exists()
+
+
+def test_series_asked_for_are_exactly_the_ones_read(world):
+    world.reader.points.append(SeriesPoint(1, 31, "", 10.0, 20.0))  # and no reply for 31
+    assert do_review("--series", "22") == 0
+    assert (world.read(22), world.read(12), world.read(31)) == (1, 0, 0)
+    _, m = written_by()
+    assert set(m.coverage["recall"]) == {"22"} and "skipped" not in m.coverage
+
+
+def test_a_series_asked_for_is_read_though_no_tile_has_it(world):
+    world.series[31] = Site.reply("Series 31", {7: "Zinc Pier"}, [7])
+    assert do_review("--series", "31") == 0
+    _, m = written_by()
+    assert m.candidates == [] and m.coverage["recall"]["31"]["no_photo"] == [7]
+
+
+@pytest.mark.parametrize("series", ["-2", "12", "17", "60", "0"])
+def test_a_skipped_series_cannot_be_asked_for(world, capsys, series):
+    assert do_review("--series", series) == 2
+    assert last_line(capsys).startswith("error: ")
+    assert not Path("out").exists() and world.sent == []
+
+
+def test_origins_asked_for_widen_it_and_each_is_graded_alone(world):
+    world.reader.points.append(SeriesPoint(1, 22, "", 0, 0))
+    world.series[22]["items2"].append({"id": 5, "name": "Lead Gate"})
+    world.reader.points.append(SeriesPoint(5, 22, "", 12.0, 22.0))
+    noon = Library.photos[0]
+    Library.photos = [*Library.photos, dataclasses.replace(
+        noon, lat=40.0, importer="com.apple.sharingd", uuid="b",
+        taken_utc=noon.taken_utc + dt.timedelta(minutes=1))]
+    assert do_review("--origin", "airdrop", "--origin", "own-camera", "--origin", "airdrop") == 0
+    _, m = written_by()
+    assert {c.item: c.origins for c in m.candidates} == {
+        1: ("own-camera",), 3: ("own-camera",), 5: ("airdrop",)}
+    assert m.params["origins"] == ["airdrop", "own-camera"]
+    assert m.left_out["conflict"] == 0 and m.left_out["other_origin"] == 0
+
+
+@pytest.mark.parametrize("argv", [
+    ("--since", "2026"), ("--since", "20260501"), ("--until", "soon"), ("--until", "2026-04-30"),
+    ("--radius", "-1"), ("--radius", "nan"), ("--radius", "inf"), ("--radius", "far"),
+    ("--origin", "mine"), ("--spans", "nowhere.json"), ("--series", "x"),
+])
+def test_review_arguments_that_make_no_sense_are_exit_two(world, argv):
+    assert do_review(*argv) == 2
+    assert not Path("out").exists() and world.sent == [] and not Library.opened
+
+
+def test_review_needs_since(world):
+    assert run_cli("series", "review") == 2
+
+
+def test_the_default_directory_is_the_ignored_one(world):
+    assert run_cli("series", "review", "--since", "2026-05-01", "--library", "../lib") == 0
+    assert len(list(Path("review").iterdir())) == 2
+
+
+def test_the_same_list_again_is_rewritten_and_another_has_another_name(world):
+    assert do_review() == 0
+    page, m = written_by()
+    assert do_review() == 0
+    assert written_by()[1].sha256 == m.sha256
+    world.series[22]["visited"] = [1, 2]
+    kept = page.read_bytes()
+    assert do_review() == 0
+    assert len(list(Path("out").iterdir())) == 4 and page.read_bytes() == kept
+
+
+def test_another_list_under_the_same_name_is_not_replaced(world, capsys):
+    assert do_review() == 0
+    page, _ = written_by()
+    path = page.with_suffix(".json")
+    path.write_text("{}")
+    assert do_review() == 2
+    assert path.read_text() == "{}" and str(path) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("suffix", [".json", ".html"])
+def test_review_writes_through_no_symlink(world, suffix, capsys, tmp_path):
+    assert do_review() == 0
+    page, _ = written_by()
+    other = page.with_suffix({".json": ".html", ".html": ".json"}[suffix])
+    link, target = page.with_suffix(suffix), tmp_path / "target"
+    target.write_bytes(link.read_bytes())
+    link.unlink()
+    link.symlink_to(target)
+    was, beside = target.read_bytes(), other.stat().st_mtime_ns
+    assert do_review() == 2
+    assert link.is_symlink() and target.read_bytes() == was
+    assert other.stat().st_mtime_ns == beside and "symbolic link" in capsys.readouterr().err
+    target.unlink()  # dangling
+    assert do_review() == 2 and not target.exists()
+
+
+def test_an_out_that_cannot_be_a_directory_is_a_plain_error(world, capsys):
+    Path("out").write_text("x")
+    assert do_review() == 2
+    assert last_line(capsys).startswith("error: ")
+
+
+def test_without_the_geo_extra_review_says_so(world, monkeypatch, capsys):
+    def missing(*a):
+        raise ImportError("No module named 'mapbox_vector_tile'")
+
+    monkeypatch.setattr(world.reader, "series_points", missing)
+    assert do_review() == 2
+    assert "geo" in capsys.readouterr().err and not Path("out").exists()
+
+
+# -- plan
+
+
+def listed(*items, **kw):
+    rows = {1: {}, 2: {"km": 1.234, "photos": 1, "days": 1, "thin": True, "conflict": True,
+                       "fast_near": 2, "one_spot": False}, 3: {}, 4: {"one_spot": True}}
+    return manifest([candidate(i, name=ITEMS[i], **rows[i]) for i in items or ITEMS], **kw)
+
+
+def answered(m=None, account=None, **given):
+    """The two files, with the answers of ``i1="y"`` and so on."""
+    m = m or listed()
+    raw = {"format": 1, "account": account or m.account, "manifest": m.sha256,
+           "answers": {f"22:{k[1:]}": v for k, v in given.items()}}
+    Path("a.json").write_text(json.dumps(raw), encoding="utf-8")
+    return m.save("m.json"), Path("a.json")
+
+
+def do_plan(m=None, *extra, series=22, **given):
+    return run_cli("series", "plan", *answered(m, **given), "--series", series, *extra)
+
+
+def test_a_plan_is_the_yes_items_of_one_series_and_nothing_else(site, capsys):
+    other = candidate(1, series=31, name="Zinc Pier")
+    m = manifest([*listed().candidates, other])
+    files = answered(m, i1="y", i2="n", i3="q")
+    raw = json.loads(files[1].read_text())
+    raw["answers"]["31:1"] = "y"
+    files[1].write_text(json.dumps(raw))
+    assert run_cli("series", "plan", *files, "--series", 22) == 0
+    out = capsys.readouterr().out
+    assert "one series; read it with `show -v`, then `check`" in out
+    plan = Plan.load("plan-series-22.json")
+    (op,) = plan.ops
+    assert (op.kind, op.series, op.item, op.bucket, op.confidence, op.label) == (
+        "tick_series", 22, 1, "apply", 0.0, "Glass Hall")
+    assert op.key == Op("tick_series", series=22, item=1).key
+    assert validate(plan) == [] and plan.account == 1
+    assert "incomplete" not in out
+    assert site.read(22) == 1 and site.read(31) == 0 and site.asked == [{}]
+
+
+def test_a_plan_says_what_it_rests_on(site):
+    files = answered(i1="y")
+    assert run_cli("series", "plan", *files, "--series", 22) == 0
+    plan, m = Plan.load("plan-series-22.json"), listed()
+    c = site.client()
+    assert plan.basis["fingerprint"] == fingerprint(basis_of(c.snapshot([]), []))
+    assert set(plan.basis) == {"fingerprint", "series_ticked", "taken_at"}
+    assert dt.datetime.fromisoformat(plan.basis["taken_at"]).tzinfo
+    assert plan.params == m.params
+    assert plan.sources == [
+        {"kind": "manifest", "sha256": m.sha256},
+        {"kind": "answers", "sha256": hashlib.sha256(files[1].read_bytes()).hexdigest()},
+        {"kind": "photos", "origins": ["own-camera"]},
+    ]
+
+
+def test_the_ticks_of_the_series_are_in_the_basis(site):
+    site.series[22]["visited"] = ["3", 2]
+    assert do_plan(i1="y") == 0
+    assert Plan.load("plan-series-22.json").basis["series_ticked"] == {"22": [2, 3]}
+
+
+def test_proof_is_what_the_owner_was_shown_and_no_more(site):
+    assert do_plan(i1="y", i2="y", i4="y") == 0
+    one, two, four = Plan.load("plan-series-22.json").ops
+    assert [p["kind"] for p in one.proof + two.proof + four.proof] == ["ground_photo"] * 3
+    detail = one.proof[0]["detail"]
+    for words in ("500 m", "2026-05-01 14:05", "3 photos", "2 days", "own-camera"):
+        assert words in detail, words
+    assert "thin" not in detail and "conflict" not in detail and "one spot" not in detail
+    detail = two.proof[0]["detail"]
+    for words in ("1.23 km", "1 photo on 1 day", "thin", "conflict", "2 fast photos"):
+        assert words in detail, words
+    assert "one spot" in four.proof[0]["detail"]
+    assert all(len(op.evidence) == 1 and "answered" in op.evidence[0] for op in (one, two, four))
+
+
+def test_show_and_check_read_the_plan(site, capsys, tmp_path):
+    assert do_plan(i1="y") == 0
+    assert run_cli("show", "-v", "plan-series-22.json") == 0
+    assert "proof ground_photo" in capsys.readouterr().out
+    assert run_cli("check", "plan-series-22.json", "--workdir", tmp_path / "w") == 0
+    assert "Left to send: 1 of 1" in capsys.readouterr().out
+
+
+def test_apply_takes_the_plan_and_drift_stops_it(site, tmp_path, monkeypatch):
+    assert do_plan(i1="y") == 0
+    plan = Plan.load("plan-series-22.json")
+    sent = []
+
+    def tick(path, **f):
+        sent.append((f["series"], f["item"], f["state"]))
+        site.series[22]["visited"].append(f["item"])
+        return "OK"
+
+    site.ajax_text = tick
+    site.regions.append(77)
+    with pytest.raises(DriftError):
+        apply_plan(site.client(), plan, workdir=tmp_path / "w", confirm=True)
+    site.regions.remove(77)
+    assert sent == []
+    apply_plan(site.client(), plan, workdir=tmp_path / "w", confirm=True)
+    assert sent == [(22, 1, 1)]
+
+
+def test_a_list_of_another_account_is_refused(site, capsys):
+    site.account = 2
+    assert do_plan(i1="y") == 2
+    assert "account 1" in capsys.readouterr().err
+    assert not Path("plan-series-22.json").exists()
+    assert site.read(22) == 0
+
+
+@pytest.mark.parametrize("series", [31, 0, -2, 12])
+def test_a_series_that_is_not_on_the_list_is_refused(site, series, capsys):
+    assert do_plan(i1="y", series=series) == 1
+    assert str(series) in capsys.readouterr().err
+    assert not list(Path().glob("plan*")) and site.sent == []
+
+
+def test_a_skipped_series_cannot_be_planned_even_from_a_made_up_list(site):
+    m = manifest([candidate(1, series=12)])
+    with pytest.raises(PlanInvalid):
+        review.plan_for_series(m, {(12, 1): "y"}, 12, site.client())
+    assert site.sent == []
+
+
+def test_an_item_gone_from_the_series_refuses_the_whole_plan_and_is_named(site, capsys):
+    site.series[22] = Site.reply("Series 22", {i: n for i, n in ITEMS.items() if i != 2})
+    assert do_plan(i1="y", i2="y") == 2
+    err = capsys.readouterr().err
+    assert "Tin Bridge" in err and "Glass Hall" not in err
+    assert not Path("plan-series-22.json").exists()
+    assert do_plan(i1="y", i2="n") == 0  # only a yes has to be there
+
+
+def test_an_item_gone_is_refused_though_it_is_ticked(site):
+    site.series[22] = Site.reply("Series 22", {1: ITEMS[1]}, [2])
+    assert do_plan(i1="y", i2="y") == 2
+
+
+def test_an_id_that_names_another_thing_now_is_refused(site, capsys):
+    site.series[22] = Site.reply("Series 22", ITEMS | {2: "Secret Cave"})
+    assert do_plan(i1="y", i2="y") == 2
+    err = capsys.readouterr().err
+    assert "Tin Bridge" in err and "Secret" not in err
+    site.series[22]["visited"] = [2]
+    assert do_plan(i1="y", i2="y") == 0  # nothing is written to an id that is ticked
+
+
+def test_items_already_ticked_are_dropped_and_named(site, capsys):
+    site.series[22]["visited"] = ["2", 4]
+    assert do_plan(i1="y", i2="y", i3="y") == 0
+    out = capsys.readouterr().out
+    assert "Tin Bridge" in out and "already ticked" in out and "Salt Tower" not in out
+    assert [op.item for op in Plan.load("plan-series-22.json").ops] == [1, 3]
+
+
+@pytest.mark.parametrize("given", [{}, {"i1": "n", "i2": "q"}, {"i3": "y"}])
+def test_nothing_left_to_tick_writes_no_plan(site, capsys, given):
+    site.series[22]["visited"] = [3]
+    assert do_plan(**given) == 0
+    out = capsys.readouterr().out
+    assert "no plan" in out.lower() and not list(Path().glob("plan*"))
+    assert ("Paper Mill" in out) == ("i3" in given)
+
+
+def test_names_are_printed_without_controls(site, capsys):
+    bad = "Tin\u202e Bri\x1bdge"
+    m = manifest([candidate(1, name=bad), candidate(2, name="\u2066")])
+    site.series[22] = Site.reply("x", {1: bad, 2: "\u2066"}, [1])
+    assert do_plan(m, i1="y", i2="y") == 0
+    out = capsys.readouterr().out
+    assert "Tin Bridge" in out and "\u202e" not in out and "\x1b" not in out
+    assert [op.label for op in Plan.load("plan-series-22.json").ops] == ["item 2"]
+
+
+def test_an_incomplete_list_can_be_planned_and_is_said(site, capsys):
+    m = listed(coverage=COVERAGE | {"tiles_unread": 2})
+    assert do_plan(m, i1="y") == 0
+    assert "incomplete" in capsys.readouterr().out
+
+
+def test_a_plan_file_is_never_replaced(site, capsys):
+    Path("plan-series-22.json").write_text("mine")
+    assert do_plan(i1="y") == 2
+    assert Path("plan-series-22.json").read_text() == "mine" and site.sent == []
+    Path("dangling.json").symlink_to("elsewhere.json")
+    assert do_plan(None, "--plan", "dangling.json", i1="y") == 2
+    assert not Path("elsewhere.json").exists() and site.sent == []
+    assert do_plan(None, "--plan", "other.json", i1="y") == 0
+    assert Path("other.json").stat().st_mode & 0o777 == 0o600
+    assert do_plan(None, "--plan", "no/where.json", i1="y") == 2
+    assert capsys.readouterr().err.count("error: ") == 3
+
+
+def test_a_plan_file_that_appeared_meanwhile_is_not_replaced(site, monkeypatch):
+    snapshot = NomadMania.snapshot
+
+    def slow(self, *a, **kw):
+        Path("plan-series-22.json").write_text("mine")
+        return snapshot(self, *a, **kw)
+
+    monkeypatch.setattr(NomadMania, "snapshot", slow)
+    assert do_plan(i1="y") == 2
+    assert Path("plan-series-22.json").read_text() == "mine"
+
+
+def test_a_plan_that_is_not_valid_is_not_written(site, monkeypatch):
+    monkeypatch.setattr(review, "validate", lambda plan: ["something is wrong"])
+    assert do_plan(i1="y") == 1
+    assert do_named() == 1
+    assert not list(Path().glob("plan*"))
+
+
+def test_bad_files_are_exit_one(site, capsys):
+    good = answered(i1="y")
+    Path("bad.json").write_text("{}")
+    for files in (("bad.json", good[1]), (good[0], "bad.json"), ("nowhere", good[1]),
+                  (good[0], "nowhere")):
+        assert run_cli("series", "plan", *files, "--series", 22) == 1
+        assert last_line(capsys).startswith("error: ")
+    assert run_cli("series", "plan", *answered(account=2, i1="y"), "--series", 22) == 1
+    assert site.sent == [] and not list(Path().glob("plan*"))
+
+
+def test_plan_and_named_need_their_arguments(site):
+    files = answered(i1="y")
+    assert run_cli("series", "plan", *files) == 2
+    for argv in (("--name", "x", "--said", "y"), ("--series", 22, "--said", "y"),
+                 ("--series", 22, "--name", "x")):
+        assert run_cli("series", "named", *argv) == 2
+    assert site.sent == []
+
+
+@pytest.mark.parametrize("change", [{"visited": None}, {"items2": None}])
+def test_a_series_that_cannot_be_read_makes_no_plan(site, change):
+    site.series[22] |= change
+    assert do_plan(i1="y") == 2
+    assert do_named() == 2
+    assert not list(Path().glob("plan*"))
+
+
+def test_a_profile_that_cannot_be_read_makes_no_plan(site):
+    site.regions = None
+    assert do_plan(i1="y") == 2
+    assert do_named() == 2
+    assert not list(Path().glob("plan*"))
+
+
+def test_answers_are_hashed_as_they_were_read(tmp_path, site, monkeypatch):
+    m = listed()
+    _, path = answered(m, i1="y")
+    data = path.read_bytes()
+    got, sha = review.read_answers(path, m)
+    assert got == {(22, 1): "y"} == load_answers(path, m)
+    assert sha == hashlib.sha256(data).hexdigest()
+
+
+# -- named
+
+
+def do_named(name="Tin Bridge", said="I walked over it in the rain", *extra, series=22):
+    return run_cli("series", "named", "--series", series, "--name", name, "--said", said, *extra)
+
+
+def test_a_named_item_is_one_op_with_the_owners_words(site, capsys):
+    said = "  I walked over it,\nin the rain  "
+    assert do_named(said=said) == 0
+    plan = Plan.load("plan-series-22.json")
+    (op,) = plan.ops
+    assert (op.kind, op.series, op.item, op.bucket, op.confidence, op.label) == (
+        "tick_series", 22, 2, "apply", 0.0, "Tin Bridge")
+    assert op.proof == [{"kind": "memory", "detail": said}]
+    assert plan.account == 1 and validate(plan) == []
+    c = site.client()
+    assert plan.basis["fingerprint"] == fingerprint(basis_of(c.snapshot([]), []))
+    assert plan.basis["series_ticked"] == {"22": []} and plan.basis["taken_at"]
+    out = capsys.readouterr().out
+    assert "one series; read it with `show -v`, then `check`" in out
+    assert not any(n in out for n in ITEMS.values() if n != "Tin Bridge")
+    assert site.read(22) == 1 and site.asked == [{}]
+
+
+def test_a_near_name_is_refused_and_no_name_is_printed(site, capsys):
+    """AGENTS rule 7: the tool never proposes, and the nearest name is a proposal."""
+    said = set()
+    for name in ("tin bridge", "Tin Bridge ", " Tin Bridge", "Tin  Bridge", "Tin", "Tin Bridg",
+                 "Tin Bridge\n", "TIN BRIDGE", "Tin\u00a0Bridge", "Gla", "2", "Nothing Like It"):
+        assert do_named(name) == 1, name
+        both = capsys.readouterr()
+        said.add(both.out + both.err)
+    (text,) = said  # nothing in it says how near
+    assert text.startswith("error: ") and not any(n in text for n in ITEMS.values())
+    assert not list(Path().glob("plan*"))
+
+
+def test_two_items_of_one_name_are_refused(site, capsys):
+    site.series[22] = Site.reply("x", ITEMS | {9: "Tin Bridge"})
+    assert do_named() == 1
+    both = capsys.readouterr()
+    assert not any(n in both.out + both.err for n in ITEMS.values())
+    assert not list(Path().glob("plan*"))
+
+
+def test_a_named_item_already_ticked_makes_no_plan(site, capsys):
+    site.series[22]["visited"] = ["2"]
+    assert do_named() == 0
+    assert "already ticked" in capsys.readouterr().out and not list(Path().glob("plan*"))
+
+
+@pytest.mark.parametrize("said", ["", " ", "\n\t\u00a0"])
+def test_the_owners_words_cannot_be_empty(site, said):
+    assert do_named(said=said) == 1
+    assert site.sent == [] and not list(Path().glob("plan*"))
+
+
+@pytest.mark.parametrize("kw", [{"name": ""}, {"name": " "}, {"said": "a\udc80b"}])
+def test_words_that_cannot_be_kept_are_refused(site, kw):
+    site.series[22] = Site.reply("x", ITEMS | {8: "", 9: " "})
+    assert do_named(**kw) == 1
+    assert site.sent == [] and not list(Path().glob("plan*"))
+
+
+@pytest.mark.parametrize("series", [0, -2, -1])
+def test_named_refuses_a_series_that_is_none(site, series):
+    assert do_named(series=series) == 1
+    assert site.sent == []
+
+
+def test_named_takes_a_series_that_review_skips(site):
+    site.series[12] = Site.reply("x", {7: "Tin Bridge"})
+    assert do_named(series=12) == 0
+    assert [op.item for op in Plan.load("plan-series-12.json").ops] == [7]
+
+
+def test_named_never_replaces_a_plan(site):
+    Path("plan-series-22.json").write_text("mine")
+    assert do_named() == 2
+    assert Path("plan-series-22.json").read_text() == "mine" and site.sent == []
+    assert do_named("Tin Bridge", "x", "--plan", "two.json") == 0
+
+
+def test_the_help_says_whose_words_they_are(capsys):
+    assert run_cli("series", "named", "--help") == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "own words" in out and "never proposes" in out
+
+
+def test_what_the_commands_write_is_never_committed():
+    root = Path(__file__).parents[1]
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {"review/", "review-*.json", "review-*.html", "series-answers*.json",
+            "plan*.json"} <= set(lines)

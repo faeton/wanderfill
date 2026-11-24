@@ -17,13 +17,14 @@ A photo has four ways of not being one:
     nothing says which.
   * **The owner says so**: a spoofed stretch, a layover, a stay that is not over.
 
-Everything is a function of its arguments: photos, tiles and ticked lists in,
-candidates out, in one order whatever order the photos came in. Nothing is cached,
-and nothing here can write to the profile.
+Everything but the last part is a function of its arguments: photos, tiles and ticked
+lists in, candidates out, in one order whatever order the photos came in. The last part
+reads the profile live. Nothing is cached, and nothing here can write to the profile.
 
 A :class:`Manifest` is one such list with everything said beside it. The owner answers
 it on a local page, and the answers name its hash, so that they are never read as
-answers to another list.
+answers to another list. :func:`plan_for_series` makes the plan for one series from the
+two, and :func:`plan_for_named` one for a thing the owner named without being asked.
 
 Objects that no photo is near do not leave this module, not as a list and not as
 the nearest one: a page that shows them has proposed them.
@@ -43,10 +44,12 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from ..api.errors import PlanInvalid
+from ..api.client import NomadMania
+from ..api.client import _whole as _live_id
+from ..api.errors import AccountMismatch, DriftError, PlanInvalid, VerificationFailed
 from ..geo.tiles import SeriesPoint, haversine_km, neighbourhood
 from ..sources.photos_app import ORIGINS, Origin, PhotoAsset
-from .model import _r, parse_when
+from .model import Op, Plan, _r, basis_of, fingerprint, parse_when, validate
 from .series import AIRPORT_SERIES
 
 SKIP_SERIES = frozenset({-2, 12, 17, 60})
@@ -299,6 +302,40 @@ def _shot(a: PhotoAsset, kind: Kind, spans: Sequence[Span], until: dt.date | Non
     return Shot(a.taken, a.taken_utc, a.lat, a.lon, a.origin, kind, use, late)
 
 
+def default_speeds() -> dict[str, float]:
+    """What :func:`grade_shots` grades by unless told, by name, for the list to say."""
+    return {name: grade_shots.__kwdefaults__[name] for name in _SPEEDS}
+
+
+def grade_by_origin(
+    assets: Iterable[PhotoAsset],
+    spans: Sequence[Span],
+    origins: Collection[str],
+    *,
+    since: dt.date,
+    until: dt.date | None = None,
+    **speeds: float,
+) -> tuple[list[Shot], int]:
+    """The shots of ``origins`` from ``since`` on, and how many photos were of another one.
+
+    Each origin is graded on its own: the photos of two devices, one between the other's,
+    are legs nobody travelled. Give it the whole library, earlier photos too: ``since``
+    is taken off after the grading, for a landing on the first day is seen to be one only
+    by the photo from before it.
+    """
+    mine: dict[str, list[PhotoAsset]] = {o: [] for o in sorted(origins)}
+    other = 0
+    for a in assets:
+        if a.origin in mine:
+            mine[a.origin].append(a)
+        else:
+            other += a.date >= since
+    shots = [s for photos in mine.values()
+             for s in grade_shots(photos, spans, until=until, **speeds)
+             if s.taken.date() >= since]
+    return shots, other
+
+
 _LEFT_OUT = ("fast", "conflict", "span_none", "span_airports", "after_until", "no_utc")
 
 
@@ -308,7 +345,7 @@ def left_out(shots: Iterable[Shot]) -> dict[str, int]:
     Each photo has one reason, the first that holds: ``no_utc``, ``after_until``,
     ``span_none``, ``conflict``, ``fast``; and ``span_airports``, a ground photo that
     is left out of every series but the airports. Every reason is always there. A
-    photo of another origin was never read, so counting those is the caller's.
+    photo of another origin is no shot at all: :func:`grade_by_origin` counts those.
     """
     out = dict.fromkeys(_LEFT_OUT, 0)
     for s in shots:
@@ -629,7 +666,7 @@ class Manifest:
     has ``tiles_read``, ``tiles_unread`` and ``recall``, which is what :func:`recall`
     returns, where a row may also have a ``name``; and may have ``skipped``, from
     :func:`count_skipped`. ``left_out`` is what :func:`left_out` returns, and may have
-    ``other_origin``, the photos that were not read.
+    ``other_origin``, the photos of another origin, which were not used.
 
     Everything is checked here and put into the one form that is hashed, saved, loaded
     and shown: ids as text where they are keys, times as ISO text with no zone, sets
@@ -685,10 +722,12 @@ class Manifest:
         """The file, and the page's data: the content, and what is not hashed beside it."""
         return {"sha256": self.sha256, "created": self.created, **self._content()}
 
+    def to_json(self) -> str:
+        return json.dumps(self._stored(), indent=1, ensure_ascii=False, allow_nan=False)
+
     def save(self, path: str | Path) -> Path:
         p = Path(path)
-        p.write_text(json.dumps(self._stored(), indent=1, ensure_ascii=False, allow_nan=False),
-                     encoding="utf-8")
+        p.write_text(self.to_json(), encoding="utf-8")
         return p
 
     @classmethod
@@ -949,7 +988,15 @@ def load_answers(path: str | Path, manifest: Manifest) -> dict[tuple[int, int], 
     becomes "no". A file that answers another list, or is for another account, or holds
     anything the page does not write, raises :class:`PlanInvalid`.
     """
-    raw = _read_json(path, "answers file", limit=MAX_ANSWERS_BYTES)
+    return read_answers(path, manifest)[0]
+
+
+def read_answers(
+    path: str | Path, manifest: Manifest
+) -> tuple[dict[tuple[int, int], Answer], str]:
+    """:func:`load_answers`, and the sha256 of the bytes that were read."""
+    data = _read_bytes(path, "answers file", limit=MAX_ANSWERS_BYTES)
+    raw = _json_of(data, path, "answers file")
     known = {_key(c): (c.series, c.item) for c in manifest.candidates}
     try:
         _fields(raw, ("format", "account", "manifest", "answers"), "the answers file")
@@ -975,13 +1022,14 @@ def load_answers(path: str | Path, manifest: Manifest) -> dict[tuple[int, int], 
             out[known[key]] = value
     except ValueError as exc:
         raise PlanInvalid(f"{path}: {exc}") from None
-    return out
+    return out, hashlib.sha256(data).hexdigest()
 
 
-def _read_json(path: str | Path, what: str, *, limit: int | None = None) -> Any:
-    def no_number(text: str) -> None:
-        raise ValueError(f"{text} is not a number")
+def _read_json(path: str | Path, what: str) -> Any:
+    return _json_of(_read_bytes(path, what), path, what)
 
+
+def _read_bytes(path: str | Path, what: str, *, limit: int | None = None) -> bytes:
     try:
         with Path(path).open("rb") as f:
             data = f.read() if limit is None else f.read(limit + 1)
@@ -989,11 +1037,211 @@ def _read_json(path: str | Path, what: str, *, limit: int | None = None) -> Any:
         raise PlanInvalid(f"{path}: cannot be read ({exc.strerror or exc})") from None
     if limit is not None and len(data) > limit:
         raise PlanInvalid(f"{path}: over {limit // 1_000_000} MB, which is no {what}")
+    return data
+
+
+def _json_of(data: bytes, path: str | Path, what: str) -> Any:
+    def no_number(text: str) -> None:
+        raise ValueError(f"{text} is not a number")
+
     try:
         return json.loads(data.decode("utf-8"), object_pairs_hook=_no_repeats,
                           parse_constant=no_number)
     except (ValueError, RecursionError) as exc:  # not JSON, not UTF-8, nested without end
         raise PlanInvalid(f"{path}: not a readable {what} ({exc})") from None
+
+
+# -- the series as it is now, read live -----------------------------------------
+
+
+def read_series(client: NomadMania, series_id: int) -> tuple[SeriesInfo, set[int]]:
+    """One series from one request: its catalogue, and the ids ticked in it.
+
+    Strict, because a list that was not read must not come out as an empty one: with
+    nothing ticked everything is offered again, and with no items nothing is there. What
+    is missing or of another shape raises :class:`VerificationFailed`. Its text quotes
+    nothing of the answer, which is full of names the owner may have no photo near.
+    """
+    action, data = _series_reply(client, series_id)
+    title, rows = data.get("title"), data.get("items2")
+    if not isinstance(title, str):
+        raise VerificationFailed(action, "the answer has no title in text")
+    if not isinstance(rows, list) or not rows:
+        raise VerificationFailed(action, "the answer has no list of items in 'items2'")
+    items: dict[int, str] = {}
+    for n, row in enumerate(rows):
+        item, name = (row.get("id"), row.get("name")) if isinstance(row, dict) else (None, None)
+        if (number := _live_id(item)) is None or not isinstance(name, str):
+            raise VerificationFailed(
+                action, f"items2[{n}] is not an item with an 'id' that is a number and a 'name' "
+                        "in text")
+        name = _text(name, "name")
+        if items.setdefault(number, name) != name:
+            raise VerificationFailed(action, f"items2 has item {number} twice, with two names")
+    return SeriesInfo(_text(title, "title"), items), _ticked_in(action, data)
+
+
+def read_ticked(client: NomadMania, series_id: int) -> set[int]:
+    """The ids ticked in one series, as strictly as :func:`read_series` and no more."""
+    return _ticked_in(*_series_reply(client, series_id))
+
+
+def _series_reply(client: NomadMania, series_id: int) -> tuple[str, dict]:
+    action = f"V2/ series {series_id}"
+    data = client.series(series_id)
+    if not isinstance(data, dict):
+        raise VerificationFailed(action, "the answer is not an object")
+    return action, data
+
+
+def _ticked_in(action: str, data: dict) -> set[int]:
+    ids = data.get("visited")
+    if not isinstance(ids, list):
+        raise VerificationFailed(action, "the answer has no list of what is ticked in 'visited'")
+    out = {_live_id(i) for i in ids}
+    if None in out:
+        raise VerificationFailed(action, "'visited' holds something that is not an id")
+    return out
+
+
+# -- from answers to a plan ------------------------------------------------------
+
+# The page takes the same out: direction marks reorder what is beside them, and an escape
+# is an instruction to a terminal.
+_CONTROLS = {n: None for low, high in (
+    (0x00, 0x1F), (0x7F, 0x9F), (0x61C, 0x61C), (0x200E, 0x200F), (0x202A, 0x202E),
+    (0x2066, 0x2069)) for n in range(low, high + 1)}
+
+
+def shown(text: str, fallback: str = "") -> str:
+    """A catalogue name as a terminal and the page show it, or ``fallback`` if nothing is left."""
+    plain = text.translate(_CONTROLS)
+    return plain if plain.strip() else fallback
+
+
+def _km_text(km: float) -> str:
+    return f"{round(km * 1000)} m" if km < 1 else f"{km:.2f}".rstrip("0").rstrip(".") + " km"
+
+
+def _count(n: int, one: str) -> str:
+    return f"{n} {one}" + ("" if n == 1 else "s")
+
+
+def _photo_proof(c: Candidate) -> dict:
+    """The facts of the page about one item, its flags with them, and nothing else."""
+    detail = (f"nearest ground photo {_km_text(c.km)} away, {c.at:%Y-%m-%d %H:%M} by its own "
+              f"clock; {_count(c.photos, 'photo')} on {_count(c.days, 'day')}, from "
+              f"{', '.join(c.origins)}")
+    flags = [text for flag, text in (
+        (c.conflict, "conflict: a photo that day has an impossible jump"),
+        (c.one_spot, "one spot: every photo, on several days, has one coordinate"),
+        (c.thin, "thin: one photo, or over 1 km away"),
+        (c.fast_near, f"{_count(c.fast_near, 'fast photo')} near, not counted")) if flag]
+    return {"kind": "ground_photo", "detail": "; ".join([detail, *flags])}
+
+
+def _tick(series: int, item: int, name: str, **kw: Any) -> Op:
+    return Op("tick_series", bucket="apply", series=series, item=item,
+              label=shown(name, f"item {item}"), confidence=0.0, **kw)
+
+
+def _plan_of(
+    client: NomadMania, account: int, series_id: int, ticked: set[int], ops: list[Op], **kw: Any
+) -> Plan:
+    snap = client.snapshot([])
+    plan = Plan(account=account, ops=ops, basis={
+        "fingerprint": fingerprint(basis_of(snap, [])),
+        "series_ticked": {str(series_id): sorted(ticked)},
+        "taken_at": snap["taken_at"],  # gives a plan built again a journal of its own
+    }, **kw)
+    if problems := validate(plan):
+        raise PlanInvalid("the plan would not be valid: " + "; ".join(problems))
+    return plan
+
+
+def yes_items(
+    manifest: Manifest, answers: Mapping[tuple[int, int], Answer], series_id: int
+) -> list[Candidate]:
+    """What the owner said yes to in one series. ``n``, ``q`` and no answer are not yes."""
+    return [c for c in manifest.candidates
+            if c.series == series_id and answers.get((c.series, c.item)) == "y"]
+
+
+def plan_for_series(
+    manifest: Manifest,
+    answers: Mapping[tuple[int, int], Answer],
+    series_id: int,
+    client: NomadMania,
+    *,
+    answers_sha256: str | None = None,
+) -> Plan:
+    """The plan that ticks what the owner said yes to in one series of ``manifest``.
+
+    The account and the series are read live. An item that is ticked by now is left out,
+    and a plan may come back with no ops. A yes to an item that is gone, or whose id has
+    another name than the one that was shown, refuses the whole plan with
+    :class:`DriftError`: the series is not the one that was asked about.
+    """
+    if series_id in SKIP_SERIES or all(c.series != series_id for c in manifest.candidates):
+        raise PlanInvalid(f"series {series_id} is not on this list")
+    if (account := client.account_id()) != manifest.account:
+        raise AccountMismatch(
+            f"the list was made for account {manifest.account}, logged in as {account}")
+    info, ticked = read_series(client, series_id)
+    yes = yes_items(manifest, answers, series_id)
+    for what, bad in (
+        ("not in the series any more", [c for c in yes if c.item not in info.items]),
+        ("under another name in the series now", [c for c in yes if c.item not in ticked
+                                                  and info.items.get(c.item) != c.name]),
+    ):
+        if bad:
+            names = ", ".join(f"{shown(c.name, '(no name)')} ({c.item})" for c in bad)
+            raise DriftError(f"series {series_id}: {what}: {names}. No plan was made; run "
+                             "`series review` again.")
+    list_name = manifest.sha256[:12]
+    ops = [_tick(c.series, c.item, c.name, method="series review: ground photos, owner's answer",
+                 evidence=[f"The owner answered \"I was there\" on list {list_name}."],
+                 proof=[_photo_proof(c)])
+           for c in yes if c.item not in ticked]
+    sources: list[dict] = [{"kind": "manifest", "sha256": manifest.sha256}]
+    if answers_sha256:
+        sources.append({"kind": "answers", "sha256": answers_sha256})
+    sources.append({"kind": "photos", "origins": list(manifest.params["origins"])})
+    return _plan_of(client, account, series_id, ticked, ops, sources=sources,
+                    params=manifest.params)
+
+
+def plan_for_named(series_id: int, name: str, said: str, client: NomadMania) -> Plan:
+    """The plan that ticks the one item of a series whose name is exactly ``name``.
+
+    ``said`` is the owner's own words, kept as they are. No ops when it is ticked already.
+    A name that is not there, or is there twice, is refused with a text that has no name
+    in it and nothing about how near it was: the nearest name is a proposal.
+    """
+    if series_id <= 0:
+        raise PlanInvalid(f"{series_id} is not the id of a series")
+    if not said.strip():
+        raise PlanInvalid("what the owner said is empty, and it is the only evidence there is")
+    if not name.strip():
+        raise PlanInvalid("the name is empty")
+    try:
+        said.encode("utf-8")
+    except UnicodeEncodeError:
+        raise PlanInvalid("what the owner said is not text that a file can keep") from None
+    account = client.account_id()
+    info, ticked = read_series(client, series_id)
+    items = [item for item, n in info.items.items() if n == name]
+    if not items:
+        raise PlanInvalid(f"series {series_id} has no item with exactly that name, letter for "
+                          "letter. Nothing near it is looked for")
+    if len(items) > 1:
+        raise PlanInvalid(f"series {series_id} has more than one item with exactly that name, so "
+                          "the name does not say which")
+    ops = [_tick(series_id, item, name, method="named by the owner",
+                 evidence=["The owner named this item themselves."],
+                 proof=[{"kind": "memory", "detail": said}])
+           for item in items if item not in ticked]
+    return _plan_of(client, account, series_id, ticked, ops, sources=[{"kind": "memory"}])
 
 
 __all__ = [
@@ -1006,12 +1254,21 @@ __all__ = [
     "Shot",
     "Span",
     "count_skipped",
+    "default_speeds",
     "find_candidates",
+    "grade_by_origin",
     "grade_shots",
     "harvest",
     "left_out",
     "load_answers",
     "load_spans",
+    "plan_for_named",
+    "plan_for_series",
+    "read_answers",
+    "read_series",
+    "read_ticked",
     "recall",
     "render_page",
+    "shown",
+    "yes_items",
 ]

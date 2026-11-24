@@ -356,6 +356,45 @@ area, not of having seen the thing. Grade candidates by distance, show the user
 the counts at several radii, validate recall against what they have already
 ticked by hand, and let them choose the threshold. Do not pick it for them.
 
+**Series from photos go through a page the owner answers.** Three commands, none of
+which writes to the profile:
+
+1. `wanderfill series review --since DATE` reads the photos, the tiles and the live
+   series, and writes a page and its list into `review/`. Read out the counts it
+   prints, the recall, what was left out and the tiles that were not read. Exit 3
+   means the list is incomplete: say so, and run it again.
+2. **Hand the page to the owner and stop.** They open it, answer and save the file.
+   Never fill an answer in, edit the list or the answers, press a button for them, or
+   suggest one: rule 7. An item with no answer is not a "no" and not a "yes", and "I
+   don't remember" is final. Do not ask about it again.
+3. `wanderfill series plan LIST ANSWERS --series ID` makes the plan for one series.
+   Only "I was there" becomes a tick. One series per plan and one approval per series,
+   rule 5: show it with `show -v`, then `check`, then a yes to that series. A refusal
+   (another account, another list, an item that is gone or renamed) means a new
+   `review`, not a repair of the files.
+
+What the marks on an item mean. They are facts for the owner, not grades for you.
+`thin`: one photo, or none within a kilometre. `conflict`: a photo of that day, here,
+is at one end of a jump nobody makes, so a coordinate is wrong. `one spot`: on two days
+or more every photo has exactly one coordinate, as a false or a stale position does.
+`fast`: photos near were taken at travel speed, and do not count. Within a series the
+items with `conflict` or `one spot` come last.
+
+What the flags mean. `--origin` other than `own-camera` lets in photos that may be
+somebody else's, so only when the owner asks. `--spans` is the owner's file of
+stretches that prove nothing (`use: none`) or an airport only (`use: airports`); you
+may write down what they say, and do not decide it. `--until` leaves out a stay that
+is not over. `--radius` is theirs to choose, like the threshold above.
+
+`wanderfill series named --series ID --name TEXT --said TEXT` is for a place the owner
+named without being asked. `--said` holds their own words and nobody else's, and a yes
+to a place you named is not that (rule 7). The name has to match the catalogue letter
+for letter. When it does not, do not go looking in the catalogue for what they may have
+meant: ask them for the exact name.
+
+Never print or read out items that no photo is near, not even the nearest, and not
+from `client.series()` either.
+
 **KYE is not a series and has its own module.** "Know Your Earth" is not filled
 in promptly from regions or trips — a profile with hundreds of regions can sit at
 zero, and one did. But it is **not established that it is purely manual**: hours
