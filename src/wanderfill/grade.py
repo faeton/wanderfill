@@ -21,10 +21,10 @@ person was. The four ways that goes wrong, in the order they were met:
   * **A frozen fix.** A phone can stamp one stale coordinate on every photo for
     hours in flight. Twelve of them over 2.75 hours look like a day on the ground
     at 0 km/h, and two of them either side of midnight look like two days. So a
-    run of photos with exactly one coordinate counts once, at the first, and the
-    speed out of it is timed from the last. A phone lying on a table repeats
-    itself too, and the numbers cannot tell the two apart: that is a hold, and
-    ``Verdict.repeated`` says how many photos were counted with another.
+    run of photos with exactly one coordinate counts once, at the first. A phone
+    lying on a table repeats itself too, and the numbers cannot tell the two apart:
+    that is a hold, and ``Verdict.repeated`` says how many photos were counted with
+    another.
 
 Somebody else's photo, or one stamped by glasses with a coordinate from another
 country, is not among them: nothing here can see it. ``PhotoAsset.origin`` can.
@@ -35,6 +35,11 @@ Not a classifier, and the thresholds are not laws. **High-speed rail runs at
 200–350 km/h**, so the aircraft test will flag a Shinkansen day as airborne;
 that is why the verdict is *hold for a human*, never *reject*. Anyone applying
 this to a rail-heavy archive should raise ``fast_kmh`` and say so.
+
+Speed is judged only where the coordinate changed, whatever its precision, timed
+from the last photo in one place to the first in the next. Standing still measures
+nothing about the leg that follows, and eleven legs of 0 km/h in the departure
+lounge used to outvote the flight out of it.
 
 Sources differ in what they can answer. A per-photo library has timestamps to
 the second and supports all of this. A day-level track has one row per city and
@@ -105,15 +110,20 @@ def _decimals(x: float) -> int:
     return -Decimal(repr(float(x))).as_tuple().exponent
 
 
+def _timed(fixes: Iterable[Fix]) -> list[Fix]:
+    return sorted((f for f in fixes if f.at), key=lambda f: f.at)
+
+
 def _runs(fixes: Iterable[Fix]) -> list[list[Fix]]:
     """The timed fixes in order, with a coordinate that repeats gathered into one run.
 
     Only consecutive, exactly equal, unrounded coordinates make a run. Two GPS
     readings of one place nearly always differ past the fourth decimal; two copies
-    of one reading never do. Untimed fixes are not here, so they neither join a run nor break one.
+    of one reading never do. Untimed fixes are not here, so they neither join a run
+    nor break one.
     """
     runs: list[list[Fix]] = []
-    for f in sorted((f for f in fixes if f.at), key=lambda f: f.at):
+    for f in _timed(fixes):
         if runs:
             last = runs[-1][-1]
             if (f.lat, f.lon) == (last.lat, last.lon) and (
@@ -126,17 +136,21 @@ def _runs(fixes: Iterable[Fix]) -> list[list[Fix]]:
 
 
 def looks_airborne(fixes: Sequence[Fix], *, fast_kmh: float = FAST_KMH) -> tuple[int, int]:
-    """``(fast_legs, timed_legs)`` between consecutive *timestamped* fixes.
+    """``(fast_legs, timed_legs)`` between consecutive *timestamped* fixes that differ.
+
+    A leg is two fixes next to each other in time, at different coordinates and at
+    different times. ``timed_legs`` is not the number of fixes less one.
 
     Untimed fixes are skipped rather than assumed simultaneous — pairing two
-    day-level rows would imply a speed the data never measured. Inside a run of
-    one repeated coordinate there is no leg: 0 km/h between two copies of a stale
-    fix was not measured either, and eleven of them outvote the jump that shows
-    the aircraft. The leg out of a run is timed from its last fix.
+    day-level rows would imply a speed the data never measured. Two fixes at one
+    coordinate are no leg either, rounded or not: a place that repeats would
+    outvote the jump that shows the aircraft. The jump is timed from the last of
+    them.
     """
     fast = legs = 0
-    for before, after in pairwise(_runs(fixes)):
-        a, b = before[-1], after[0]
+    for a, b in pairwise(_timed(fixes)):
+        if (a.lat, a.lon) == (b.lat, b.lon):
+            continue
         seconds = (b.at - a.at).total_seconds()
         if seconds <= 0:
             continue

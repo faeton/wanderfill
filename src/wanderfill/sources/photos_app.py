@@ -263,8 +263,9 @@ class PhotosAppSource:
     origins:
         Read only photos of these origins (``own-camera``, ``airdrop``, ``other``,
         ``unknown``), in ``points()`` and ``assets()`` alike. ``None`` reads them
-        all. Not a filter to apply blind: where no importer was recorded every
-        photo is ``unknown``, so ``{"own-camera"}`` drops the owner's own photos too.
+        all; an empty set is refused. Not a filter to apply blind: where no importer
+        was recorded every photo is ``unknown``, so ``{"own-camera"}`` drops the
+        owner's own photos too.
 
     ``importer_column`` says whether the library has an importer column, and is
     ``None`` until something has been read. Print it beside an empty filtered
@@ -283,12 +284,13 @@ class PhotosAppSource:
         self._origin_names()
 
     def _origin_names(self) -> list[str] | None:
-        """The names to keep. A typo would keep nothing and read as an empty library."""
+        """The names to keep. A typo, or none at all, would read as an empty library."""
         if self.origins is None:
             return None
-        if not ORIGINS.issuperset(self.origins):
+        if not self.origins or not ORIGINS.issuperset(self.origins):
             raise ValueError(
-                f"origins={self.origins!r}: each must be one of {', '.join(get_args(Origin))}"
+                f"origins={self.origins!r}: name at least one, each of them one of "
+                f"{', '.join(get_args(Origin))}; None reads them all"
             )
         return sorted(self.origins)
 

@@ -353,10 +353,12 @@ not reject them, and do not mark them.
 stale fix for hours in flight, and twelve copies of it look like a day on the
 ground. `grade.grade` counts consecutive photos with exactly one coordinate once
 and reports how many in `Verdict.repeated`, but only where a coordinate has more
-than four decimals: rounded and day-level points repeat anyway and are graded as
-they are. A cell held for this may equally be a phone lying still, so it is a
-hold like the others. Order the photos by `PhotoAsset.taken_utc`; the local
-clock runs backwards across the date line.
+than four decimals: rounded and day-level points repeat anyway and each of them
+still counts. Speed is judged only between coordinates that differ, rounded or
+not, so standing still does not outvote the flight that follows. A cell held for
+a repeated coordinate may equally be a phone lying still, so it is a hold like
+the others. Order the photos by `PhotoAsset.taken_utc`; the local clock runs
+backwards across the date line.
 
 **TCC is not a series either.** The Travelers' Century Club list has 330
 destinations and NomadMania derives almost all of them from your regions — no

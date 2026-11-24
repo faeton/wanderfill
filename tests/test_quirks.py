@@ -1962,10 +1962,41 @@ def test_grade_does_not_collapse_rounded_or_untimed_points():
     for lat, lon in ((-33.401, -70.79), (-33.4012, -70.7934), (-33.0, -70.0)):
         v = grade([_fix(lat, lon, d, 9 + i * 15 // 60, i * 15 % 60) for i in range(12)])
         assert v == Verdict(
-            True, "one day, 12 points over 2.8h at ground speed", 1, 12, 2.75, 0, 11)
+            True, "one day, 12 points over 2.8h at ground speed", 1, 12, 2.75, 0, 0)
     rows = [_fix(50.450123, 30.523456, dt.date(2013, 7, n)) for n in (1, 2, 2)]
     assert grade(rows) == Verdict(True, "2 distinct days", 2, 3, 0.0, 0, 0)
     assert grade(rows[1:]) == Verdict(False, "single day, 2 point(s)", 1, 2, 0.0, 0, 0)
+
+
+def test_standing_still_at_a_rounded_coordinate_does_not_outvote_a_flight():
+    """Twelve rounded photos in one place are twelve observations, but not eleven
+    legs at 0 km/h: those outvoted the 6,600 km in the next twenty minutes."""
+    from wanderfill.grade import grade, looks_airborne
+
+    d = dt.date(2025, 10, 22)
+    still = [_fix(-17.553, -149.607, d, f.at.hour, f.at.minute) for f in _frozen()]
+    jump = [*still, _fix(33.943, -118.408, d, 12, 5)]
+    for fixes in (jump, jump[::-1]):
+        assert looks_airborne(fixes) == (1, 1)
+        v = grade(fixes)
+        assert not v.ok and "airborne" in v.reason and "repeated" not in v.reason
+        assert (v.points, v.fast_legs, v.timed_legs, v.repeated) == (13, 1, 1, 0)
+    # 500 km in the 20 minutes since the last photo, not in the 3 hours since the first.
+    assert looks_airborne([*still, _fix(-22.05, -149.607, d, 12, 5)]) == (1, 1)
+    # A slow leg between two places is still a leg, beside any number of still ones.
+    walk = [*still, _fix(-17.563, -149.607, d, 12, 5), _fix(33.943, -118.408, d, 12, 25)]
+    assert looks_airborne(walk) == (1, 2)
+
+
+def test_two_photos_of_one_place_in_one_second_are_no_leg():
+    from wanderfill.grade import grade, looks_airborne
+
+    d = dt.date(2024, 3, 3)
+    for lat, lon in ((-33.401, -70.79), (-33.401234, -70.791234)):
+        pair = [_fix(lat, lon, d, 9, 0), _fix(lat, lon, d, 9, 0)]
+        assert looks_airborne(pair) == (0, 0)
+        v = grade(pair)
+        assert not v.ok and v.span_hours == 0.0
 
 
 def test_grade_collapses_past_four_decimals_however_the_float_prints():
@@ -2421,7 +2452,7 @@ def test_points_and_assets_apply_the_same_origin_filter(tmp_path):
     lib = _mixed_library(tmp_path)
     everything = list(PhotosAppSource(library=lib).assets())
     names = ("own-camera", "airdrop", "other", "unknown")
-    for n in range(len(names) + 1):
+    for n in range(1, len(names) + 1):
         for chosen in map(frozenset, combinations(names, n)):
             src = PhotosAppSource(library=lib, origins=chosen)
             assets = list(src.assets())
@@ -2438,20 +2469,22 @@ def test_points_and_assets_apply_the_same_origin_filter(tmp_path):
 
 
 def test_an_unknown_origin_name_is_refused(tmp_path):
-    """A typo that filters everything out reads as a library with nothing in it."""
+    """A typo that filters everything out reads as a library with nothing in it, and
+    so does an empty set."""
     from wanderfill.sources import PhotosAppSource
 
     lib = _mixed_library(tmp_path)
-    for bad in (frozenset({"own-camera", "own_camera"}), "own-camera"):
+    for bad in (frozenset({"own-camera", "own_camera"}), "own-camera", frozenset(), ""):
         with pytest.raises(ValueError) as exc:
             PhotosAppSource(library=lib, origins=bad)
         for name in ("own-camera", "airdrop", "other", "unknown"):
             assert name in str(exc.value)
     src = PhotosAppSource(library=lib)
-    src.origins = frozenset({"camera"})  # set afterwards, it is still refused
-    for read in (src.points, src.assets):
-        with pytest.raises(ValueError, match="own-camera"):
-            list(read())
+    for bad in (frozenset({"camera"}), frozenset()):
+        src.origins = bad  # set afterwards, it is still refused
+        for read in (src.points, src.assets):
+            with pytest.raises(ValueError, match="own-camera"):
+                list(read())
 
 
 def test_no_filter_reads_exactly_what_it_read_before(tmp_path, mac_on_tahiti_time):

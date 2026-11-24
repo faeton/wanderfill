@@ -41,9 +41,12 @@ THE HONEST LIMITS, STATED UP FRONT
 - A photo proves a *camera* was somewhere. The committee knows this, which is
   why a selfie outranks an ordinary photo. This module can read Apple's
   front-camera flag; it cannot see whether a landmark is in the frame.
-- Photos that somebody sent you, and screenshots, are excluded at the source —
-  see :mod:`wanderfill.sources.photos_app`. They are evidence about other
-  people's travel and about screens.
+- Photos that somebody sent you in Messages, and screenshots, are excluded at the
+  source — see :mod:`wanderfill.sources.photos_app`. They are evidence about other
+  people's travel and about screens. A photo they AirDropped, or that another app
+  saved, is not excluded. ``PhotoAsset.origin`` tells it apart where the library
+  recorded the importer, and ``PhotosAppSource(origins=...)`` can leave it out, but
+  nothing here filters on it.
 - A region graded ``none`` here is not a region you did not visit. Cameras run
   out of battery and film-era travel has no EXIF at all. It is a region whose
   proof is somewhere other than this library, and knowing which ones those are,
