@@ -47,7 +47,7 @@ from .model import (
 )
 
 # The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
-PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
+PROVENANCE = frozenset({"label", "confidence", "method", "evidence", "proof"})
 
 # What to do about an entry that stays open. One text, wherever one is met.
 CLOSE_BY_HAND = (

@@ -831,6 +831,10 @@ def cmd_show(args) -> int:
             print(f"      confidence {op.confidence}  |  {op.method}")
             for e in op.evidence if isinstance(op.evidence, list) else [op.evidence]:
                 print(f"        - {e}")
+            for p in op.proof if isinstance(op.proof, list) else [op.proof]:
+                typed = isinstance(p, dict) and {"kind", "detail"} <= p.keys()
+                print(f"        - proof {p['kind']}: {p['detail']}" if typed
+                      else f"        - proof {p}")
     elif plan.ops:
         print("Run with -v to see dates, ids, quality and the evidence behind each op.")
     if problems := validate(plan):

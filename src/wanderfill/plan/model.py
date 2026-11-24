@@ -36,6 +36,9 @@ SCHEMA = 1
 OpKind = Literal["add_visit", "update_visit", "create_trip", "mark_dare",
                  "mark_kye", "mark_tcc", "tick_series"]
 Bucket = Literal["apply", "review", "reject"]
+# What an entry of ``Op.proof`` can rest on. Named, because a ``confidence`` number
+# would say of an owner's answer what nothing measured.
+PROOF_KINDS = frozenset({"ground_photo", "fast_photo", "document", "memory"})
 
 
 @dataclass
@@ -59,6 +62,8 @@ class Op:
     confidence: float = 0.0
     method: str = ""
     evidence: list[str] = field(default_factory=list)
+    # Objects with a ``kind`` from PROOF_KINDS and a ``detail``, both text.
+    proof: list[dict] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -75,8 +80,8 @@ class Op:
         look complete; likewise a re-plan that raises a quality would be skipped
         as already-applied. A trip's regions are in with their own dates and
         ``hidden`` for the same reason. Provenance fields — label, evidence,
-        confidence, method — stay out, because changing the reasoning does not
-        change the write.
+        proof, confidence, method — stay out, because changing the reasoning does
+        not change the write.
         """
         if self.kind == "create_trip":
             rows = [_region_row(r) for r in self.regions]
@@ -415,6 +420,20 @@ def _trip_problems(op: Op) -> list[str]:
     return out
 
 
+def _proof_problems(proof: object) -> list[str]:
+    if not isinstance(proof, list):
+        return [f"proof must be a list of objects, not {_r(proof)}"]
+    out = []
+    for n, p in enumerate(proof):
+        kind, detail = (p.get("kind"), p.get("detail")) if isinstance(p, dict) else (None, None)
+        if not isinstance(kind, str) or kind not in PROOF_KINDS:
+            out.append(f"proof[{n}] must be an object whose kind is one of "
+                       f"{', '.join(sorted(PROOF_KINDS))}, not {_r(p)}")
+        elif not isinstance(detail, str):
+            out.append(f"proof[{n}] needs a detail in text, not {_r(detail)}")
+    return out
+
+
 _INT_FIELDS = ("region", "visit_id", "series", "item", "quality")
 
 
@@ -423,7 +442,8 @@ def _op_problems(op: Op) -> list[str]:
 
     Every field is type-checked whether or not the kind uses it, because every
     one reaches the op's key, and some reach the server (``allow_vaguer`` as the
-    string ``"false"`` is truthy, and permits erasing a date).
+    string ``"false"`` is truthy, and permits erasing a date). ``proof`` reaches
+    neither, and is checked because a person approves the write on it.
     """
     out: list[str] = []
     for name in _INT_FIELDS:
@@ -434,6 +454,7 @@ def _op_problems(op: Op) -> list[str]:
         out.append(f"allow_vaguer must be true or false, not {_r(op.allow_vaguer)}")
     if not isinstance(op.regions, list) or not all(isinstance(r, dict) for r in op.regions):
         out.append(f"regions must be a list of objects, not {_r(op.regions)}")
+    out += _proof_problems(op.proof)
     if out:
         return out
 
