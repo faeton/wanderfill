@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+import os
+import sys
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +26,16 @@ from ..api.errors import (
     ApiError,
     AuthError,
     DriftError,
+    JournalCorrupt,
     PrecisionLoss,
     TransportError,
     UnknownWriteOutcome,
     VerificationFailed,
 )
 from .model import Op, Plan, basis_of, fingerprint, regions_touched
+
+# The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
+PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
 
 
 @dataclass
@@ -43,9 +50,54 @@ class Journal:
     path: Path
 
     def _append(self, entry: dict) -> None:
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        """One line, on the disk before this returns.
+
+        A lone surrogate in a server's answer has no UTF-8 form; as an escape
+        it is the same JSON, and the ``done`` line of a write that landed is
+        not lost to it.
+        """
+        text = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
+        line = text.encode("utf-8", "backslashreplace")
+        with self.path.open("a+b") as fh:
+            if fh.tell():
+                # Entries are closed by hand, and an editor may leave out the
+                # last newline. Appending to that line would corrupt both.
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    line = b"\n" + line
+            fh.write(line)
             fh.flush()
+            os.fsync(fh.fileno())
+
+    def _entries(self) -> list[dict]:
+        """Every line, or :class:`JournalCorrupt`: a skipped line is a hidden write.
+
+        Split on the newline byte only. ``str.splitlines`` also cuts at U+2028
+        and its kin, which JSON leaves unescaped inside a value, and a line torn
+        in the middle of a character is not valid text at all.
+        """
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return []
+        out = []
+        for n, line in enumerate(raw.split(b"\n"), 1):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line.decode("utf-8"))
+                bad = not (isinstance(e, dict) and isinstance(e.get("key"), str)
+                           and e.get("phase") in ("open", "done"))
+            except ValueError:  # not JSON, or not UTF-8
+                bad = True
+            if bad:
+                raise JournalCorrupt(
+                    f"{self.path}: line {n} is not an 'open' or 'done' entry with a key, so "
+                    "whether a write is unfinished is unknown. Read the server back and fix "
+                    "that line by hand; nothing is sent for this account until then."
+                )
+            out.append(e)
+        return out
 
     def opening(self, op: Op, snapshot: object = None) -> None:
         """Record the intent BEFORE the request goes out.
@@ -59,10 +111,14 @@ class Journal:
         ``snapshot`` is whatever the caller wants preserved *in full* before the
         write — for a deletion, the record as it was, so it can be put back.
         It goes in the open entry, not the done one, because the done entry is
-        the one that may never get written.
+        the one that may never get written. ``payload`` is there for the same
+        reason: the key is a hash, and the plan file may be gone by the time
+        somebody has to find out what was sent.
         """
         entry = {"at": dt.datetime.now(dt.timezone.utc).isoformat(),
                  "phase": "open", "key": op.key, "kind": op.kind, "label": op.label}
+        if isinstance(op, Op):
+            entry["payload"] = {k: v for k, v in asdict(op).items() if k not in PROVENANCE}
         if snapshot is not None:
             entry["snapshot"] = snapshot
         self._append(entry)
@@ -70,7 +126,7 @@ class Journal:
     def note(self, op: Op, result: object, error: str = "") -> None:
         self._append({"at": dt.datetime.now(dt.timezone.utc).isoformat(),
                       "phase": "done", "key": op.key, "kind": op.kind, "label": op.label,
-                      "result": str(result)[:400], "error": error})
+                      "result": result, "error": error})
 
     def done_keys(self) -> set[str]:
         """Keys already applied, across every previous run of this plan.
@@ -79,21 +135,8 @@ class Journal:
         re-sent everything. The journal is therefore keyed to the plan, not to
         the moment of running it.
         """
-        if not self.path.exists():
-            return set()
-        keys, opened = set(), set()
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if e.get("phase") == "open":
-                opened.add(e["key"])
-            elif not e.get("error"):
-                keys.add(e["key"])
-        return keys
+        return {e["key"] for e in self._entries()
+                if e["phase"] == "done" and not e.get("error")}
 
     def unresolved(self) -> set[str]:
         """Ops that were started and never finished — a human decision, not a retry.
@@ -104,21 +147,88 @@ class Journal:
         which mattered once a key could be reused — a deletion refused on the
         first try and lost on the second looked fine.
         """
-        if not self.path.exists():
-            return set()
         pending: set[str] = set()
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if e.get("phase") == "open":
-                pending.add(e.get("key"))
+        for e in self._entries():
+            if e["phase"] == "open":
+                pending.add(e["key"])
             else:
-                pending.discard(e.get("key"))
+                pending.discard(e["key"])
         return pending
+
+
+def _distinct(dirs: Iterable[Path]) -> list[Path]:
+    """The directories that exist, each once however it was spelled, in a fixed order."""
+    found: dict[tuple[int, int], Path] = {}
+    for d in dirs:
+        try:
+            st = d.stat()
+        except FileNotFoundError:
+            continue
+        found.setdefault((st.st_dev, st.st_ino), d)
+    return sorted(found.values(), key=lambda d: d.resolve())
+
+
+def open_entries(dirs: Iterable[Path], account: int) -> dict[Path, set[str]]:
+    """Every write of this account that was started and never confirmed, by journal.
+
+    Reads every apply and delete journal of the account in ``dirs``, not only
+    the one the current plan would use: that name comes from the plan's basis,
+    so re-planning alone moved an open write out of sight. Journals with no
+    account in their name predate the phase field and are not read. A journal
+    in a directory not listed here is not seen.
+    """
+    out = {}
+    for d in _distinct(dirs):
+        # Not glob(): it answers "nothing" for a directory it may not read.
+        for path in sorted(d.iterdir()):
+            if path.name != f"deletes-{account}.ndjson" and not (
+                path.name.startswith(f"journal-{account}-") and path.suffix == ".ndjson"
+            ):
+                continue
+            if stuck := Journal(path).unresolved():
+                out[path] = stuck
+    return out
+
+
+def describe_open(entries: dict[Path, set[str]]) -> list[str]:
+    """One line per journal: which file, and which keys a human has to settle."""
+    return [f"{path}: {len(keys)} write(s) started and never confirmed: "
+            f"{', '.join(sorted(keys))}" for path, keys in entries.items()]
+
+
+@contextmanager
+def account_lock(dirs: Iterable[Path], account: int) -> Iterator[None]:
+    """Hold the right to write to ``account``, or raise :class:`DriftError` at once.
+
+    Two runs that both read the journals before either has written to them both
+    find nothing open. The lock dies with the process, so a crash never leaves
+    one behind; the ``.lock-*`` file itself stays, because removing it would let
+    a third run lock a different file of the same name. Directories that do not
+    exist are not created for this, so two runs whose ``--workdir`` differ meet
+    only where they share an existing directory.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+        print("warning: no file locking on this system; make sure nothing else is "
+              "writing to this account", file=sys.stderr)
+    held = []
+    try:
+        for d in _distinct(dirs) if fcntl else ():
+            path = d / f".lock-{account}"
+            held.append(path.open("ab"))
+            try:
+                fcntl.flock(held[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise DriftError(
+                    f"another run is writing to account {account} (it holds {path}). "
+                    "Wait for it to finish; nothing was sent."
+                ) from None
+        yield
+    finally:
+        for fh in held:
+            fh.close()
 
 
 @dataclass
@@ -154,8 +264,12 @@ def apply_plan(
     confirm: bool = False,
     max_writes: int = 200,
     on_progress: Callable[[int, int, Op, bool], None] | None = None,
+    also: Sequence[Path] = (),
 ) -> ApplyReport:
     """Run the apply-bucket ops of a plan, after the preconditions pass.
+
+    ``also`` is where else this account's journals may be. The lock and the scan
+    for open writes cover ``workdir`` and these, and no other directory.
 
     Preconditions, in order, each of which aborts rather than warns:
 
@@ -163,11 +277,13 @@ def apply_plan(
        is always the safe one.
     2. The logged-in account must match the plan's. This is the guard against
        writing somebody's history onto the wrong profile.
-    3. A snapshot must be taken successfully. If state cannot be captured, it
+    3. No other run may hold the account's lock, from here to the read-back.
+    4. No write may be open in any of the account's journals, this plan's or not.
+    5. A snapshot must be taken successfully. If state cannot be captured, it
        cannot be compared afterwards, so the run does not start.
-    4. Live state must match the fingerprint taken at plan time. A profile that
+    6. Live state must match the fingerprint taken at plan time. A profile that
        moved needs a new plan, not an optimistic write.
-    5. The op count must fit under ``max_writes``. A ceiling means a logic bug
+    7. The op count must fit under ``max_writes``. A ceiling means a logic bug
        cannot rewrite an entire profile in one go.
     """
     report = ApplyReport()
@@ -198,6 +314,28 @@ def apply_plan(
         )
 
     workdir.mkdir(parents=True, exist_ok=True)
+    dirs = (workdir, *also)
+    with account_lock(dirs, plan.account):
+        if stuck := open_entries(dirs, plan.account):
+            raise DriftError(
+                "; ".join(describe_open(stuck)) + ". Whether they reached the server is "
+                "unknown, so sending anything more could duplicate them. Check each key "
+                "against the profile, then append a 'done' line for it by hand (with an "
+                "'error' if it did not land)."
+            )
+        return _apply_locked(client, plan, ops, report, workdir, max_writes, on_progress)
+
+
+def _apply_locked(
+    client: NomadMania,
+    plan: Plan,
+    ops: list[Op],
+    report: ApplyReport,
+    workdir: Path,
+    max_writes: int,
+    on_progress: Callable[[int, int, Op, bool], None] | None,
+) -> ApplyReport:
+    """The part of :func:`apply_plan` that needs the lock, from snapshot to read-back."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # `regions_touched` knows which kinds carry a NomadMania region id and which
     # carry something else: a mark_kye op's id is a 10x10 quadrant, a different
@@ -237,13 +375,6 @@ def apply_plan(
     # interrupted one already did.
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
     already = journal.done_keys()
-    stuck = journal.unresolved()
-    if stuck:
-        raise DriftError(
-            f"{len(stuck)} op(s) in {journal.path.name} were started and never confirmed. "
-            "Whether they reached the server is unknown, so retrying could duplicate them. "
-            "Check those keys against the profile by hand before running this again."
-        )
 
     # What the server answered, per op, for this run only. verify() needs the
     # trip id a create_trip was given: without it a visit that was already

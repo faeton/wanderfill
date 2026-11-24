@@ -252,8 +252,10 @@ What the read-back accepts is narrow on purpose. A trip is gone only if
 `get-trip` fails with exactly `Unauthorised.` **and** the year's listing no
 longer carries it; a response with the list field missing is an error, not an
 empty list. If proof fails, or the answer is lost, the journal entry stays open
-— and **any** open entry blocks every further deletion for that account until
-a human has read the server and closed it by hand. Do not close one for them.
+— and **any** open entry, in a delete journal or an apply's, blocks every further
+deletion and apply for that account until a human has read the server and
+closed it by hand, by appending a `done` line with that key (and an `error` if
+the write did not land: a plain `done` means it did). Do not close one for them.
 None of this is in the plan model, and it must not be: a plan is what the tool
 computed, and a deletion is what the owner decided.
 
@@ -591,6 +593,12 @@ the same kind rather than inventing the fields; `regions_touched()` in
 At apply time:
 
 - Refuse if the authenticated account id differs from the plan's.
+- Refuse if another run holds the account's lock, or if any of the account's
+  journals has an open entry or a line that cannot be read. Re-planning does not
+  get past this. The lock and the scan cover the chosen `--workdir` and the
+  default `~/.local/share/wanderfill`, if it exists: a journal in a third
+  directory is not seen, so keep one account to one `--workdir`. A journal is
+  never repaired by the tool, and not by you either.
 - Refuse if live state has drifted since planning — re-plan instead.
 - Snapshot everything first, and refuse to start if the snapshot fails.
 - Cap the number of writes per run.
@@ -623,7 +631,8 @@ is not a pass; read the server yourself before reporting the write as done.
 
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
-duplicate ops and unconfirmed journal entries without sending a write.
+duplicate ops and every open or unreadable journal entry of the account without
+sending a write.
 
 ---
 
@@ -690,7 +699,7 @@ Left to right, and the invariant is structural rather than a convention:
 | `api/transport.py` | the two surfaces, the rate limiter, the retry decision |
 | `api/client.py` | one method per endpoint, each quirk encoded as *behaviour* |
 | `plan/model.py` | `Op`, `Plan`, `Op.key`, `regions_touched`, `basis_of` |
-| `plan/apply.py` | the five preconditions, the journal, `verify()` |
+| `plan/apply.py` | the preconditions, the account lock, the journal, `verify()` |
 | `plan/segment.py` | trips; `home=` is the parameter the module turns on |
 | `plan/series.py` | shortlists and the recall curve, never an auto-marker |
 | `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |

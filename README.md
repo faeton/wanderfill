@@ -317,7 +317,8 @@ These are constraints in the code, not aspirations in a document.
   does nothing without `--confirm` and a `--reason`, journals the full record
   before sending anything, and reads the server back afterwards. If that
   read-back cannot prove the thing is gone, the journal entry stays open and
-  blocks every further deletion until you have looked yourself. It is not a plan op and cannot be: a plan
+  blocks every further deletion and apply on that account until you have looked
+  yourself. It is not a plan op and cannot be: a plan
   is something the tool worked out, and a deletion must never be. A test
   asserts those five are the only removing methods in the client.
 - **It never invents travel.** Only regions containing an observed point are
@@ -509,6 +510,9 @@ cost a wrong write or a wrong number the first time.
 | `quickEnter/updateTCC` names its id field `region` but takes a TCC id, and region and TCC ids overlap | `mark_tcc` carries the id in `item` and refuses any id not in `tcc()`'s list of 16 |
 | A write retried after a lost response duplicates it | Reads retry, writes do not; an unanswered write raises `UnknownWriteOutcome` and leaves the journal open |
 | A 500, a redirect, an HTML page or a toggle that does not say `OK` looks like a failed write, and so does an error on the read-back after one that succeeded; closing the journal there lets the next run send it again | Writes never follow a redirect; a 3xx, a 5xx, a 408 or a non-JSON answer to one is `UnknownWriteOutcome`, a failed read-back is `VerificationFailed`, and only a refusal closes the entry; `test_a_500_on_a_write_is_an_unknown_outcome`, `test_a_redirect_on_a_write_is_an_unknown_outcome`, `test_a_delete_whose_readback_errors_stays_open` |
+| A journal is named after the plan's basis, so re-planning, or a deletion journalled in another directory, hid a write nobody had confirmed | `open_entries` reads every apply and delete journal of the account in `--workdir` and the default directory, and any open entry blocks both commands; a journal in a third directory is not seen; `test_replanning_does_not_hide_an_open_write` |
+| A journal line torn by a crash was skipped, and any phase that was not `open` closed an entry | Each line is fsynced; one that is not a readable `open` or `done` raises `JournalCorrupt` with its file and line, and is fixed by hand; `test_a_torn_journal_line_refuses_instead_of_vanishing`, `test_only_done_closes_an_open_entry` |
+| Two runs at once both read the journal before either had written to it | `account_lock` on the same directories, refused at once if held; without `fcntl` (Windows) it only warns; `test_a_second_apply_is_refused_while_the_first_holds_the_lock` |
 | `OK` is not evidence that the profile changed as intended | `apply` re-reads every visit and every trip region, prints mismatches and anything it could not prove, and writes a `verify-*.json` |
 | A transit-quality visit is stored but does **not** mark the region, so "two regions added" moves the count by one | `MARKS_REGION_FROM`; `verify` reports the visit as `not_counted` |
 | `get-regions-mqp` returns `visited` as an id string, not a boolean | Not used; `visited_dare_ids` is the source of truth |

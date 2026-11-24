@@ -69,10 +69,21 @@ class PrecisionLoss(WanderfillError):
 
 
 class DriftError(WanderfillError):
-    """Live state changed between planning and applying.
+    """Live state changed between planning and applying, or may be changing.
 
     Applying a stale plan is how duplicates get created, so this stops the run
-    and asks for a re-plan rather than guessing.
+    and asks for a re-plan rather than guessing. A write still open in one of the
+    account's journals, and another run holding the account's lock, stop it for
+    the same reason.
+    """
+
+
+class JournalCorrupt(WanderfillError):
+    """A journal line cannot be read, so nobody knows which writes are open.
+
+    A crash while appending leaves one. Skipping it would hide the write it
+    stood for, so nothing is sent until a human has repaired the file; the tool
+    never rewrites a journal.
     """
 
 

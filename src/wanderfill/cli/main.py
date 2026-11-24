@@ -42,7 +42,13 @@ from pathlib import Path
 from .. import __version__
 from ..api.cache import VISITS_MAX_AGE
 from ..api.client import QUALITY, NomadMania, YearOnly, _iso
-from ..api.errors import ApiError, PrecisionLoss, VerificationFailed, WanderfillError
+from ..api.errors import (
+    ApiError,
+    JournalCorrupt,
+    PrecisionLoss,
+    VerificationFailed,
+    WanderfillError,
+)
 from ..evidence import (
     MIN_SERIAL_DAYS,
     MIN_SERIAL_SHOTS,
@@ -801,7 +807,7 @@ def cmd_show(args) -> int:
 
 def cmd_check(args) -> int:
     """Read-only: does this plan still match the profile it was built against?"""
-    from ..plan.apply import Journal
+    from ..plan.apply import Journal, describe_open, open_entries
     from ..plan.model import Plan, basis_of, fingerprint, regions_touched
 
     c = _client(args)
@@ -833,11 +839,15 @@ def cmd_check(args) -> int:
 
     workdir = Path(args.workdir)
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
-    done, stuck = journal.done_keys(), journal.unresolved()
+    try:
+        stuck = open_entries((workdir, DEFAULT_WORKDIR), plan.account)
+        problems += [f"{line} — reconcile by hand" for line in describe_open(stuck)]
+        done = journal.done_keys()
+    except JournalCorrupt as exc:
+        problems.append(str(exc))
+        done = set()
     if done:
         print(f"journal: {len(done)} op(s) already applied and would be skipped")
-    if stuck:
-        problems.append(f"{len(stuck)} op(s) started and never confirmed — reconcile by hand")
 
     print(f"\n{len(ops)} op(s) would execute across {len(regions)} region(s).")
     if problems:
@@ -990,6 +1000,7 @@ def cmd_apply(args) -> int:
         confirm=True,
         max_writes=args.max_writes,
         on_progress=progress,
+        also=(DEFAULT_WORKDIR,),
     )
     print(
         f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
@@ -1041,13 +1052,15 @@ def _undo(
     :class:`ApiError` on the write endpoint). Everything else — a lost answer,
     a read-back that disagrees, a transport failure whose timing we cannot
     place — leaves the entry open, and **any** open entry in the account's
-    journal blocks every further deletion until a human has read the server
-    and closed it by hand. That includes an open entry for a different id: a
-    region cannot be cleared while one of its visits is in an unknown state.
+    journals, an apply's included, blocks every further write until a human has
+    read the server and closed it by hand. That includes an open entry for a
+    different id: a region cannot be cleared while one of its visits is in an
+    unknown state. The account's lock is held from that check to the last line,
+    in ``--workdir`` and the default directory; a third one is not seen.
     """
     from types import SimpleNamespace
 
-    from ..plan.apply import Journal
+    from ..plan.apply import Journal, account_lock, describe_open, open_entries
 
     for line in preview:
         print(line)
@@ -1062,38 +1075,41 @@ def _undo(
     c = args._client
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    journal = Journal(workdir / f"deletes-{c.account_id()}.ndjson")
+    account = c.account_id()
+    journal = Journal(workdir / f"deletes-{account}.ndjson")
     op = SimpleNamespace(key=key, kind=kind, label=f"{label} — reason: {args.reason.strip()}")
-    stuck = journal.unresolved()
-    if stuck:
-        print(
-            f"{journal.path} has {len(stuck)} unfinished deletion(s): {', '.join(sorted(stuck))}. "
-            "Read the server back, then append a 'done' line for each by hand before "
-            "deleting anything else."
-        )
-        return 2
-    journal.opening(op, snapshot=snapshot)
-    try:
-        removed = run()
-    except PrecisionLoss as exc:
-        journal.note(op, None, error=f"refused before sending: {exc}")
-        print(f"refused: {exc}")
-        return 1
-    except VerificationFailed as exc:
-        print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
-        return 1
-    except ApiError as exc:
-        # The write endpoint itself said no. Nothing changed; safe to close.
-        journal.note(op, None, error=f"server refused: {exc}")
-        print(f"error: {exc}")
-        return 1
-    except WanderfillError as exc:
-        # Lost answer, transport failure, auth failure: we do not know. Open.
-        print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
-        return 1
-    journal.note(op, removed)
-    print(f"done; server confirms. journal: {journal.path}")
-    return 0
+    dirs = (workdir, DEFAULT_WORKDIR)
+    with account_lock(dirs, account):
+        if stuck := open_entries(dirs, account):
+            for line in describe_open(stuck):
+                print(line)
+            print(
+                "Read the server back, then append a 'done' line for each by hand "
+                "(with an 'error' if it did not land) before writing anything else."
+            )
+            return 2
+        journal.opening(op, snapshot=snapshot)
+        try:
+            removed = run()
+        except PrecisionLoss as exc:
+            journal.note(op, None, error=f"refused before sending: {exc}")
+            print(f"refused: {exc}")
+            return 1
+        except VerificationFailed as exc:
+            print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
+            return 1
+        except ApiError as exc:
+            # The write endpoint itself said no. Nothing changed; safe to close.
+            journal.note(op, None, error=f"server refused: {exc}")
+            print(f"error: {exc}")
+            return 1
+        except WanderfillError as exc:
+            # Lost answer, transport failure, auth failure: we do not know. Open.
+            print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
+            return 1
+        journal.note(op, removed)
+        print(f"done; server confirms. journal: {journal.path}")
+        return 0
 
 
 def cmd_delete(args) -> int:
@@ -1110,8 +1126,8 @@ def cmd_delete(args) -> int:
     trip deletions are bound to the previewed set of visits/regions and refuse
     if it changed; trip-owned visits need ``--allow-trip-owned``; the full
     record is journalled before the request goes out; any unfinished entry in
-    the account's journal blocks all further deletions; and there is no way to
-    pass more than one id.
+    the account's journals blocks all further writes; no other run may be writing
+    to the account; and there is no way to pass more than one id.
     What it costs: whatever is listed in the preview leaves the profile. Region
     and country counts follow at once; YES and the country row lag by up to an
     hour. The preview prints enough to put each thing back by hand.

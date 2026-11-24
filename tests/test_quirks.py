@@ -58,6 +58,14 @@ def client(replies=None):
     return NomadMania(token="fake", transport=t), t
 
 
+@pytest.fixture(autouse=True)
+def _no_home_directory(monkeypatch, tmp_path):
+    """The CLI always scans and locks the default workdir: never the real one here."""
+    from wanderfill.cli import main as cli
+
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", tmp_path)
+
+
 # --------------------------------------------------------------------------
 # trip creation: the server demands a field it never reads
 # --------------------------------------------------------------------------
@@ -754,6 +762,307 @@ def test_an_unexpected_exception_leaves_the_journal_open(tmp_path, monkeypatch):
         assert exc is outcome
         assert journal.unresolved() == ({op.key} if left_open else set()), repr(outcome)
         assert journal.done_keys() == set()
+
+
+# --------------------------------------------------------------------------
+# one account, one journal truth
+# --------------------------------------------------------------------------
+
+STATE = {"user/status-quick": {"result": "OK", "uid": 7},
+         "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
+         "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}}
+ACCOUNT_READ = [("user/status-quick", {})]
+
+
+def _dare_plan(region=1):
+    """A one-op plan for account 7, not drifted against ``STATE``."""
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    return Plan(account=7, ops=[Op(kind="mark_dare", bucket="apply", region=region)],
+                basis={"fingerprint": fingerprint(basis_of({}, []))})
+
+
+def _apply(workdir, **kw):
+    """Apply that plan. Returns the report, or what was raised, and what was sent."""
+    from wanderfill.plan.apply import apply_plan
+
+    c, t = client(STATE)
+    try:
+        return apply_plan(c, _dare_plan(), workdir=workdir, confirm=True, **kw), t.sent
+    except Exception as exc:
+        return exc, t.sent
+
+
+def _open_line(path, key="k1"):
+    """A write that was started and never confirmed, as an older version recorded it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"at": "x", "phase": "open", "key": key, "kind": "mark_dare",
+                                "label": ""}) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_torn_journal_line_refuses_instead_of_vanishing(tmp_path):
+    """A crash mid-append cut an ``open`` line, the reader skipped it, and the write
+    it stood for was free to be sent again."""
+    from wanderfill.api.errors import JournalCorrupt
+    from wanderfill.plan.apply import Journal, open_entries
+
+    j = Journal(tmp_path / "journal-7-aaaaaaaaaaaa.ndjson")
+    j.opening(Op(kind="mark_dare", region=1))
+    j.note(Op(kind="mark_dare", region=1), "OK")
+    j.opening(Op(kind="mark_dare", region=2))
+    torn = j.path.read_bytes()[:-20]
+    j.path.write_bytes(torn)
+    for read in (j.unresolved, j.done_keys, lambda: open_entries([tmp_path], 7)):
+        with pytest.raises(JournalCorrupt, match=r"journal-7-aaaaaaaaaaaa\.ndjson.*line 3"):
+            read()
+    exc, sent = _apply(tmp_path)
+    assert isinstance(exc, JournalCorrupt) and sent == ACCOUNT_READ
+    assert j.path.read_bytes() == torn, "a human repairs it, not the tool"
+
+
+def test_a_line_torn_inside_a_character_is_corrupt_not_a_crash(tmp_path):
+    from wanderfill.api.errors import JournalCorrupt
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(tmp_path / "j.ndjson")
+    j.opening(Op(kind="mark_dare", region=1, label="Kraków"))
+    raw = j.path.read_bytes()
+    j.path.write_bytes(raw[:raw.index("ó".encode()) + 1])
+    with pytest.raises(JournalCorrupt, match="line 1"):
+        j.unresolved()
+
+
+@pytest.mark.parametrize("line", [
+    '{"phase": "note", "key": "k1"}', '{"key": "k1"}', '{"phase": "done"}',
+    '{"phase": "done", "key": 1}', '{"phase": null, "key": "k1"}',
+    '{"phase": ["done"], "key": "k1"}', '["done", "k1"]', '"done"', "null", "done k1", "\x00\x00",
+])
+def test_only_done_closes_an_open_entry(tmp_path, line):
+    """Any phase that was not ``open`` closed the entry, whatever it meant."""
+    from wanderfill.api.errors import JournalCorrupt
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(_open_line(tmp_path / "j.ndjson"))
+    with j.path.open("a", encoding="utf-8") as fh:
+        fh.write("\n" + line + "\n")
+    for read in (j.unresolved, j.done_keys):
+        with pytest.raises(JournalCorrupt, match="line 3"):
+            read()
+
+
+def test_a_line_separator_inside_a_value_does_not_split_the_entry(tmp_path):
+    """``str.splitlines`` also cuts at U+2028 and U+0085, which JSON leaves unescaped."""
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(tmp_path / "j.ndjson")
+    op = Op(kind="mark_dare", region=1, label="a\u2028b\x85c")
+    j.opening(op)
+    assert j.unresolved() == {op.key}
+    j.note(op, {"name": "lone surrogate \ud83d"})
+    assert j.unresolved() == set() and j.done_keys() == {op.key}
+
+
+def test_a_hand_closed_entry_without_a_newline_is_not_glued_to_the_next(tmp_path):
+    """Closing an entry is done in an editor, and editors omit the last newline."""
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(_open_line(tmp_path / "j.ndjson"))
+    with j.path.open("a", encoding="utf-8") as fh:
+        fh.write('{"phase": "done", "key": "k1"}')
+    op = Op(kind="mark_dare", region=1)
+    j.opening(op)
+    assert j.unresolved() == {op.key} and j.done_keys() == {"k1"}
+
+
+def test_replanning_does_not_hide_an_open_write(tmp_path):
+    """The journal is named after the plan's basis, so a new plan never opened it."""
+    stuck = _open_line(tmp_path / "journal-7-aaaaaaaaaaaa.ndjson")
+    exc, sent = _apply(tmp_path)
+    assert isinstance(exc, DriftError) and stuck.name in str(exc) and "k1" in str(exc)
+    assert sent == ACCOUNT_READ, "refused before the snapshot"
+
+
+def test_an_open_write_blocks_a_delete_and_the_reverse(monkeypatch, tmp_path, capsys):
+    """Applies were journalled in --workdir, the deletion in the default directory."""
+    from wanderfill.cli import main as cli
+
+    work, default = tmp_path / "work", tmp_path / "default"
+    work.mkdir()
+    stuck = _open_line(default / "deletes-7.ndjson", "delete_visit:1:2")
+    exc, sent = _apply(work, also=(default,))
+    assert isinstance(exc, DriftError) and str(stuck) in str(exc)
+    assert sent == ACCOUNT_READ
+
+    # The same through the CLI, which has to name the default directory itself.
+    plan = _dare_plan().save(tmp_path / "p.json")
+    c, t = client(STATE)
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", default)
+    assert cli.main(["apply", str(plan), "--confirm", "--workdir", str(work)]) == 2
+    assert t.sent == ACCOUNT_READ and str(stuck) in capsys.readouterr().err
+
+    # An open apply in the default directory, a deletion run elsewhere.
+    stuck = _open_line(default / "journal-79597-aaaaaaaaaaaa.ndjson")
+    fake = FakeClient()
+    rc = _run_delete(monkeypatch, work, fake, "dare", "1142", "--confirm", "--reason", "x")
+    assert rc == 2 and fake.calls == [] and _journal_lines(work) == []
+    assert str(stuck) in capsys.readouterr().out
+
+
+def test_check_prints_every_open_entry_and_writes_nothing(monkeypatch, tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    work, default = tmp_path / "work", tmp_path / "default"
+    plan = _dare_plan().save(tmp_path / "p.json")
+    c, _ = client(STATE)
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", default)
+    assert cli.main(["check", str(plan), "--workdir", str(work)]) == 0
+    assert not work.exists() and not default.exists(), "check is read-only on disk too"
+
+    one = _open_line(work / "journal-7-aaaaaaaaaaaa.ndjson", "k1")
+    two = _open_line(default / "deletes-7.ndjson", "delete_visit:1:2")
+    capsys.readouterr()
+    assert cli.main(["check", str(plan), "--workdir", str(work)]) == 1
+    out = capsys.readouterr().out
+    for wanted in (str(one), "k1", str(two), "delete_visit:1:2"):
+        assert wanted in out
+    two.write_text("torn")
+    assert cli.main(["check", str(plan), "--workdir", str(work)]) == 1
+    out = capsys.readouterr().out
+    assert "BLOCKERS" in out and "line 1" in out
+    assert sorted(p.name for d in (work, default) for p in d.iterdir()) == [two.name, one.name]
+
+
+def test_journals_from_before_the_phase_field_are_ignored(tmp_path):
+    """Their names carry no account, so nobody can say whose they are."""
+    from wanderfill.plan.apply import open_entries
+
+    (tmp_path / "journal-20260816T090000Z.ndjson").write_text('{"op": "x"}\nnot json')
+    assert open_entries([tmp_path], 7) == {}
+    report, _ = _apply(tmp_path)
+    assert report.succeeded == 1
+
+
+def test_another_accounts_open_entry_does_not_block(tmp_path):
+    from wanderfill.plan.apply import open_entries
+
+    for name in ("journal-79-aaaaaaaaaaaa.ndjson", "journal-17-aaaaaaaaaaaa.ndjson",
+                 "deletes-79.ndjson", "deletes-77.ndjson"):
+        _open_line(tmp_path / name)
+    assert open_entries([tmp_path], 7) == {}
+    report, _ = _apply(tmp_path)
+    assert report.succeeded == 1
+
+
+def test_open_entries_reads_each_directory_once_and_skips_missing_ones(tmp_path):
+    from wanderfill.plan.apply import account_lock, open_entries
+
+    stuck = _open_line(tmp_path / "journal-7-aaaaaaaaaaaa.ndjson")
+    _open_line(tmp_path / "deletes-7.ndjson").write_text("")
+    (tmp_path / "alias").symlink_to(tmp_path)
+    dirs = [tmp_path, tmp_path / "alias", tmp_path / "none"]
+    assert open_entries(dirs, 7) == {stuck: {"k1"}}
+    with account_lock(dirs, 7):  # locking one directory twice would refuse itself
+        pass
+    assert not (tmp_path / "none").exists()
+
+
+def test_a_second_apply_is_refused_while_the_first_holds_the_lock(monkeypatch, tmp_path, capsys):
+    """Both read the journal before either had written to it, so both sent the plan."""
+    from wanderfill.plan.apply import account_lock, apply_plan
+
+    work, default = tmp_path / "a-work", tmp_path / "default"  # locked in this order
+    default.mkdir()
+    with account_lock([default], 7):
+        exc, sent = _apply(work, also=(default,))
+        assert isinstance(exc, DriftError) and ".lock-7" in str(exc)
+        assert sent == ACCOUNT_READ, "only the account read is sent"
+        assert [p.name for p in work.iterdir()] == [".lock-7"]
+        # ...and the refusal let go of the directory it did get.
+        with account_lock([work], 7):
+            pass
+        c, t = client(STATE)
+        dry = tmp_path / "dry"
+        assert apply_plan(c, _dare_plan(), workdir=dry, also=(default,)).skipped == 1
+        assert t.sent == [] and not dry.exists(), "a dry run takes no lock and creates nothing"
+    with account_lock([tmp_path], 79597):
+        fake = FakeClient()
+        rc = _run_delete(monkeypatch, work, fake, "dare", "1142", "--confirm", "--reason", "x")
+        assert rc == 2 and fake.calls == [] and _journal_lines(work) == []
+        assert ".lock-79597" in capsys.readouterr().err
+    with account_lock([default], 8):
+        report, _ = _apply(work, also=(default,))
+    assert report.succeeded == 1, "another account's lock is not ours"
+
+
+def test_the_lock_is_held_for_the_write_and_the_read_back(monkeypatch, tmp_path):
+    from wanderfill.plan import apply as ap
+
+    held = []
+
+    def probe(*a, **kw):
+        with pytest.raises(DriftError):
+            with ap.account_lock([tmp_path], 7):
+                pass
+        held.append(True)
+        return {}
+
+    monkeypatch.setattr(ap, "_execute", probe)
+    monkeypatch.setattr(ap, "verify", probe)
+    assert ap.open_entries([tmp_path], 7) == {}
+    report, _ = _apply(tmp_path)
+    assert report.succeeded == 1 and len(held) == 2
+    with ap.account_lock([tmp_path], 7):
+        pass
+
+
+def test_without_fcntl_the_lock_warns_and_continues(monkeypatch, tmp_path, capsys):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    report, _ = _apply(tmp_path)
+    assert report.succeeded == 1
+    assert "lock" in capsys.readouterr().err
+    assert not list(tmp_path.glob(".lock-*"))
+
+
+def test_journal_lines_reach_the_disk(monkeypatch, tmp_path):
+    """Flushed is not written: a power cut could take the ``open`` line with it."""
+    import os
+
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(tmp_path / "j.ndjson")
+    lines_at_sync = []
+    monkeypatch.setattr(os, "fsync",
+                        lambda fd: lines_at_sync.append(j.path.read_bytes().count(b"\n")))
+    j.opening(Op(kind="mark_dare", region=1))
+    j.note(Op(kind="mark_dare", region=1), "OK")
+    assert lines_at_sync == [1, 2]
+
+
+def test_a_journal_entry_says_what_was_sent_and_what_came_back(tmp_path):
+    """The key is a hash and the result was cut at 400 characters of ``repr``."""
+    from types import SimpleNamespace
+
+    from wanderfill.plan.apply import Journal
+
+    j = Journal(tmp_path / "j.ndjson")
+    op = Op(kind="create_trip", bucket="apply", regions=[{"id": 5, "quality": 3}],
+            date_from="2024-01-01", date_to="2024-01-02", label="L", confidence=0.5,
+            method="m", evidence=["IMG_1"])
+    answer = {"trip_id": 9, "text": "x" * 1000, "when": dt.date(2024, 1, 1)}
+    j.opening(op)
+    j.note(op, answer)
+    opened, done = (json.loads(x) for x in j.path.read_text(encoding="utf-8").splitlines())
+    assert done["result"] == {"trip_id": 9, "text": "x" * 1000, "when": "2024-01-01"}
+    assert Op(**opened["payload"]).key == op.key
+    assert not {"label", "confidence", "method", "evidence"} & set(opened["payload"])
+    # A deletion is not an Op; its record is the snapshot.
+    j.opening(SimpleNamespace(key="k", kind="delete_visit", label=""), snapshot={"id": 1})
+    assert "payload" not in json.loads(j.path.read_text(encoding="utf-8").splitlines()[-1])
 
 
 def _undo_calls():
