@@ -651,8 +651,8 @@ At apply time:
 - Refuse if the authenticated account id differs from the plan's.
 - Refuse if another run holds the account's lock, or if any of the account's
   journals has an open entry or a line that cannot be read. Re-planning does not
-  get past this. A directory that cannot be read or locked is refused too. The
-  lock and the scan cover the chosen `--workdir` and the default
+  get past this. A directory that cannot be read, locked or put on the disk
+  is refused too. The lock and the scan cover the chosen `--workdir` and the default
   `~/.local/share/wanderfill`, if it exists: a journal in a third directory is not
   seen, so keep one account to one `--workdir`. The tool never rewrites a journal,
   and neither do you: the owner appends the `done` line, or repairs the line that

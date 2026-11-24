@@ -91,7 +91,7 @@ class DriftError(WanderfillError):
     account's journals, and another run holding the account's lock, stop it for
     the same reason, and so do a write that would put a second copy of a visit on
     the profile, one that landed earlier and is gone now, and a directory of
-    journals that cannot be read or locked.
+    journals that cannot be read, locked or put on the disk.
     """
 
 

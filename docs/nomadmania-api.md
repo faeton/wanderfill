@@ -144,7 +144,8 @@ or `null`. By date parts, the same at both ends:
 Quality: 931 rows at 3, 13 at 1, one at 5, one at 2. A first sample of 108 rows missed
 the year of 0. Strict reads refuse a row that lacks one of the keys (`hidden`, `date_from` and
 `date_to` aside, which the client does not read), holds anything but numbers, their digits, or `null` where a `null` was seen, or has an
-end with something in it that makes no date (`2024-0-0`, `0-5-6`). An end of nothing but
+end with a zero beside a real part (`2024-0-0`, `0-5-6`, `2024-0-null`) or with
+something in it that makes no date. An end of nothing but
 nulls and zeroes is no date. `update-visit` is sent an undated end as three empty
 fields, so a stored 0 is never posted back; what it stores for them was not measured
 on such a visit.

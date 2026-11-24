@@ -11,6 +11,7 @@ conversation with a human, not a feature.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import os
 import sys
@@ -55,18 +56,33 @@ CLOSE_BY_HAND = (
 )
 
 
-def _sync_dir(path: Path) -> None:
-    """Put a directory's entries on the disk, where the system allows it.
+_CANNOT_OPEN_DIR = {errno.EACCES, errno.EPERM, errno.EISDIR}
+_CANNOT_SYNC_DIR = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF}
 
-    Windows cannot open a directory and some network filesystems refuse to sync
-    one. The file's own lines are synced either way.
+
+def _sync_dir(path: Path) -> None:
+    """Put a directory's entries on the disk, where the system can.
+
+    Windows cannot open a directory and some network filesystems cannot sync
+    one; there it does nothing, and the file's own lines are synced anyway. Any
+    other error is a disk that failed, and a :class:`DriftError`.
     """
-    with suppress(OSError):
-        fd = os.open(path, os.O_RDONLY)
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    cannot = _CANNOT_OPEN_DIR
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        cannot = _CANNOT_SYNC_DIR
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
+    except OSError as exc:
+        if exc.errno not in cannot:
+            raise DriftError(
+                f"{path} could not be put on the disk ({exc.strerror or exc}), so a journal in it "
+                "might not be there afterwards. Nothing was sent, and no entry was opened."
+            ) from None
 
 
 def make_workdir(path: Path) -> None:
@@ -79,8 +95,15 @@ def make_workdir(path: Path) -> None:
             f"{path} cannot be used as the work directory ({exc.strerror or exc}); "
             "nothing was sent."
         ) from None
-    for d in made:
-        _sync_dir(d.parent)
+    try:
+        for d in made:
+            _sync_dir(d.parent)
+    except DriftError:
+        # Left there, they would look settled to the next run.
+        for d in made:
+            with suppress(OSError):
+                d.rmdir()
+        raise
 
 
 @dataclass
@@ -95,7 +118,10 @@ class Journal:
     path: Path
 
     def _append(self, entry: dict) -> None:
-        """One line, on the disk before this returns, and so is a new file's name.
+        """One line, on the disk before this returns. A new file's name is, before the line.
+
+        So if the directory cannot be synced there is no line: an empty file says
+        nothing is open, and the next run tries the directory again.
 
         A lone surrogate in a server's answer has no UTF-8 form; as an escape
         it is the same JSON, and the ``done`` line of a write that landed is
@@ -104,8 +130,9 @@ class Journal:
         text = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
         line = text.encode("utf-8", "backslashreplace")
         with self.path.open("a+b") as fh:
-            new = not fh.tell()
-            if not new:
+            if not fh.tell():
+                _sync_dir(self.path.parent)
+            else:
                 # Entries are closed by hand, and an editor may leave out the
                 # last newline. Appending to that line would corrupt both.
                 fh.seek(-1, os.SEEK_END)
@@ -114,8 +141,6 @@ class Journal:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
-        if new:  # its name is in the directory, which has a disk write of its own
-            _sync_dir(self.path.parent)
 
     def _entries(self) -> list[dict]:
         """Every line, or :class:`JournalCorrupt`: a skipped line is a hidden write.

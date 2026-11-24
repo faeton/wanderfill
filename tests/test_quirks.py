@@ -4960,16 +4960,83 @@ def test_a_new_journals_directory_entry_is_on_the_disk_before_the_request(monkey
     assert _ino(tmp_path) in before and _ino(work) in before
 
 
-def test_a_directory_that_cannot_be_synced_does_not_stop_the_run(monkeypatch, tmp_path):
-    """Windows cannot open one."""
+def _dir_sync_fails(monkeypatch, number, *, call="fsync", only=None):
+    """Make opening, or syncing, a directory fail; a file's own sync still works."""
     import os
+    import stat
 
-    def cannot(path, flags, *a, **kw):
-        raise PermissionError(13, "a directory", str(path))
+    real_open, real_fsync = os.open, os.fsync
 
-    monkeypatch.setattr(os, "open", cannot)
+    def open_(path, flags, *a, **kw):
+        if call == "open" and only in (None, path):
+            raise OSError(number, os.strerror(number), str(path))
+        return real_open(path, flags, *a, **kw)
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        if (call == "fsync" and stat.S_ISDIR(st.st_mode)
+                and (only is None or _ino(only) == (st.st_dev, st.st_ino))):
+            raise OSError(number, os.strerror(number))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+CANNOT_SYNC = [("open", "EACCES"), ("open", "EPERM"), ("open", "EISDIR"), ("fsync", "EINVAL"),
+               ("fsync", "ENOTSUP"), ("fsync", "EOPNOTSUPP"), ("fsync", "EBADF")]
+
+
+@pytest.mark.parametrize("call,name", CANNOT_SYNC)
+def test_a_directory_that_cannot_be_synced_does_not_stop_the_run(
+        monkeypatch, tmp_path, call, name):
+    """Windows cannot open one, and some network filesystems refuse the sync."""
+    import errno
+
+    _dir_sync_fails(monkeypatch, getattr(errno, name), call=call)
     report, _ = _apply(tmp_path / "w")
     assert report.succeeded == 1
+
+
+def test_a_platform_without_o_directory_syncs_none(monkeypatch, tmp_path):
+    import errno
+    import os
+
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    _dir_sync_fails(monkeypatch, errno.EIO, call="open")
+    report, _ = _apply(tmp_path / "w")
+    assert report.succeeded == 1
+
+
+@pytest.mark.parametrize("call,name", [("fsync", "EIO"), ("fsync", "ENOSPC"), ("fsync", "EROFS"),
+                                       ("fsync", "EDQUOT"), ("fsync", "EACCES"), ("open", "EIO"),
+                                       ("open", "EMFILE"), ("open", "EINVAL")])
+@pytest.mark.parametrize("where", ["journal", "work directory"])
+def test_a_directory_sync_that_fails_stops_the_run_before_it_sends(
+        monkeypatch, tmp_path, capsys, call, name, where):
+    """Every error was taken for "cannot", a failing disk included, and the write went out
+    with a journal that might not be there afterwards."""
+    import errno
+
+    work = tmp_path / "w"
+    if where == "journal":
+        work.mkdir()
+    bad = work if where == "journal" else tmp_path
+    _dir_sync_fails(monkeypatch, getattr(errno, name), call=call, only=bad)
+    for again in (1, 2):  # nothing of the first attempt lets the second one past
+        exc, sent = _apply(work)
+        assert isinstance(exc, DriftError), again
+        assert str(bad) in str(exc) and "Nothing was sent" in str(exc)
+        assert not [a for a, _ in sent if Transport._is_write(a)]
+        assert all(p.read_bytes() == b"" for p in work.glob("journal-*")), "no open line"
+        if where == "journal":
+            assert exc.report.verified["uncertain"] is None
+    fake = FakeClient()
+    assert _run_delete(monkeypatch, work, fake, *UNMARK) in (1, 2)
+    said = capsys.readouterr()
+    assert fake.calls == [] and str(bad) in said.out + said.err
+    assert "Nothing was sent" in said.out + said.err and "left OPEN" not in said.out
+    assert _journal_lines(work) == []
 
 
 class _DeadReadBack(SequencedTransport):
@@ -5389,14 +5456,31 @@ def test_a_year_of_zero_is_a_visit_with_no_date(tmp_path, parts):
 
 
 @pytest.mark.parametrize("parts", [(0, 5, None), (0, None, 6), (0, 5, 6), ("0", 5, 6), (2024, 0, 0),
-                                   (2024, 0, 5), (2024, 5, 0), (None, 5, 0)], ids=str)
-def test_a_zero_beside_a_real_part_is_still_unreadable(parts):
-    """The lenient reader drops the whole date, so reading it would lose what is there."""
-    row = WHOLE_ROW | _ends(*parts)
-    assert Visit.from_api(row, 11).date_from is None
-    c, _ = client({READ: visits(row)})
-    with pytest.raises(VerificationFailed, match="from date"):
+                                   (2024, 0, 5), (2024, 5, 0), (None, 5, 0), (None, 0, 5),
+                                   (2024, 0, None), (2024, None, 0), ("2024", "0", None),
+                                   (2024, None, "0"), ("2024", "0", "0"), ("0", "5", None)],
+                         ids=str)
+@pytest.mark.parametrize("side", ["from", "to"])
+def test_a_zero_beside_a_real_part_is_still_unreadable(parts, side):
+    """The lenient reader drops the whole date, or takes 2024-0 for the year alone, and
+    an update posted that year back over whatever the zero stood for."""
+    row = WHOLE_ROW | {k: v for k, v in _ends(*parts).items() if k.endswith(side)}
+    c, t = client({READ: visits(row)})
+    with pytest.raises(VerificationFailed, match=f"{side} date"):
         c._visits_strict(11)
+    for days in ((YearOnly(2024), YearOnly(2024)), (dt.date(2026, 1, 1), dt.date(2026, 1, 2))):
+        with pytest.raises(PrecisionLoss, match="blind"):
+            c.update_visit(1, 11, *days, quality=3, allow_vaguer=True)
+    assert _writes(t) == []
+
+
+@pytest.mark.parametrize("parts", [(2024, None, None), ("2024", None, None)], ids=str)
+def test_a_year_with_no_month_or_day_is_still_a_bare_year(parts):
+    c, t = client({READ: visits(WHOLE_ROW | _ends(*parts))})
+    (visit,) = c._visits_strict(11)
+    assert (visit.date_from, visit.date_to) == (YearOnly(2024), YearOnly(2024))
+    c.update_visit(1, 11, dt.date(2024, 1, 1), dt.date(2024, 1, 2), quality=3)
+    assert _writes(t) == ["quickEnter/update-visit"]
 
 
 @pytest.mark.parametrize("given", [{}, JAN_DAYS, {"date_from": "2013", "date_to": "2013"},

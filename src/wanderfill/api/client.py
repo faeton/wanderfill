@@ -258,8 +258,10 @@ def _row_problem(raw: object) -> str | None:
         # `_date_parts`. A year of 0 is how the server has some undated visits; a
         # 0 for the month or day was never seen, and beside a 0 or null year it
         # drops nothing either. Beside anything real it would: `_date_parts` reads
-        # 2024-0-0 and 0-5-6 as no date, so those are refused, not made vaguer.
-        if any(_whole(p) for p in parts) and _date_parts(raw, side) is None:
+        # 2024-0-0 and 0-5-6 as no date and 2024-0-null as the year alone, so a zero
+        # and a real part in one end are refused, not made vaguer.
+        given = {_whole(p) for p in parts} - {None}
+        if given - {0} and (0 in given or _date_parts(raw, side) is None):
             return f"its {side} date is {parts}"
     return None
 

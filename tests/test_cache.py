@@ -79,7 +79,8 @@ def test_writes_still_get_exactly_one_attempt(monkeypatch):
 
 class _Conn(tr.http.client.HTTPSConnection):
     """A stand-in for HTTPSConnection. ``script`` is what each request does: bytes
-    are a 200, a tuple is a status and a ``Location``, an exception is raised.
+    are a 200, a tuple is a status and a ``Location`` and, where there is a third,
+    what reading the body raises; an exception is raised.
 
     A subclass because building an opener reads attributes off the class; every
     method that would touch a socket is replaced.
@@ -101,12 +102,14 @@ class _Conn(tr.http.client.HTTPSConnection):
 
     def getresponse(self):
         answer = self._body
-        code, where = answer if isinstance(answer, tuple) else (200, None)
+        code, where, broken = (*answer, None)[:3] if isinstance(answer, tuple) else (200, "", None)
 
         class R:
             status, reason, headers = code, "OK", {"Location": where} if where else {}
 
             def read(self):
+                if broken:
+                    raise broken
                 return answer if code == 200 else b"<html>"
 
             def getheader(self, name):
@@ -160,6 +163,60 @@ def test_a_redirect_on_a_kept_alive_read_is_not_followed(conns, answer):
         assert [len(c.sent) for c in conns.made] == [1], "not retried and not followed"
         assert "xxx" not in str(info.value) and "?" not in str(info.value)
         assert ("portal.example" in str(info.value)) == ("portal" in str(answer[1]))
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["reused", "first"])
+def test_a_redirect_with_a_truncated_body_is_still_a_redirect(conns, warm):
+    """The body was read before the status was looked at, so it was a dead connection
+    and the read went again."""
+    import http.client
+
+    from wanderfill.api.errors import TransportError
+
+    cut = (302, "http://portal.example/in?token=" + "x" * 36, http.client.IncompleteRead(b"", 9))
+    conns.script = [*([b"{}"] * warm), cut, b'{"ok":1}', b'{"ok":2}']
+    t = tr.Transport(token="x" * 36)
+    if warm:
+        t.webapi("maps/get-visited-regions-ids-simple")
+    with pytest.raises(TransportError) as info:
+        t.webapi("maps/get-visited-regions-ids-simple")
+    assert "302" in str(info.value) and "portal.example" in str(info.value)
+    assert "IncompleteRead" not in str(info.value) and "xxx" not in str(info.value)
+    assert sum(len(c.sent) for c in conns.made) == 1 + warm, "one request"
+    # Its connection still holds the body, so the next read opens another.
+    assert t.webapi("maps/get-visited-regions-ids-simple") == {"ok": 1}
+    assert len(conns.made) == 2
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["reused", "first"])
+def test_an_answer_cut_short_is_still_read_again(conns, warm):
+    import http.client
+
+    conns.script = [*([b"{}"] * warm), (200, None, http.client.IncompleteRead(b"", 9)), b'{"ok":1}']
+    t = tr.Transport(token="x" * 36)
+    if warm:
+        t.webapi("maps/get-visited-regions-ids-simple")
+    assert t.webapi("maps/get-visited-regions-ids-simple") == {"ok": 1}
+    assert len(conns.made) == 2
+
+
+def test_urllib_does_not_read_a_redirects_body_either(monkeypatch):
+    import http.client
+    import io
+
+    from wanderfill.api.errors import TransportError, UnknownWriteOutcome
+
+    class Cut(io.BytesIO):
+        def read(self, *a):
+            raise http.client.IncompleteRead(b"", 9)
+
+    monkeypatch.setattr(io, "BytesIO", lambda body: Cut(body))
+    for action, error in (("maps/get-visited-regions-ids-simple", TransportError),
+                          ("quickEnter/add-visit", UnknownWriteOutcome)):
+        sent = wire(monkeypatch, (302, "http://portal.example/"))
+        with pytest.raises(error, match="302"):
+            tr.Transport(token="x" * 36, keep_alive=False).webapi(action)
+        assert len(sent) == 1
 
 
 def test_a_redirected_read_through_a_proxy_is_not_followed(conns, monkeypatch):

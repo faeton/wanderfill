@@ -204,12 +204,17 @@ class Transport:
             try:
                 conn.request("POST", parts.path, body=body, headers=headers)
                 resp = conn.getresponse()
-                raw = resp.read()
+                # A redirect is one by its status alone. Its body is not read: one cut
+                # short would look like a dead connection, and the read would go again.
+                redirect = 300 <= resp.status < 400
+                raw = b"" if redirect else resp.read()
             except (http.client.HTTPException, OSError):
                 self._drop(parts.netloc)
                 if reused and not fresh:
                     continue
                 raise
+            if redirect:
+                self._drop(parts.netloc)  # the body is still in it
             if resp.status >= 300:  # http.client never follows a redirect either
                 raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
             return raw, resp.getheader("Content-Encoding") or ""
