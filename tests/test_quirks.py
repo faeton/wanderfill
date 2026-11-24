@@ -3304,3 +3304,106 @@ def test_a_fingerprint_made_before_this_change_still_matches():
     every, none = c.snapshot(), c.snapshot([])
     assert set(every["visits"]) == {"5", "6"} and none["visits"] == {}
     assert fingerprint(basis_of(every, [])) == fingerprint(basis_of(none, []))
+
+
+def _jan_update(**kw):
+    return _vop("update_visit", **({"region": 11, "visit_id": 2, "quality": 3} | JAN_DAYS | kw))
+
+
+ELSEWHERE = {"id": 2, "day_from": 8, "day_to": 9, **{k: JAN[k] for k in (
+    "year_from", "month_from", "year_to", "month_to")}}
+
+
+@pytest.mark.parametrize("rows,ops", [
+    pytest.param(lambda: [_stored(**JAN), _stored(**ELSEWHERE)], lambda: [_jan_update()],
+                 id="onto a visit that is there"),
+    pytest.param(lambda: [_stored(**JAN, trip_id=None), _stored(**dict.fromkeys(JAN), id=2)],
+                 lambda: [_jan_update()], id="an undated visit, given a standalone one's dates"),
+    pytest.param(lambda: [_stored(**ELSEWHERE)], lambda: [_jan_add(), _jan_update()],
+                 id="after an add"),
+    pytest.param(lambda: [_stored(**ELSEWHERE)], lambda: [_jan_update(), _jan_add()],
+                 id="before an add"),
+    pytest.param(lambda: [_stored(**ELSEWHERE)], lambda: [_jan_update(), _jan()],
+                 id="before a trip"),
+    pytest.param(lambda: [_stored(**ELSEWHERE), _stored(**ELSEWHERE | {"id": 3})],
+                 lambda: [_jan_update(), _jan_update(visit_id=3)], id="two updates"),
+    pytest.param(lambda: [_stored(**JAN), _stored(**ELSEWHERE)],
+                 lambda: [_jan_update(visit_id=1, date_from="2026-01-03", date_to="2026-01-03"),
+                          _jan_add()], id="an add onto dates an update vacates"),
+])
+def test_an_update_that_moves_a_visit_onto_another_is_refused(
+        monkeypatch, tmp_path, capsys, rows, ops):
+    """update-visit makes a second copy as readily as add-visit does."""
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1), *ops(), rows=rows())
+    message = _refused(plan, c, t, tmp_path)
+    assert "region 11 for 2026-01-01..2026-01-02" in message and "Nothing was sent" in message
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    assert "BLOCKERS" in out and "region 11 for 2026-01-01..2026-01-02" in out
+
+
+def test_an_update_that_keeps_its_dates_may_have_a_twin(tmp_path):
+    """Twins that are there already have to stay editable, quality included."""
+    from wanderfill.plan.apply import apply_plan
+
+    twins = [_stored(**JAN), _stored(**JAN, id=2)]
+    plan, c, t = _rebuilt(_jan_update(quality=4), _jan_update(visit_id=1, quality=4), rows=twins)
+    assert apply_plan(c, plan, workdir=tmp_path / "a", confirm=True).succeeded == 2
+    assert _writes(t) == ["quickEnter/update-visit"] * 2
+    # Moving one away from the other, or making it vaguer, copies nothing.
+    plan, c, t = _rebuilt(_jan_update(date_to="2026-01-03"), rows=twins)
+    assert apply_plan(c, plan, workdir=tmp_path / "b", confirm=True).succeeded == 1
+    plan, c, t = _rebuilt(_jan_update(date_from="2026", date_to="2026", allow_vaguer=True),
+                          rows=twins)
+    assert apply_plan(c, plan, workdir=tmp_path / "c", confirm=True).succeeded == 1
+
+
+def test_an_update_of_a_visit_that_is_not_there_is_left_to_the_client(tmp_path):
+    from wanderfill.plan.apply import apply_plan, doubles
+
+    op = _jan_update(visit_id=99)
+    plan, c, t = _rebuilt(op, rows=[_stored(**JAN)])
+    assert doubles(c.snapshot([11]), [op, _jan_update(visit_id=98)]) == []
+    with pytest.raises(PrecisionLoss, match="refusing to write blind"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert _writes(t) == []
+
+
+@pytest.mark.parametrize("field,op,key", [
+    ("visited_dare", lambda: _vop("mark_dare", region=570), ("dare", 0)),
+    ("visited_tcc", lambda: _vop("mark_tcc", item=570), ("tcc", 0)),
+])
+def test_ticked_before_reads_a_snapshots_ids_as_strictly_as_the_servers(field, op, key):
+    """``["570"]`` was not seen as ticked, and a list of anything was accepted."""
+    from wanderfill.plan.apply import ticked_before
+
+    c, t = client()
+    for ids in (["570"], [570], []):
+        assert ticked_before(c, [op()], {field: ids}) == {key: {570} if ids else set()}
+    for bad in (["not-an-id"], [None], [True], [5.0], ["570", ""], {"570": 1}, "570", 570):
+        with pytest.raises(VerificationFailed):
+            ticked_before(c, [op()], {field: bad})
+    assert t.sent == []
+
+
+@pytest.mark.parametrize("body", [b"<html>", b"", b"\xff\xfe"])
+def test_a_read_answered_with_html_is_a_wanderfill_error(monkeypatch, tmp_path, capsys, body):
+    """A captive portal's page on ``user/status-quick`` was a traceback."""
+    from wanderfill.api.errors import WanderfillError
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import apply_plan
+
+    t, calls = _answering(monkeypatch, body)
+    c = NomadMania(token="fake", transport=t)
+    for read in (c.account_id, lambda: c.series(1), lambda: c.visits_for_region(1),
+                 lambda: apply_plan(c, _dare_plan(), workdir=tmp_path / "w", confirm=True)):
+        with pytest.raises(WanderfillError, match="not JSON"):
+            read()
+    for strict in (c.kye_ticked, lambda: c.series_ticked(1), lambda: c.snapshot([])):
+        with pytest.raises(VerificationFailed, match="not JSON"):
+            strict()
+    assert not any(Transport._is_write(r.full_url) for r in calls)
+    assert not (tmp_path / "w").exists()
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    path = _dare_plan().save(tmp_path / "p.json")
+    assert cli.main(["check", str(path), "--workdir", str(tmp_path / "w")]) == 2
+    assert "not JSON" in capsys.readouterr().err

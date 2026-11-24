@@ -168,8 +168,14 @@ write  POST /ajax/my_series/
 It is a toggle, so a repeat may undo the tick. The client sends only `state=1`,
 and `apply` does not send an item that is already in `visited`.
 
-`toggle2` exists for series that track two states per object. An object may
-belong to several series at once, so ticking it moves more than one score.
+`visited` is always a list. Measured 2026-11-24 over all 69 series: ints in 65,
+strings in 1, empty in 3. Compare ids as numbers.
+
+`toggle2` exists for series that track two states per object.
+
+Measured the same day, no object id appeared in two series (75,449 ids read from
+`items2`, all 69 series). That is a measurement and not a rule of the site, and a
+place can still be in several series as a different object in each.
 
 Note the token travels in the **body** here, not in a header. Two auth
 conventions on one site.

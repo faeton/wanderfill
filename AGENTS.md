@@ -614,11 +614,13 @@ At apply time:
   when it was taken has its own journal, and drift compares with what that plan
   saw, so neither would stop a second copy; the next rule stops only one with
   the same full dates. `check` lists the refusal too.
-- Refuse a visit, added on its own or by a trip, whose region and full dates
-  match a visit already on the profile, trip-owned or not, or another op in the
-  plan. `check` lists each one. Undated and year-only visits, and dates that
-  merely overlap, are not compared, and neither is an `update_visit`: look for
-  those yourself.
+- Refuse a visit, added on its own or by a trip or moved by an `update_visit`,
+  whose region and new full dates match another visit already on the profile,
+  trip-owned or not, or another op in the plan. `check` lists each one. An update
+  that leaves the dates as they are is not compared, so twins that are there
+  already can still be edited. Dates an update in the same plan moves a visit
+  away from still count as taken. Undated and year-only visits, and dates that
+  merely overlap, are not compared: look for those yourself.
 - Snapshot everything first, and refuse to start if the snapshot fails. A reply
   without its list, or with an id that is not a number, is a failure and not an
   empty profile.

@@ -39,6 +39,16 @@ class VerificationFailed(ApiError):
     """
 
 
+class UnreadableAnswer(WanderfillError, ValueError):
+    """A read was answered with something that is not JSON.
+
+    A captive portal's page, or an empty body. A ``ValueError`` as well, which is
+    what it used to be. Not an :class:`ApiError`: the server refused nothing, so
+    a journal entry is not closed on it. A strict read raises it on as
+    :class:`VerificationFailed`, and a write as :class:`UnknownWriteOutcome`.
+    """
+
+
 class TransportError(WanderfillError):
     """A write the server refused with a 4xx, or a read that failed every attempt.
 
@@ -75,7 +85,7 @@ class DriftError(WanderfillError):
     Applying a stale plan is how duplicates get created, so this stops the run
     and asks for a re-plan rather than guessing. A write still open in one of the
     account's journals, and another run holding the account's lock, stop it for
-    the same reason, and so does a visit that is on the profile already.
+    the same reason, and so does a write that would put a second copy of a visit on the profile.
     """
 
 

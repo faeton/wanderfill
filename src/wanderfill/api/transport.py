@@ -23,7 +23,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from .errors import ApiError, AuthError, TransportError, UnknownWriteOutcome
+from .errors import (
+    ApiError,
+    AuthError,
+    TransportError,
+    UnknownWriteOutcome,
+    UnreadableAnswer,
+)
 
 WEBAPI = "https://nomadmania.com/webapi/"
 AJAX = "https://nomadmania.com/ajax/"
@@ -301,6 +307,15 @@ class Transport:
             )
         return data
 
+    @staticmethod
+    def _read_reply(label: str, raw: bytes) -> Any:
+        try:
+            return json.loads(raw)
+        except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError both
+            raise UnreadableAnswer(
+                f"{label}: the answer ({len(raw)} bytes) is not JSON ({exc})"
+            ) from None
+
     def webapi(self, action: str, **fields: Any) -> dict:
         """Call the modern API and unwrap its in-body error convention."""
         write = self._is_write(action)
@@ -310,7 +325,7 @@ class Transport:
             {"NMTOKEN": self.token, "LANG": self.lang, "platform": "web"},
             idempotent=not write,
         )
-        data = self._write_reply(action, raw) if write else json.loads(raw)
+        data = self._write_reply(action, raw) if write else self._read_reply(action, raw)
         if isinstance(data, dict) and data.get("result") == "ERROR":
             raise ApiError(action, data.get("result_description", "unknown"), data)
         return data
@@ -325,7 +340,7 @@ class Transport:
         raw = self._post(
             AJAX + path, {**fields, "token": self.token}, {}, idempotent=not write
         )
-        return self._write_reply(path, raw) if write else json.loads(raw)
+        return self._write_reply(path, raw) if write else self._read_reply(path, raw)
 
     def ajax_text(self, path: str, **fields: Any) -> str:
         """Same, for the endpoints that answer with a bare string such as "OK".

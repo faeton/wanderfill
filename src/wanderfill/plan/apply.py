@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..api.client import MARKS_REGION_FROM, NomadMania, YearOnly
+from ..api.client import MARKS_REGION_FROM, NomadMania, YearOnly, strict_ids
 from ..api.errors import (
     AccountMismatch,
     ApiError,
@@ -238,8 +238,12 @@ def _full_days(start: object, end: object) -> tuple[str, str] | None:
     return days[0].isoformat(), days[1].isoformat()
 
 
-def _new_visits(op: Op) -> Iterator[tuple[int, tuple[str, str]]]:
-    """Each region and its full dates that ``op`` would add a visit to."""
+def _new_visits(op: Op, stored: dict[str, list[dict]]) -> Iterator[tuple[int, tuple[str, str]]]:
+    """Each region, and the full dates it would have a visit for because of ``op``.
+
+    An update counts only if it changes the dates of a visit that is there: one
+    that keeps them adds nothing, whatever twin the visit may have already.
+    """
     if op.kind == "add_visit":
         if op.region is not None and (days := _full_days(op.date_from, op.date_to)):
             yield int(op.region), days
@@ -250,6 +254,14 @@ def _new_visits(op: Op) -> Iterator[tuple[int, tuple[str, str]]]:
             span = _region_span(r) if own else (op.date_from, op.date_to)
             if span and (days := _full_days(*span)):
                 yield int(r["id"]), days
+    elif op.kind == "update_visit" and (days := _full_days(op.date_from, op.date_to)):
+        for v in stored.get(str(op.region), []):
+            if v.get("id") == op.visit_id and _stored_days(v) != days:
+                yield int(op.region), days
+
+
+def _stored_days(visit: dict) -> tuple[str, str] | None:
+    return _full_days(visit.get("date_from"), visit.get("date_to"))
 
 
 def doubles(snapshot: dict, ops: Sequence[Op]) -> list[str]:
@@ -263,14 +275,16 @@ def doubles(snapshot: dict, ops: Sequence[Op]) -> list[str]:
     Only full dates are compared. Two real visits can share a year, or no date
     at all, so those are not evidence of a copy. A trip region without dates of
     its own takes the trip's header. Whether a trip owns the existing visit does
-    not matter: both kinds count.
+    not matter: both kinds count. An update that moves a visit onto the dates of
+    another makes a copy too. Existing visits are taken as the snapshot has them,
+    so dates that another op in the plan moves a visit away from still count.
     """
     out = []
+    stored = snapshot.get("visits", {})
     planned: dict[tuple, Op] = {}
     for op in ops:
-        for region, days in _new_visits(op):
-            there = [v for v in snapshot.get("visits", {}).get(str(region), [])
-                     if _full_days(v.get("date_from"), v.get("date_to")) == days]
+        for region, days in _new_visits(op, stored):
+            there = [v for v in stored.get(str(region), []) if _stored_days(v) == days]
             first = planned.setdefault((region, days), op)
             if there:
                 v = there[0]
@@ -315,7 +329,7 @@ def ticked_before(
             continue
         name, n = key = tick[0]
         have = (snapshot or {}).get(held.get(name))
-        out[key] = read[name](n) if have is None else set(have)
+        out[key] = read[name](n) if have is None else strict_ids(held[name], have)
     return out
 
 
@@ -419,8 +433,9 @@ def apply_plan(
        cannot rewrite an entire profile in one go.
     9. No trip may be done in this plan's journal under the key earlier versions
        gave it and not under its own.
-    10. No visit the plan would add may be on the profile, or in the plan, already
-        with the same region and full dates (:func:`doubles`).
+    10. No visit the plan would add, or move to other dates, may be on the profile,
+        or in the plan, already with the same region and full dates
+        (:func:`doubles`).
     11. Every hand-ticked list the plan would tick must be readable
         (:func:`ticked_before`). A series tick is a toggle and a repeat may undo
         it, so an item in its list already is skipped: nothing is sent or
