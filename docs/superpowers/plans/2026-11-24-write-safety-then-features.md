@@ -57,6 +57,8 @@
 
 # Phase 1: safety
 
+> **Status, 2026-11-24:** Tasks 1-6, 7 (refusals and docs only), 8 and 9 are done in `e150985..eeffe9f`. The whole change was reviewed by Codex and Grok and their findings fixed; 1088 tests, also on Python 3.10. Not built: Task 7's command, `expect_rows` and the rule 2 exception, which wait for the owner. What was built differs from the text below where a review or a live read showed it to be wrong; the commits say where.
+
 ## Task 1: an uncertain write stays uncertain
 
 **Files:** modify `api/transport.py`, `api/client.py`, `plan/apply.py`; test `tests/test_quirks.py`.
