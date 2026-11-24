@@ -56,20 +56,19 @@ CLOSE_BY_HAND = (
 )
 
 
-_CANNOT_OPEN_DIR = {errno.EACCES, errno.EPERM, errno.EISDIR}
 _CANNOT_SYNC_DIR = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF}
 
 
 def _sync_dir(path: Path) -> None:
     """Put a directory's entries on the disk, where the system can.
 
-    Windows cannot open a directory and some network filesystems cannot sync
-    one; there it does nothing, and the file's own lines are synced anyway. Any
-    other error is a disk that failed, and a :class:`DriftError`.
+    Windows has no way to open a directory and some network filesystems cannot
+    sync one; there it does nothing, and the file's own lines are synced anyway.
+    Any other error, one on opening included, is a :class:`DriftError`.
     """
     if not hasattr(os, "O_DIRECTORY"):
         return
-    cannot = _CANNOT_OPEN_DIR
+    cannot: set[int] = set()
     try:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         cannot = _CANNOT_SYNC_DIR
@@ -80,13 +79,19 @@ def _sync_dir(path: Path) -> None:
     except OSError as exc:
         if exc.errno not in cannot:
             raise DriftError(
-                f"{path} could not be put on the disk ({exc.strerror or exc}), so a journal in it "
-                "might not be there afterwards. Nothing was sent, and no entry was opened."
+                f"{path} could not be put on the disk ({exc.strerror or exc}), so a journal below "
+                "it might not be there afterwards. Nothing was sent, and no entry was opened."
             ) from None
 
 
 def make_workdir(path: Path) -> None:
-    """Create the work directory, durably: a journal in it is only as safe as its name."""
+    """Create the work directory, and put every directory it made on the disk.
+
+    Nothing is removed if that fails: another run may have made the same one.
+    The next run finds it there, and the first line of a new journal syncs the
+    work directory and its parent whoever made them. A deeper ancestor that a
+    failed run left unsynced is not synced again.
+    """
     try:
         made = [d for d in (path, *path.parents) if not d.exists()]
         path.mkdir(parents=True, exist_ok=True)
@@ -95,15 +100,8 @@ def make_workdir(path: Path) -> None:
             f"{path} cannot be used as the work directory ({exc.strerror or exc}); "
             "nothing was sent."
         ) from None
-    try:
-        for d in made:
-            _sync_dir(d.parent)
-    except DriftError:
-        # Left there, they would look settled to the next run.
-        for d in made:
-            with suppress(OSError):
-                d.rmdir()
-        raise
+    for d in made:
+        _sync_dir(d.parent)
 
 
 @dataclass
@@ -120,8 +118,9 @@ class Journal:
     def _append(self, entry: dict) -> None:
         """One line, on the disk before this returns. A new file's name is, before the line.
 
-        So if the directory cannot be synced there is no line: an empty file says
-        nothing is open, and the next run tries the directory again.
+        So if a directory cannot be synced there is no line: an empty file says
+        nothing is open, and the next run syncs both again. The parent is one of
+        them because an earlier run may have made the directory and stopped there.
 
         A lone surrogate in a server's answer has no UTF-8 form; as an escape
         it is the same JSON, and the ``done`` line of a write that landed is
@@ -131,7 +130,9 @@ class Journal:
         line = text.encode("utf-8", "backslashreplace")
         with self.path.open("a+b") as fh:
             if not fh.tell():
-                _sync_dir(self.path.parent)
+                where = self.path.parent.resolve()  # "." and a link have another parent
+                _sync_dir(where)
+                _sync_dir(where.parent)
             else:
                 # Entries are closed by hand, and an editor may leave out the
                 # last newline. Appending to that line would corrupt both.

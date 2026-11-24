@@ -4983,22 +4983,18 @@ def _dir_sync_fails(monkeypatch, number, *, call="fsync", only=None):
     monkeypatch.setattr(os, "fsync", fsync)
 
 
-CANNOT_SYNC = [("open", "EACCES"), ("open", "EPERM"), ("open", "EISDIR"), ("fsync", "EINVAL"),
-               ("fsync", "ENOTSUP"), ("fsync", "EOPNOTSUPP"), ("fsync", "EBADF")]
-
-
-@pytest.mark.parametrize("call,name", CANNOT_SYNC)
-def test_a_directory_that_cannot_be_synced_does_not_stop_the_run(
-        monkeypatch, tmp_path, call, name):
-    """Windows cannot open one, and some network filesystems refuse the sync."""
+@pytest.mark.parametrize("name", ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EBADF"])
+def test_a_directory_that_cannot_be_synced_does_not_stop_the_run(monkeypatch, tmp_path, name):
+    """Some network filesystems refuse the sync."""
     import errno
 
-    _dir_sync_fails(monkeypatch, getattr(errno, name), call=call)
+    _dir_sync_fails(monkeypatch, getattr(errno, name))
     report, _ = _apply(tmp_path / "w")
     assert report.succeeded == 1
 
 
 def test_a_platform_without_o_directory_syncs_none(monkeypatch, tmp_path):
+    """Windows cannot open a directory."""
     import errno
     import os
 
@@ -5010,6 +5006,7 @@ def test_a_platform_without_o_directory_syncs_none(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("call,name", [("fsync", "EIO"), ("fsync", "ENOSPC"), ("fsync", "EROFS"),
                                        ("fsync", "EDQUOT"), ("fsync", "EACCES"), ("open", "EIO"),
+                                       ("open", "EACCES"), ("open", "EPERM"), ("open", "EISDIR"),
                                        ("open", "EMFILE"), ("open", "EINVAL")])
 @pytest.mark.parametrize("where", ["journal", "work directory"])
 def test_a_directory_sync_that_fails_stops_the_run_before_it_sends(
@@ -5503,3 +5500,70 @@ def test_updating_a_year_zero_visit_posts_no_zero_and_invents_no_date(tmp_path, 
         assert got == want + [""] * (3 - len(want))
     if not given:
         assert report.verified["mismatches"] == [] and report.verified["unproven"] == []
+
+
+def test_a_run_after_a_failed_parent_sync_syncs_the_parent_before_it_writes(monkeypatch, tmp_path):
+    """The directory is there by then, so nothing says this run did not make it durable."""
+    import errno
+
+    work = tmp_path / "w"
+    with monkeypatch.context() as m:
+        _dir_sync_fails(m, errno.EIO, only=tmp_path)
+        exc, _ = _apply(work)
+        assert isinstance(exc, DriftError) and str(tmp_path) in str(exc)
+    assert work.is_dir()
+    for run in ("apply", "delete"):
+        events = _syncs(monkeypatch)
+        real = FakeTransport.webapi
+
+        def webapi(self, action, real=real, events=events, **fields):
+            if Transport._is_write(action):
+                events.append("sent")
+            return real(self, action, **fields)
+
+        if run == "apply":
+            monkeypatch.setattr(FakeTransport, "webapi", webapi)
+            report, _ = _apply(work)
+            assert report.succeeded == 1
+        else:
+            fake = FakeClient()
+            fake.unmark_dare = lambda dare_id, events=events: events.append("sent")
+            assert _run_delete(monkeypatch, work, fake, *UNMARK) == 0
+        before = events[:events.index("sent")]
+        assert _ino(work) in before and _ino(tmp_path) in before, run
+
+
+def test_a_work_directory_named_by_a_link_or_relatively_syncs_its_real_parent(
+        monkeypatch, tmp_path):
+    from wanderfill.plan.apply import Journal
+
+    work = tmp_path / "real" / "w"
+    work.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(work)
+    monkeypatch.chdir(work)
+    import pathlib
+    for n, spelled in enumerate((tmp_path / "link", pathlib.Path("."))):
+        events = _syncs(monkeypatch)
+        Journal(spelled / f"journal-7-{n}.ndjson").opening(Op(kind="mark_dare", region=1))
+        assert _ino(work) in events and _ino(work.parent) in events
+
+
+@pytest.mark.parametrize("ours", [True, False], ids=["made by this run", "made by another"])
+def test_no_directory_is_ever_removed(monkeypatch, tmp_path, ours):
+    """Between "is it there" and mkdir another run can make it, and was losing it."""
+    import errno
+    import pathlib
+
+    work = tmp_path / "a" / "w"
+    real = pathlib.Path.mkdir
+
+    def mkdir(self, *a, **kw):
+        if not ours and self == work:
+            real(self, parents=True, exist_ok=True)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", mkdir)
+    _dir_sync_fails(monkeypatch, errno.EIO)
+    exc, _ = _apply(work)
+    assert isinstance(exc, DriftError) and "Nothing was sent" in str(exc)
+    assert work.is_dir()
