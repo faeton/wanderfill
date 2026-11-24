@@ -1026,14 +1026,15 @@ def _print_apply_report(report) -> None:
     # Read back from the server, not from the responses. Printed, because a
     # verify file nobody opens is the habit that lapses.
     seen = report.verified
-    if not seen:
-        print("  NOT READ BACK: the read-back did not finish, so what landed is not verified")
     for m in seen.get("mismatches", []):
         print(f"  MISMATCH: {m}")
     for n in seen.get("not_counted", []):
         print(f"  not counted: region {n['region']} — {n['why']} (quality {n['quality']})")
     for u in seen.get("unproven", []):
         print(f"  UNPROVEN: {u}")
+    for t in seen.get("phantom_trips", []):
+        print(f"  the visit in region {t['region']} is in trip {t['trip_id']}, "
+              "as the server makes one for every visit added")
     if lost := seen.get("uncertain"):
         print(f"  UNCERTAIN: {lost['kind']} {lost['label']!r} (key {lost['key']}): its journal "
               "entry stays open until a human closes it. Read now:")
@@ -1046,10 +1047,12 @@ def _print_apply_report(report) -> None:
 def cmd_apply(args) -> int:
     """Run a plan and print what the server shows afterwards.
 
-    Exits 1 if anything failed, came out different or could not be proven; a
-    transit that does not mark its region is expected and is not among those. If
-    the run is cut short, the report of what landed is printed before the error,
-    which sets the exit code in :func:`main` (2, or 130 for Ctrl-C).
+    Exits 1 if a run that finished has a mismatch, an unproven line or a verify
+    file that could not be written; a transit that does not mark its region, and
+    the trip the server makes around every new visit, are expected and are not
+    among those. A plan that is not valid is 1 too. A failed op is raised again
+    after the report of what landed is printed, and :func:`main` returns 2 for it,
+    or 130 for Ctrl-C.
     """
     from ..plan.apply import apply_plan
     from ..plan.model import Plan, validate
@@ -1083,17 +1086,18 @@ def cmd_apply(args) -> int:
             max_writes=args.max_writes,
             on_progress=progress,
             also=(DEFAULT_WORKDIR,),
+            on_read_back=lambda line: print(f"\n{line}", flush=True),
         )
     except (Exception, KeyboardInterrupt) as exc:
         if hasattr(exc, "report"):  # the run had started; a refusal has none
-            # A closed or odd stdout must not replace the error that ended the run.
-            with contextlib.suppress(OSError, ValueError):
+            # A closed or odd stdout, or another Ctrl-C, must not replace the error
+            # that ended the run.
+            with contextlib.suppress(OSError, ValueError, KeyboardInterrupt):
                 _print_apply_report(exc.report)
         raise
     _print_apply_report(report)
     seen = report.verified
-    return 1 if (report.failed or report.errors or seen.get("mismatches")
-                 or seen.get("unproven")) else 0
+    return 1 if report.errors or seen.get("mismatches") or seen.get("unproven") else 0
 
 
 def _visit_snapshot(v) -> dict:

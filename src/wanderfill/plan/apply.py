@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -250,9 +250,7 @@ def _new_visits(op: Op, stored: dict[str, list[dict]]) -> Iterator[tuple[int, tu
             yield int(op.region), days
     elif op.kind == "create_trip":
         for r in op.regions:
-            own = any(r.get(f) not in (None, "") for f in TRIP_REGION_FIELDS
-                      if f not in ("id", "quality", "hidden"))
-            span = _region_span(r) if own else (op.date_from, op.date_to)
+            span = _region_span(r) if _has_own_dates(r) else (op.date_from, op.date_to)
             if span and (days := _full_days(*span)):
                 yield int(r["id"]), days
     elif op.kind == "update_visit" and (days := _full_days(op.date_from, op.date_to)):
@@ -380,7 +378,7 @@ class ApplyReport:
     # sent or journalled for them; they are in `skipped` too.
     already: list[str] = field(default_factory=list)
     # What the server actually says now: `verify()`'s report, plus "partial" and
-    # "uncertain" as in the verify file. Empty only if the read-back was interrupted.
+    # "uncertain" as in the verify file.
     verified: dict = field(default_factory=dict)
 
 
@@ -407,11 +405,13 @@ def apply_plan(
     max_writes: int = 200,
     on_progress: Callable[[int, int, Op, bool], None] | None = None,
     also: Sequence[Path] = (),
+    on_read_back: Callable[[str], None] | None = None,
 ) -> ApplyReport:
     """Run the apply-bucket ops of a plan, after the preconditions pass.
 
     ``also`` is where else this account's journals may be. The lock and the scan
     for open writes cover ``workdir`` and these, and no other directory.
+    ``on_read_back`` is given one line to show before the read-back starts.
 
     Preconditions, in order, each of which aborts rather than warns:
 
@@ -452,7 +452,10 @@ def apply_plan(
     is still open, or null if none is. That is for the human who closes the
     entry; nothing here does. The exception is then raised as it was, with the
     :class:`ApplyReport` as its ``report``. A read-back that fails is recorded
-    in the report and raises nothing.
+    in the report and raises nothing. Ctrl-C during it ends the reads: what was
+    not checked is listed as ``NOT READ BACK``, the file is written with
+    ``"partial": true``, and then the error that ended the run is raised, or the
+    interrupt itself if the run had finished.
     """
     report = ApplyReport()
     ops = plan.to_apply()
@@ -483,7 +486,8 @@ def apply_plan(
                 "against the profile, then append a 'done' line for it by hand (with an "
                 "'error' if it did not land)."
             )
-        return _apply_locked(client, plan, ops, report, workdir, max_writes, on_progress)
+        return _apply_locked(client, plan, ops, report, workdir, max_writes, on_progress,
+                             on_read_back)
 
 
 def _apply_locked(
@@ -494,6 +498,7 @@ def _apply_locked(
     workdir: Path,
     max_writes: int,
     on_progress: Callable[[int, int, Op, bool], None] | None,
+    on_read_back: Callable[[str], None] | None,
 ) -> ApplyReport:
     """The part of :func:`apply_plan` that needs the lock, from snapshot to read-back."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -565,68 +570,117 @@ def _apply_locked(
         tick = tick_of(op)
         return op.key in done or (tick is not None and tick[1] in ticked.get(tick[0], ()))
 
-    def read_back(which: Sequence[Op], *, partial: bool, uncertain: Op | None = None) -> None:
-        """Fill ``report.verified`` and write the file. Raises nothing but an interrupt."""
-        reads = _Reads(client)
+    # Every Ctrl-C of the read-back: none may hide the error that ended the run.
+    interrupts: list[KeyboardInterrupt] = []
+
+    def insist(step: Callable[[], Any]) -> Any:
+        """A short local step; an interrupt in it is kept and the step is done again."""
         try:
-            seen = verify(client, which, results, reads)
-        except Exception as exc:
-            seen = _blank()
-            seen["unproven"].append(f"the read-back itself failed ({exc!r})")
-        seen |= {"partial": partial, "uncertain": None}
-        if uncertain:
+            return step()
+        except KeyboardInterrupt as exc:
+            interrupts.append(exc)
+            return step()
+
+    def read_back(which: Sequence[Op], *, partial: bool, uncertain: Op | None = None) -> None:
+        """Fill ``report.verified`` and write the file, whatever fails.
+
+        The first interrupt ends the reads. What was not checked by then is
+        ``NOT READ BACK``, and the file says so.
+        """
+        reads = _Reads(client)
+        seen = reads.out
+        cut = "interrupted" if interrupts else ""
+        if not cut:
             try:
-                now = _what_is_there_now(reads, uncertain)
+                if on_read_back and (which or uncertain):
+                    with suppress(Exception):  # only a message
+                        on_read_back(_reading(which, uncertain, results))
+                seen = verify(client, which, results, reads)
+            except KeyboardInterrupt as exc:
+                interrupts.append(exc)
+                cut = "interrupted"
+            except Exception as exc:
+                cut = repr(exc)
+        if cut:
+            seen["unproven"].append(f"the read-back was cut short ({cut})")
+            seen["unproven"] += [f"NOT READ BACK: {o.kind} {o.label!r} (key {o.key})"
+                                 for o in which[seen["checked"]:]]
+        waiting = None
+        if uncertain:
+            now = ["NOT READ BACK (interrupted); whether it landed is not known"]
+            try:
+                if not interrupts:
+                    now = _what_is_there_now(reads, uncertain)
+            except KeyboardInterrupt as exc:
+                interrupts.append(exc)
             except Exception as exc:
                 now = [f"could not be read back ({exc!r}); whether it landed is not known"]
-            seen["uncertain"] = {
+            waiting = {
                 "key": uncertain.key, "kind": uncertain.kind, "label": uncertain.label,
                 "answer": results.get(uncertain.key), "now": now,
             }
+        seen |= {"partial": partial or bool(interrupts), "uncertain": waiting}
         report.verified = seen
         path = workdir / f"verify-{stamp}.json"
         try:
-            path.write_text(json.dumps(seen, indent=1, default=str), encoding="utf-8")
-        except Exception as exc:
+            text = json.dumps(seen, indent=1, default=str)
+            insist(lambda: path.write_text(text, encoding="utf-8"))
+        except (Exception, KeyboardInterrupt) as exc:
             report.errors.append(f"{path} could not be written ({exc!r})")
 
-    try:
+    def read_back_partial(op: Op) -> None:
+        # What is done and what is open comes from the journal: an interrupt
+        # can fall between its line and this run's bookkeeping.
+        left_open = {op.key} - done
         try:
-            for i, op in enumerate(ops, 1):
-                if op.key in done:
-                    report.skipped += 1
-                    continue
-                tick = tick_of(op)
-                if tick and tick[1] in ticked[tick[0]]:
-                    report.skipped += 1
-                    report.already.append(op.label or f"{op.kind} {tick[1]}")
-                else:
-                    _send(client, op, i, len(ops), journal, report, results, on_progress)
-                    done.add(op.key)
-                    if tick:  # a plan can spell one tick two ways, under two keys
-                        ticked[tick[0]].add(tick[1])
-                if on_progress:
-                    on_progress(i, len(ops), op, True)
-        except (Exception, KeyboardInterrupt):
-            # What is done and what is open comes from the journal: an interrupt
-            # can fall between its line and this run's bookkeeping.
-            try:
-                done |= journal.done_keys()
-                left_open = journal.unresolved()
-            except Exception as unreadable:
-                report.errors.append(f"journal: {unreadable}")
-                left_open = {op.key} - done
-            read_back(
-                [o for o in ops if landed(o)],
-                partial=True,
-                uncertain=next((o for o in ops if o.key in left_open), None),
-            )
-            raise
-        read_back(ops, partial=False)
+            finished, left_open = insist(lambda: (journal.done_keys(), journal.unresolved()))
+            done.update(finished)
+        except (Exception, KeyboardInterrupt) as exc:
+            report.errors.append(f"journal: {str(exc) or repr(exc)}")
+        read_back(
+            [o for o in ops if landed(o)],
+            partial=True,
+            uncertain=next((o for o in ops if o.key in left_open), None),
+        )
+
+    try:
+        for i, op in enumerate(ops, 1):
+            if op.key in done:
+                report.skipped += 1
+                continue
+            tick = tick_of(op)
+            if tick and tick[1] in ticked[tick[0]]:
+                report.skipped += 1
+                report.already.append(op.label or f"{op.kind} {tick[1]}")
+            else:
+                _send(client, op, i, len(ops), journal, report, results, on_progress)
+                done.add(op.key)
+                if tick:  # a plan can spell one tick two ways, under two keys
+                    ticked[tick[0]].add(tick[1])
+            if on_progress:
+                on_progress(i, len(ops), op, True)
     except (Exception, KeyboardInterrupt) as exc:
         exc.report = report  # type: ignore[union-attr]
+        with suppress(KeyboardInterrupt):  # one that falls between the steps above
+            read_back_partial(op)
         raise
+    try:
+        read_back(ops, partial=False)
+    except KeyboardInterrupt as exc:
+        interrupts.append(exc)
+    if interrupts:
+        interrupts[0].report = report  # type: ignore[attr-defined]
+        raise interrupts[0]
     return report
+
+
+def _reading(which: Sequence[Op], uncertain: Op | None, results: dict[str, Any]) -> str:
+    """One line for the person who is about to wait for it."""
+    ops = [*which, uncertain] if uncertain else which
+    lists = {tick[0] for o in ops if (tick := tick_of(o))}
+    trips = sum(_trip_id(results.get(o.key)) is not None for o in which if o.kind == "create_trip")
+    return (f"Reading back {len(ops)} op(s): the visits of {len(regions_touched(ops))} region(s), "
+            f"{len(lists)} list(s), {trips} trip(s). Ctrl-C stops the reading.")
 
 
 def _send(
@@ -657,7 +711,9 @@ def _send(
                 journal.note(op, None, error=str(exc))
             if on_progress:
                 on_progress(i, total, op, False)
-        except Exception as also:  # the error of the write is the one to raise
+        except (Exception, KeyboardInterrupt) as also:
+            # The error of the write is the one to raise. The line is not tried
+            # again: an entry it did not close stays open, which is safe.
             report.errors.append(f"and then: {also!r}")
         # Stop on the first failure of any kind. Continuing runs later ops
         # against a profile that is no longer in the state the plan assumed,
@@ -675,6 +731,7 @@ class _Reads:
 
     def __init__(self, client: NomadMania):
         self._client = client
+        self.out = _blank()  # verify's report, to keep if something cuts verify short
         self._seen: dict[tuple, Any] = {}
 
     def _once(self, key: tuple, read: Callable[[], Any]) -> Any:
@@ -794,9 +851,9 @@ def verify(
     read that fails are ``unproven`` for the ops that need them, and the other
     ops are still checked. ``reads`` shares what has been read already.
     """
-    out = _blank()
     results = results or {}
     reads = reads or _Reads(client)
+    out = reads.out
 
     def counted(region: int, stored: Sequence[int], what: str) -> None:
         """A stored visit either marks its region, or is a transit that does not."""
@@ -924,6 +981,23 @@ def verify(
                     f"{trip}: region {region} stored {[_dates(v) for v in mine]}, "
                     f"planned {span[0]}..{span[1]}"
                 )
+            elif not _has_own_dates(r):
+                # It takes the trip's dates, as far as the plan can say.
+                stored_as = [_dates(v) for v in mine]
+                sides = [(d, want) for v in mine for d, want in
+                         ((v.date_from, op.date_from), (v.date_to, op.date_to))]
+                full = [(d.isoformat(), want) for d, want in sides if isinstance(d, dt.date)]
+                if any(got != want for got, want in full):
+                    out["mismatches"].append(
+                        f"{trip}: region {region} stored {stored_as}, planned "
+                        f"{op.date_from}..{op.date_to}, the trip's, as it has no dates of its own"
+                    )
+                elif len(full) < len(sides):
+                    out["unproven"].append(
+                        f"{trip}: region {region} has no dates of its own in the plan and is "
+                        f"stored as {stored_as}; what the server stores for such a region has "
+                        "not been measured"
+                    )
             same = [v for v in stored if _dates(v) == _dates(mine[0])]
             if len(same) > 1 or len(mine) > 1:
                 out["mismatches"].append(
@@ -962,11 +1036,11 @@ def verify(
                 )
 
     for op in ops:
-        out["checked"] += 1
         try:
             check(op)
         except Exception as exc:
             out["unproven"].append(f"{op.kind} {op.label!r}: could not be checked ({exc!r})")
+        out["checked"] += 1  # only now: an interrupt leaves this op unchecked
 
     return out
 
@@ -984,6 +1058,11 @@ def _trip_id(result: object) -> int | None:
         return int(result["trip_id"])  # type: ignore[index]
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _has_own_dates(r: dict) -> bool:
+    return any(r.get(f) not in (None, "") for f in TRIP_REGION_FIELDS
+               if f not in ("id", "quality", "hidden"))
 
 
 def _region_span(r: dict) -> tuple[str, str] | None:

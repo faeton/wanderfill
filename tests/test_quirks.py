@@ -2097,11 +2097,37 @@ def test_trip_region_dates_as_the_wire_carries_them():
     assert verify(_readback([_stored()], marked=[7]), [op],
                   {op.key: {"trip_id": 900}})["mismatches"] == []
 
-    # no dates of its own: found by ownership, not by the trip's outer dates
+
+def test_a_trip_region_without_dates_is_held_to_the_trips():
+    """Found by the trip's id, it verified clean whatever dates the server had stored."""
+    from wanderfill.plan.apply import verify
     bare = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
               regions=[{"id": 7, "quality": 3}])
-    assert verify(_readback([_stored()], marked=[7]), [bare],
-                  {bare.key: {"trip_id": 900}})["mismatches"] == []
+    header = {"date_from": "2024-03-01", "date_to": "2024-03-10"}
+
+    def against(op=bare, **over):
+        out = verify(_readback([_stored(**over)], marked=[7], header=header), [op],
+                     {op.key: {"trip_id": 900}})
+        return out["mismatches"], out["unproven"]
+
+    assert against(day_to=10) == ([], [])
+    for over in ({}, {"day_from": 2, "day_to": 10}, {"month_to": None, "day_to": None,
+                                                     "day_from": 2}):
+        (line,), unproven = against(**over)
+        assert "region 7" in line and "2024-03-01..2024-03-10" in line and unproven == []
+    none = dict.fromkeys(f"{part}_{side}" for part in ("year", "month", "day")
+                         for side in ("from", "to"))
+    for over in (none, none | {"year_from": 2024, "year_to": 2024},
+                 {"month_to": None, "day_to": None}):
+        mismatches, (line,) = against(**over)
+        assert mismatches == [] and "region 7" in line and "not been measured" in line
+    # Dates that are absent in so many words are no dates; a half is today's silence.
+    empty = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
+               regions=[{"id": 7, "quality": 3} | dict.fromkeys(none, "")])
+    assert len(against(empty)[0]) == 1
+    half = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
+              regions=[{"id": 7, "quality": 3, "year_from": 2024}])
+    assert against(half) == ([], [])
 
 
 # ------------------------------------------- the Photos date window
@@ -3431,7 +3457,7 @@ def _live(t, *, lose=None, error=None, lands=False):
 
     def write(real, path, fields):
         read, field, name = lists.get(path, (None, None, "region"))
-        lost = fields.get(name) == lose or path == lose
+        lost = error is not None and (fields.get(name) == lose or path == lose)
         if read and (not lost or lands):
             t.replies[read][field].append(fields[name])
         out = real(path, **fields)
@@ -3761,21 +3787,214 @@ def test_a_readback_failure_does_not_replace_the_original_error(
         assert {"checked", "mismatches", "phantom_trips", "not_counted", "unproven"} <= set(said[1])
 
 
-def test_a_second_interrupt_during_the_read_back_keeps_the_journal_and_the_report(
-        monkeypatch, tmp_path, capsys):
+def _interrupting(path_or_call, when=lambda: True):
+    """Wrap a callable so that it is Ctrl-C instead, once, while ``when`` holds."""
+    fired = []
+
+    def call(*a, **kw):
+        if not fired and when():
+            fired.append(1)
+            raise KeyboardInterrupt("in the read-back")
+        return path_or_call(*a, **kw)
+
+    call.fired = fired
+    return call
+
+
+def _interrupt_read(t, action, after):
+    """Ctrl-C in the first read of ``action`` once ``after`` has been sent."""
+    read = t.webapi
+    stop = _interrupting(read, lambda: any(a == after for a, _ in t.sent))
+
+    def webapi(path, /, **fields):
+        return (stop if path == action else read)(path, **fields)
+
+    t.webapi = webapi
+    return stop.fired
+
+
+ENDINGS = {"lost": (lambda: _lost(), True, 2), "refused": (lambda: ApiError("x", "no"), False, 2),
+           "interrupted": (lambda: KeyboardInterrupt("first"), True, 130)}
+
+
+@pytest.mark.parametrize("where", ["verify", "announcement", "uncertain", "journal", "file",
+                                   "file twice"])
+@pytest.mark.parametrize("ending", ENDINGS)
+def test_an_interrupt_in_the_read_back_does_not_hide_the_error_it_followed(
+        monkeypatch, tmp_path, capsys, ending, where):
+    """The second Ctrl-C replaced "the answer was lost" and left no verify file."""
+    import pathlib
+
     from wanderfill.plan import apply as ap
 
-    def again(*a, **kw):
-        raise KeyboardInterrupt("again")
-
-    monkeypatch.setattr(ap, "verify", again)
+    make, left_open, rc = ENDINGS[ending]
+    error = make()
     plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
-    _live(t, lose=3, error=KeyboardInterrupt("first"))
-    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path, "w")
-    assert rc == 130 and "attempted 3, succeeded 2, failed 1" in said.out
-    assert "NOT READ BACK" in said.out
-    (path,) = (tmp_path / "w").glob("journal-*.ndjson")
-    assert ap.Journal(path).unresolved() == {plan.ops[2].key}
+    _live(t, lose=3, error=error)
+    kw = {}
+    if where == "verify":
+        fired = _interrupt_read(t, "kye/get-kye", "my_series/")
+    elif where == "announcement":
+        kw["on_read_back"] = stop = _interrupting(print)
+    elif where == "uncertain":
+        monkeypatch.setattr(ap, "_what_is_there_now", stop := _interrupting(ap._what_is_there_now))
+    elif where == "journal":
+        stop = _interrupting(ap.Journal.unresolved, lambda: any(
+            a == "my_series/" for a, _ in t.sent))
+        monkeypatch.setattr(ap.Journal, "unresolved", lambda self: stop(self))
+    else:
+        real, hits = pathlib.Path.write_text, []
+
+        def write_text(self, *a, **kw):
+            if self.name.startswith("verify-") and len(hits) < 1 + (where == "file twice"):
+                hits.append(1)
+                raise KeyboardInterrupt("in the read-back")
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(pathlib.Path, "write_text", write_text)
+        stop = write_text
+        stop.fired = hits
+    exc, journal = _run_failing(plan, c, tmp_path / "w", **kw)
+    if where != "verify":
+        fired = stop.fired
+    assert fired or (where == "uncertain" and not left_open)
+    assert exc is error and (exc.args[:1], exc.__cause__) == (error.args[:1], None)
+    assert any(f.name == "write" for f in _frames(exc))
+    assert journal.unresolved() == ({plan.ops[2].key} if left_open else set())
+    seen = exc.report.verified
+    if where == "file twice":
+        assert any("could not be written" in e for e in exc.report.errors)
+    else:
+        assert _verify_file(tmp_path / "w") == json.loads(json.dumps(seen))
+    assert seen["partial"] is True and (seen["uncertain"] is not None) == left_open
+    missed = [u for u in seen["unproven"] if u.startswith("NOT READ BACK")]
+    want = {"verify": [1], "announcement": [0, 1], "journal": [0, 1]}.get(where, [])
+    assert len(missed) == len(want)
+    assert all(plan.ops[n].key in line for n, line in zip(want, missed, strict=True))
+    assert seen["checked"] == 2 - len(want) and seen["mismatches"] == []
+    if left_open:
+        not_read = where in ("verify", "announcement", "journal", "uncertain")
+        assert ("NOT READ BACK" in seen["uncertain"]["now"][0]) == not_read
+
+    # The exit code is the error's, through the CLI.
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=make())
+    _interrupt_read(t, "kye/get-kye", "my_series/")
+    got, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert got == rc and "NOT READ BACK" in said.out
+    assert "attempted 3, succeeded 2, failed 1" in said.out
+
+
+@pytest.mark.parametrize("ending", ["lost", "refused"])
+@pytest.mark.parametrize("where", ["on_progress", "note before", "note after"])
+def test_an_interrupt_in_the_cleanup_does_not_replace_the_write_error(
+        monkeypatch, tmp_path, ending, where):
+    from wanderfill.plan import apply as ap
+
+    make, left_open, _ = ENDINGS[ending]
+    error = make()
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=error)
+
+    def progress(i, total, op, ok):
+        if not ok and where == "on_progress":
+            raise KeyboardInterrupt
+
+    real = ap.Journal.note
+
+    def note(self, op, result, error=""):
+        if error and where == "note before":
+            raise KeyboardInterrupt
+        real(self, op, result, error)
+        if error and where == "note after":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(ap.Journal, "note", note)
+    exc, journal = _run_failing(plan, c, tmp_path, on_progress=progress)
+    assert exc is error
+    opened = left_open or where == "note before"  # nobody closed it, so it stays open
+    assert journal.unresolved() == ({plan.ops[2].key} if opened else set())
+    lines = journal.path.read_text().splitlines()
+    assert len(lines) == 5 + (not opened), "the entry is closed once or not at all"
+    seen = _verify_file(tmp_path)
+    assert seen["checked"] == 2 and (seen["uncertain"] is not None) == opened
+
+
+def test_an_interrupt_in_a_finished_runs_read_back_is_raised_after_the_file(
+        monkeypatch, tmp_path, capsys):
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    # The KYE list is first needed by op 2; op 3 and op 4 come after it.
+    assert _interrupt_read(t, "kye/get-kye", "my_series/") == []
+    exc, journal = _run_failing(plan, c, tmp_path / "w")
+    assert isinstance(exc, KeyboardInterrupt) and exc.args == ("in the read-back",)
+    assert exc.report.succeeded == 4 and journal.unresolved() == set()
+    seen = _verify_file(tmp_path / "w")
+    assert seen == json.loads(json.dumps(exc.report.verified))
+    assert seen["partial"] is True and seen["uncertain"] is None and seen["checked"] == 1
+    assert [sum(op.key in u for u in seen["unproven"]) for op in plan.ops] == [0, 1, 1, 1]
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    _interrupt_read(t, "kye/get-kye", "my_series/")
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 130 and "succeeded 4" in said.out and said.out.count("NOT READ BACK") == 3
+
+
+def test_verify_called_on_its_own_still_raises_an_interrupt():
+    from wanderfill.plan.apply import verify
+
+    c, t = client(_tick_replies())
+    t.webapi = _interrupting(t.webapi)
+    with pytest.raises(KeyboardInterrupt):
+        verify(c, [_vop("mark_kye", item=5)])
+
+
+def test_an_interrupt_while_the_report_is_printed_does_not_replace_the_error(
+        monkeypatch, tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=_lost())
+    monkeypatch.setattr(cli, "_print_apply_report", _interrupting(cli._print_apply_report))
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 2 and "answer lost" in said.err
+
+
+def test_the_read_back_says_what_it_reads_before_it_starts(monkeypatch, tmp_path, capsys):
+    """Minutes of silence on a dead network, with nothing to say what it was doing."""
+    plan, c, t = _rebuilt(*_four_ticks(), _jan(), replies=_tick_replies())
+    _live(t)
+    _, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    (line,) = [x for x in said.out.splitlines() if x.startswith("Reading back")]
+    assert "5 op(s)" in line and "1 region(s)" in line and "3 list(s)" in line
+    assert said.out.index(line) < said.out.index("attempted")
+
+    def broken(line):
+        raise BrokenPipeError
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    from wanderfill.plan.apply import apply_plan
+    report = apply_plan(c, plan, workdir=tmp_path / "b", confirm=True, on_read_back=broken)
+    assert report.verified["checked"] == 4 and report.verified["unproven"] == []
+
+
+def test_phantom_trips_are_printed_and_do_not_change_the_exit_code(
+        monkeypatch, tmp_path, capsys):
+    """add-visit makes one every time, and only the verify file said which."""
+    plan, c, t = _rebuilt(_jan_add())
+    send = t.webapi
+
+    def lands(path, /, **fields):
+        if path == "quickEnter/add-visit":
+            t.replies[READ] = visits(_stored(**JAN))
+            t.replies[REGIONS_READ] = {"ids": [11]}
+        return send(path, **fields)
+
+    t.webapi = lands
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 0 and "trip 900" in said.out and "region 11" in said.out
 
 
 def test_a_full_run_says_it_is_not_partial(monkeypatch, tmp_path, capsys):

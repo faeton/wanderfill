@@ -653,7 +653,10 @@ server back. Report the real numbers, including the ones that came out wrong.
 visits that are stored but leave their region unmarked. A trip is read back
 region by region, by the trip id the server answered: one visit per region,
 its planned dates and quality, and no second visit beside it for those dates.
-The dates of the trip itself are read too.
+The dates of the trip itself are read too. A region with no dates of its own in
+the plan is held to the trip's: other full dates are a mismatch, and absent or
+year-only ones are `unproven`, because what the server stores for such a region
+has not been measured.
 `unproven` is what the read-back could not establish either way — a list, a
 region's visits or a trip that could not be read, or that came back without what
 was asked for, or a trip whose id is not known to this run. It
@@ -667,14 +670,17 @@ is the op whose journal entry is still open and what the server shows there now,
 or null when nothing is open. **It is a hint, not proof, and it closes nothing.**
 For a visit or a trip it can only match dates, so "a visit with these dates is
 there" may be somebody else's, and "not there" is not a licence to send again:
-a human decides. The original error is then raised as it was. A second Ctrl-C
-stops the read-back; the report then says `NOT READ BACK`.
+a human decides. The original error is then raised as it was. Ctrl-C during any
+read-back stops the reading: what was not checked is `unproven` as `NOT READ BACK`,
+the file is written with `"partial": true`, and the error that ended the run is
+raised, not the Ctrl-C, unless the run had finished. The trips `add-visit` makes
+on its own are printed and are not an error.
 
 Exit codes of `apply --confirm`: 0 when nothing came out different or unproven
 (`not_counted` alone is still 0); 1 on a mismatch, on `unproven`, on a verify file
 that could not be written and on a plan that is not valid; 2 on an error that
-ended or refused the run; 130 on Ctrl-C. An error the package did not foresee is
-a traceback, after the report.
+ended or refused the run, a failed op included; 130 on Ctrl-C. An error the package
+did not foresee is a traceback, after the report.
 
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
