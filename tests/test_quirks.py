@@ -5272,3 +5272,81 @@ def test_an_error_under_the_lock_is_not_taken_for_the_lock_failing(tmp_path):
         with account_lock([tmp_path], 7):
             raise OSError("disk full")
     assert not isinstance(info.value, DriftError)
+
+
+def test_check_counts_only_what_would_be_sent(monkeypatch, tmp_path, capsys):
+    """A finished plan of nine ops printed "9 already applied", then "9 would execute"."""
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import Journal
+    from wanderfill.plan.model import fingerprint
+
+    ops = [_vop("mark_kye", item=570, label="done"), _vop("mark_kye", item=571, label="ticked"),
+           _vop("tick_series", series=1, item=5),
+           _vop("tick_series", series=1, item=5, date_from="2024", label="the same tick"),
+           _jan_add()]
+    plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+    journal = Journal(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson")
+    journal.note(ops[0], {"result": "OK"})
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+
+    def check(rc):
+        capsys.readouterr()
+        assert cli.main(["check", str(saved), "--workdir", str(tmp_path)]) == rc
+        return capsys.readouterr().out
+
+    out = check(0)
+    assert "1 op(s) already applied" in out and "2 op(s) already ticked" in out
+    assert "Left to send: 2 of 5 op(s), in 1 region(s)." in out and "would execute" not in out
+    t.replies["V2/"] = {"result": "OK"}  # the list is gone: nobody knows what is ticked
+    assert "Left to send: at most 3 of 5 op(s)" in check(1)
+    t.replies["V2/"] = {"visited": [5]}
+    for op in ops[2:]:
+        journal.note(op, {"result": "OK"})
+    t.replies[READ] = visits(_stored(**JAN))  # what a finished plan finds
+    assert "Left to send: 0 of 5 op(s), in 0 region(s)." in check(1)
+    journal.path.write_text("torn")
+    assert "Left to send: at most" in check(1)
+
+
+def test_check_calls_everything_at_most_when_the_profile_cannot_be_read(
+        monkeypatch, tmp_path, capsys):
+    plan, c, t = _rebuilt(_jan_add(), _vop("mark_kye", item=5), replies=_tick_replies())
+    t.replies[REGIONS_READ] = {"result": "OK"}
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    assert "Left to send: at most 2 of 2 op(s)" in out
+
+
+def test_the_old_key_guidance_is_said_once(monkeypatch, tmp_path, capsys):
+    """A paragraph for every trip: thirty trips, thirty copies of it."""
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import apply_plan
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    trips = [_jan(TRIP_REGION | {"id": n}, label=f"trip {n}") for n in (11, 12, 13)]
+    plan, path, c, _ = _done_before(tmp_path, *(op.legacy_key for op in trips), trip=trips[0])
+    plan.ops += trips[1:]
+    snap = c.snapshot([11, 12, 13])
+    plan.basis = {"fingerprint": fingerprint(basis_of(snap, [11, 12, 13]))}
+    path.rename(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson")
+    with pytest.raises(DriftError) as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+    assert cli.main(["check", str(saved), "--workdir", str(tmp_path)]) == 1
+    for said in (str(info.value), capsys.readouterr().out):
+        assert all(f"'trip {n}'" in said for n in (11, 12, 13))
+        assert all(op.legacy_key in said for op in trips)
+        assert said.count("rebuild the plan from the live profile") == 1
+        assert said.count("Read the server back") == 1
+
+
+@pytest.mark.parametrize("name", ["deletes-7.ndjson", "verify-20261124T120000Z.json",
+                                  "journal-7-aaaaaaaaaaaa.ndjson", "snapshot-x.json", ".lock-7"])
+def test_what_a_run_leaves_behind_is_never_committed(name):
+    """A --workdir inside the repository: a deletion's journal holds the whole record."""
+    import fnmatch
+    import pathlib
+
+    ignored = pathlib.Path(__file__).parents[1].joinpath(".gitignore").read_text().split("\n")
+    assert any(fnmatch.fnmatch(name, pattern) for pattern in ignored if pattern)

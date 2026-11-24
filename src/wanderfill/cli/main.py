@@ -840,6 +840,7 @@ def cmd_check(args) -> int:
     from ..plan.apply import (
         CLOSE_BY_HAND,
         GONE_IS_NOT_DONE,
+        OLD_KEY_IS_NOT_KNOWN,
         Journal,
         describe_open,
         doubles,
@@ -897,29 +898,40 @@ def cmd_check(args) -> int:
             problems += describe_open(stuck)
             hints.append(CLOSE_BY_HAND)
         done = journal.done_keys()
-        problems += trips_under_old_keys(journal, plan)
+        if old := trips_under_old_keys(journal, plan):
+            problems += old
+            hints.append(OLD_KEY_IS_NOT_KNOWN)
+        unread = False
     except (JournalCorrupt, DriftError) as exc:
         problems.append(str(exc))
         done = set()
+        unread = True
     if skipped := sum(op.key in done for op in ops):
         print(f"journal: {skipped} op(s) already applied and would be skipped")
 
-    if snap is not None:
-        to_send = [op for op in ops if op.key not in done]
+    to_send = [op for op in ops if op.key not in done]
+    ticks = {t for op in to_send if (t := tick_of(op))}
+    left = [op for op in to_send if tick_of(op) is None]
+    if snap is None:
+        unread = unread or bool(ticks)
+    else:
         problems += doubles(snap, to_send)
         try:
             ticked = ticked_before(c, ops, snap)
         except WanderfillError as exc:
             problems.append(f"a list this plan ticks cannot be read: {exc}")
+            unread = True
         else:
             if lost := gone(snap, ticked, [op for op in ops if op.key in done], journal.path):
                 problems += lost
                 hints.append(GONE_IS_NOT_DONE)
-            ticks = [t for op in to_send if (t := tick_of(op))]
-            if have := sum(n in ticked[where] for where, n in ticks):
+            ticks = {(where, n) for where, n in ticks if n not in ticked[where]}
+            # One tick spelled two ways is sent once; the second finds it ticked.
+            if have := len(to_send) - len(left) - len(ticks):
                 print(f"ticks:   {have} op(s) already ticked and would be skipped")
 
-    print(f"\n{len(ops)} op(s) would execute across {len(regions)} region(s).")
+    print(f"\nLeft to send: {'at most ' * unread}{len(left) + len(ticks)} of {len(ops)} op(s), "
+          f"in {len(regions_touched(left))} region(s).")
     if problems:
         print("\nBLOCKERS:")
         for p in problems:

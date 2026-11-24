@@ -99,8 +99,8 @@ class JournalCorrupt(WanderfillError):
     """A journal line cannot be read, so nobody knows which writes are open.
 
     A crash while appending leaves one. Skipping it would hide the write it
-    stood for, so nothing is sent until a human has repaired the file; the tool
-    never rewrites a journal.
+    stood for, so nothing is sent until the account owner has repaired the line;
+    the tool never rewrites a journal.
     """
 
 

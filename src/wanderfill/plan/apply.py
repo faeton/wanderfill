@@ -143,8 +143,9 @@ class Journal:
             if bad:
                 raise JournalCorrupt(
                     f"{self.path}: line {n} is not an 'open' or 'done' entry with a key, so "
-                    "whether a write is unfinished is unknown. Read the server back and fix "
-                    "that line by hand; nothing is sent for this account until then."
+                    "whether a write is unfinished is unknown. Read the server back, and "
+                    "the account owner repairs that line by hand; nothing is sent for this "
+                    "account until then."
                 )
             out.append(e)
         return out
@@ -259,6 +260,15 @@ def describe_open(entries: dict[Path, set[str]]) -> list[str]:
             f"{', '.join(sorted(keys))}" for path, keys in entries.items()]
 
 
+OLD_KEY_IS_NOT_KNOWN = (
+    "That key leaves out the regions' dates, so whether it is this trip is not known. "
+    "Read the server back, then rebuild the plan from the live profile, without this trip if it "
+    "is already there: a rebuilt plan whose basis records when it was taken has its own journal, "
+    "and drift compares with what that plan saw, so neither would stop a second copy, and only "
+    "one with the same two full dates is refused."
+)
+
+
 def trips_under_old_keys(journal: Journal, plan: Plan) -> list[str]:
     """One line per trip this plan's journal has done under :attr:`Op.legacy_key` only.
 
@@ -269,12 +279,7 @@ def trips_under_old_keys(journal: Journal, plan: Plan) -> list[str]:
     done = journal.done_keys()
     return [
         f"{journal.path}: ops[{i}] {op.kind} {op.label!r}: a trip with these regions was "
-        f"written under the older key {op.legacy_key}, which leaves out the regions' dates, "
-        "so whether it is this trip is not known. Read the server back, then "
-        "rebuild the plan from the live profile, without this trip if it is already there: "
-        "a rebuilt plan whose basis records when it was taken has its own journal, and "
-        "drift compares with what that plan saw, so neither would stop a second copy, "
-        "and only one with the same two full dates is refused."
+        f"written under the older key {op.legacy_key}"
         for i, op in enumerate(plan.ops)
         if op.bucket == "apply" and op.legacy_key in done and op.key not in done
     ]
@@ -636,7 +641,7 @@ def _apply_locked(
     # interrupted one already did.
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
     if old := trips_under_old_keys(journal, plan):
-        raise DriftError("; ".join(old) + " Nothing was sent.")
+        raise DriftError("; ".join(old) + f". {OLD_KEY_IS_NOT_KNOWN} Nothing was sent.")
     done = journal.done_keys()
     to_send = [op for op in ops if op.key not in done]
     if twice := doubles(snapshot, to_send):

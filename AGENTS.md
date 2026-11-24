@@ -269,9 +269,10 @@ longer carries it; a response with the list field missing is an error, not an
 empty list. An entry closes by itself on the refusals that close an apply's (§7),
 a 403 on the write included. If proof fails, or the answer is lost, it stays open
 — and **any** open entry, in a delete journal or an apply's, blocks every further
-deletion and apply for that account until a human has read the server and
+deletion and apply for that account until the owner has read the server and
 closed it by hand, by appending a `done` line with that key (and an `error` if
-the write did not land: a plain `done` means it did). Do not close one for them.
+the write did not land: a plain `done` means it did). The tool never rewrites a
+journal, and neither do you: do not close one for them.
 None of this is in the plan model, and it must not be: a plan is what the tool
 computed, and a deletion is what the owner decided.
 
@@ -651,9 +652,11 @@ At apply time:
 - Refuse if another run holds the account's lock, or if any of the account's
   journals has an open entry or a line that cannot be read. Re-planning does not
   get past this. A directory that cannot be read or locked is refused too. The
-  lock and the scan cover the chosen `--workdir` and the default `~/.local/share/wanderfill`, if it exists: a journal in a third
-  directory is not seen, so keep one account to one `--workdir`. A journal is
-  never repaired by the tool, and not by you either.
+  lock and the scan cover the chosen `--workdir` and the default
+  `~/.local/share/wanderfill`, if it exists: a journal in a third directory is not
+  seen, so keep one account to one `--workdir`. The tool never rewrites a journal,
+  and neither do you: the owner appends the `done` line, or repairs the line that
+  cannot be read, after reading the server.
 - Refuse if live state has drifted since planning — re-plan instead.
 - Refuse a trip this plan's journal has done only under the key older versions
   gave it, which left out the regions' dates (`Op.legacy_key`). Neither send it
@@ -692,7 +695,7 @@ At apply time:
   an unknown outcome, and sending it again is how duplicate visits and phantom
   trips are made. The transport enforces this — writes get one attempt and raise
   `UnknownWriteOutcome`, which leaves the journal entry open on purpose so the
-  next run refuses to start until a human has reconciled it. A
+  next run refuses to start until the owner has closed it. A
   redirect (no request with the token follows one: a redirected write is an
   unknown outcome, a redirected read an error), a 5xx, a 408, a body that is not JSON,
   an object without `result: OK` (or without the `trip_id` or `visit_id` a trip or
@@ -742,7 +745,8 @@ ended or refused the run, a failed op included; 130 on Ctrl-C. An error the pack
 did not foresee is a traceback, after the report.
 
 Before applying anything you did not build in this session, run
-`wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
+`wanderfill check <plan>`: it is read-only and reports how many ops are left to
+send, net of those done or ticked already, and account mismatch, drift,
 duplicate ops, second copies, done ops that are gone, lists that cannot be read,
 and every open or unreadable journal entry of the account without sending a write.
 
