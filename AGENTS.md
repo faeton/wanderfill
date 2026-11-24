@@ -258,7 +258,10 @@ totals inflate by the number of first visits. Either the trips own everything
 (requires deleting the standalone records — usually forbidden), or each region's
 *first* journey stays standalone and only *repeats* go into trips. Pick one,
 state the trade-off, and say plainly what it costs: in the second option some
-trips list fewer regions than the journey really covered.
+trips list fewer regions than the journey really covered. **This is about journeys
+whose regions are on the profile already.** A journey whose runs overlap no existing
+visit goes into one trip, first visits included; nothing is counted twice, for there
+is nothing to count it with.
 
 ### Undoing, when the owner asks
 
@@ -314,6 +317,72 @@ natural trip boundary. Do not pretend otherwise. What works:
 
 Sweep the parameters, show the user the resulting trip counts at each setting,
 and let them choose. Record the chosen parameters in the plan.
+
+That is `segment` and `wanderfill sweep`, on a day-level track. For photos use
+`wanderfill trips review`, next. It asks for no home and has no cap: it shows the
+stays, suggests where a trip may end, and the owner answers.
+
+### Trips from photos go through a page the owner answers
+
+As for series. Neither command writes to the profile, and the plan has `create_trip` ops
+and no others.
+
+1. `wanderfill trips review --since DATE` with `--track FILE` for every day-by-day
+   track that covers those dates (rule 6), or `--no-track`, which is the owner saying
+   that there is none. It reads the photos, the map, the visits and the trips, and
+   writes a page and its list into `review/trips/`. Read out what it prints: the runs by
+   status and reason, the gap table, what was left out, the sources with their first and
+   last day, the trips that are there already, the tiles not read. Run `evidence` first
+   (6a): a region with a thin run is one the owner may be asked to prove. Exit 3 means
+   that something was not read and the list is incomplete: say so, and run it again. A
+   plan from an incomplete list is allowed only if the owner, told that it is, wants it.
+2. **Hand the page to the owner and stop.** They open it, answer and save the file. Never
+   fill in an answer, a word, a cut or a date, never edit the list or the answers, press
+   nothing for them and suggest nothing: rule 7. Blank is not "no" and not a quality: it
+   holds the whole trip it is in. "I don't remember" is final: do not ask about it.
+3. `wanderfill trips plan LIST ANSWERS` reads the profile again and makes one plan. Show
+   it with `show -v`, then `check`, then the owner's yes to this plan, then `apply`.
+   One kind, trips, and one approval (rule 5). It prints how many regions will be marked
+   and how many visits will only be stored: say both before the yes. A refusal (another
+   account, another list, a visit or a trip over the same days that is not as the list
+   shows it) means a new `review`, not a repair of the files. It refuses more than 50
+   region visits; `--max-rows` is the owner's to say.
+
+A run is days of photos strictly inside one region, taken on the ground by the owner's
+own camera with a clock that can be the local one. It is not a visit: only the profile
+and the owner know those. Every other photo proves nothing and may still stand between
+two days.
+
+What holds a run, and what releases it:
+
+| reason | what it means | released by |
+|---|---|---|
+| `open` | no photo on a later day shows them in another region, so the stay may not be over | their words, or a later review |
+| `brief` | one photo, or all within 15 minutes, or all at one coordinate | their words |
+| `layover?` | under 24 hours, with a fast photo before and after | their words |
+| `undated` | a visit of the region with no date, or only a year, may be this one | their words, that say why it is another visit |
+| `overlap` | it shares a day with a visit that is there | nothing |
+| `continuation` | nothing shows that they left between it and a visit or another run | nothing |
+| `not read` | a map tile on one of its days or beside them did not arrive | a new review |
+| `stale map` | a region that is not in the catalogue, on those days | a new review |
+| `across` | it goes over `--since` or `--until` | a new review with other dates |
+| `clock` | its photos have two clocks over 12 hours apart | nothing: words cannot correct a date |
+
+The words are the owner's own and unprompted. Do not write them, improve them or offer
+any. Do not ask leading questions about a held run: not "so you had left by then?", not
+"that was another visit, was it not?". "The page has a field for it" is all there is to
+say. What nothing releases goes on by hand, or waits.
+
+**Finished stays only.** An `open` run goes into a plan on their own words that it is
+over, and not because the trip would look better with it: a stay that is extended later
+leaves its trip's header behind (above). A layover is theirs to judge: some count one,
+most do not. Do not cut or join anything for them either: where a new trip starts is
+asked on the page. A region can be in one trip only once; the page says where, and they
+cut.
+
+`--gap-days`, `--fast-kmh`, `--spans` and `--until` are theirs to choose, as for series.
+With a larger gap more days without a photo are inside a stay, and the gap table says
+what that changes.
 
 ---
 
@@ -493,7 +562,9 @@ is a region they may be asked to prove.** So:
 
 - Run `wanderfill evidence` *before* proposing writes, not after. If a region
   has no evidence in the library, say so at plan time rather than letting the
-  user find out from a committee.
+  user find out from a committee. `trips review` grades each run in the same way
+  and puts `evidence thin` on the page; the grade holds nothing, and it is of that
+  run's photos only.
 - The dossier is **read-only on both sides** and needs no approval to produce.
   It reads the profile, reads the library, writes local files. There is no
   `--apply` because there is nothing to apply.
@@ -884,7 +955,7 @@ their reasons written beside them. Read them before silencing a fifth.
 ### The shape
 
 ```
-sources/ ──► geo/ ──► plan/{model,segment,series} ──► PLAN FILE ──► plan/apply ──► api/
+sources/ ──► geo/ ──► plan/{model,segment,series,trips} ──► PLAN FILE ──► plan/apply ──► api/
   parse      resolve        compute                    (on disk)     execute     POST
 ```
 
@@ -900,10 +971,15 @@ Left to right, and the invariant is structural rather than a convention:
 | `plan/apply.py` | the preconditions, the account lock, the journal, `verify()` |
 | `plan/segment.py` | trips; `home=` is the parameter the module turns on |
 | `plan/series.py` | shortlists and the recall curve, never an auto-marker |
+| `plan/manifest.py` | the one form in which a list is hashed, saved and loaded; an answer names that hash |
+| `plan/trips.py` | runs, reasons, boundaries and the trips the answers make. Pure; never answered for the owner |
+| `plan/trip_list.py`, `plan/trips_page.html` | what the owner was shown, the page, the answers; the page and `group` have one rule |
+| `plan/trip_plan.py` | the profile read again, and the plan of `create_trip` ops |
 | `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |
 | `geo/tiles.py` | gzip sniffing, polygons, the series harvest, and which tiles `failed` |
 | `grade.py` | is-this-coordinate-a-visit, by speed and time spread, a repeated coordinate counted once |
-| `evidence.py`, `share.py` | read-only leaves; nothing in the write path imports them |
+| `evidence.py` | read-only. `plan/trips.py` and `plan/trip_list.py` import it for the grade of a run; `plan/apply.py` and `api/` do not |
+| `share.py` | a read-only leaf; nothing in the write path imports it |
 | `api/cache.py` | the slow-link cache for `history`, `evidence` and `share` only |
 
 ### Six things that are load-bearing and do not look it

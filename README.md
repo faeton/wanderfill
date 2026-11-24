@@ -418,6 +418,10 @@ wanderfill sweep track.csv regions.json
 wanderfill series review --since 2024-01-01
 wanderfill series plan review/review-<hash>.json series-answers.json --series 22
 
+# a page of stays your photos show; you answer it, and the answers become a plan of trips
+wanderfill trips review --since 2024-01-01 --track track.csv   # or --no-track
+wanderfill trips plan review/trips/trips-<hash>.json trips-answers.json
+
 # read a plan
 wanderfill show plan.json --verbose
 
@@ -514,6 +518,83 @@ silently removes the region you spent the most time in from your own trips.
 that is a hint, not a fact. Settings go stale: a home set five years ago sits
 there long after somebody stopped having one. The library will not use it unless
 you pass it.
+
+`segment` is for a day-level track. If you have photos, the next section asks no such
+question: it shows you the stays and you say what was a trip.
+
+## Trips: a page of stays to answer
+
+`wanderfill trips` turns your photos into questions, and your answers into one plan of
+trips. It sends nothing to the profile.
+
+```bash
+wanderfill trips review --since 2024-01-01 --track track.csv   # writes a page and its list
+wanderfill trips plan review/trips/trips-<hash>.json trips-answers.json
+wanderfill show -v plan-trips.json && wanderfill check plan-trips.json
+```
+
+**`review`** reads the whole Photos library, places each photo of your own camera on the
+map, and finds **runs**: days with a photo on the ground and strictly inside one region,
+by a clock that can be the local one. Photos taken at speed, beside an impossible jump, on
+a border, or with no zone prove no day. A run goes on over a day with no photo at all, but
+not over a day with a photo somewhere else. It reads every visit of those regions, and
+every trip of those years, and writes a page and its list into `review/trips/`.
+
+A made-up journey, as the page shows it:
+
+| | days | |
+|---|---|---|
+| Aldmoor | 1 to 3 May | |
+| Berrow | 3 to 6 May, no photo on the 5th | moved on the same day, so both have the 3rd |
+| Cray Islands | 7 to 9 May | **held**: a visit with no date is on the profile, and may be this one |
+| Dunvale | 10 to 11 May | |
+| Elstow | 12 to 14 May | |
+| Grayport | 16 to 17 May | **held**: no later photo elsewhere, so it may not be over |
+
+You give a quality to each of the five, write in your own words why Cray Islands was
+another visit, and leave Grayport blank. That is one trip of five regions, 1 to 14 May,
+each region with its own days. With no words for Cray Islands it would be no trip at all:
+what is not answered is never guessed, and half a journey is not planned.
+
+A run that may be one that is on the profile already, or the second half of a stay, is
+held. Some reasons are released by your own words (`open`, `brief`, `layover?`,
+`undated`). Nothing releases the others: a day shared with a visit that is there, nothing
+to show that you left in between, a map tile that did not arrive, a region that is not in
+the catalogue, a run over `--since` or `--until`, two clocks that cannot both be right.
+One with a visit of exactly its days is greyed and left out. Between two runs the page
+asks whether a new trip starts wherever something suggests it: a flight, days with nothing,
+a run that is on the profile.
+
+| flag | what it does |
+|---|---|
+| `--since`, `--until` | the first and the last day, by the photo's own clock |
+| `--track FILE...` or `--no-track` | one of them is needed. A row of a track proves no day; on a day with no photo, in another region, it ends a run |
+| `--gap-days N` | a run goes on over fewer than N days with no photo in a row; 2 unless you say. A table shows the other settings |
+| `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
+| `--spans FILE` | stretches that prove nothing, as for `series` |
+| `--library`, `--out` | another Photos library, another directory |
+
+The first run is the slow one: it reads the map tiles for your whole library, which later
+runs find on the disk. After that, placing takes about 13 seconds for 100,000 photos at
+different coordinates (made-up photos, tiles already in memory).
+
+**`plan`** takes the list and the answers, and reads the profile again. If a visit of a
+region on the list, or a trip over the same days, is not what the list shows, there is no
+plan: run `review` again. It writes `plan-trips.json`, or `--plan FILE`, and never
+replaces a file. It says how many regions will be marked and how many visits will be
+stored and mark nothing (a transit does not mark a region), and refuses more than 50
+region visits unless `--max-rows` says more. Then `show -v`, `check` and `apply`, as for
+any plan. Nothing but `create_trip` is ever in it.
+
+| exit | `trips review` | `trips plan` |
+|---:|---|---|
+| 0 | both files written, also when the list is empty | the plan is written, or no trip comes of the answers and none is |
+| 1 | no token | no token; a list or answers that cannot be used, too many region visits |
+| 2 | an error, and no file; a track that cannot be read is one | an error, another account, a profile that has changed, a plan file that exists |
+| 3 | both files written, and something could not be read (a map tile, a row of a track), so the list is incomplete: run it again | |
+
+The files in `review/trips/` say where you were and when. They are readable by you alone
+and ignored by git.
 
 ---
 

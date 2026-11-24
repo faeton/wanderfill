@@ -35,7 +35,10 @@ review-*.json
 review-*.html
 series-answers*.json
 
-# The page of `trips review` saves the answers about your stays under this name.
+# `trips review` writes a page of where you were and when, also where --out names another
+# directory. Its page saves the answers as trips-answers.json.
+trips-*.json
+trips-*.html
 trips-answers*.json
 
 # `share` writes cards with your name and face on them. Post them yourself.

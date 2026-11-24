@@ -37,13 +37,15 @@ from .. import evidence
 from ..api.client import Visit, When, YearOnly
 from ..api.errors import PlanInvalid
 from ..geo.resolve import Resolution
-from ..geo.tiles import haversine_km
+from ..geo.tiles import deg2tile, haversine_km
 from ..sources.photos_app import PhotoAsset, zone_fits
 from .model import _r
 from .review import Shot, default_speeds
 
 GAP_DAYS = 2
 SWEEP_GAPS = (1, 2, 3, 5)
+ZOOM = 10  # of the region tiles
+_MAP_ENDS = 85.05  # a web map has no tile beyond, and no y to compute at the pole
 
 State = Literal["inside", "edge", "nearest", "nowhere", "unread", "stale"]
 Status = Literal["offered", "held", "fixed", "there"]
@@ -149,6 +151,48 @@ class Obs:
     @property
     def day(self) -> dt.date:
         return self.shot.taken.date()
+
+
+def region_resolver(
+    from_tiles: Callable[..., Resolution]
+) -> Callable[[float, float], Resolution]:
+    """What :func:`place` asks, from ``RegionResolver.from_tiles`` at zoom :data:`ZOOM`.
+
+    The tile and the eight around it, for a region can be drawn in the next one. Where the
+    map ends nothing is asked and there is no region.
+    """
+    def resolve(lat: float, lon: float) -> Resolution:
+        if abs(lat) > _MAP_ENDS:
+            return Resolution(lat, lon, None, "unresolved")
+        return from_tiles(lat, lon, ring=1)
+
+    return resolve
+
+
+def observe(
+    shots: Iterable[Shot],
+    resolve: Callable[[float, float], Resolution],
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[Obs]:
+    """Every shot with its place, in the order they came in.
+
+    Each raw coordinate is placed once, in the order of the tiles, so that a tile is decoded
+    once and not once for every photo in it.
+    """
+    shots = list(shots)
+    todo = sorted({(s.lat, s.lon) for s in shots}, key=_by_tile)
+    places: dict[tuple[float, float], Place] = {}
+    for n, at in enumerate(todo, 1):
+        places[at] = place(resolve, *at)
+        if on_progress:
+            on_progress(n, len(todo))
+    return [Obs(s, places[s.lat, s.lon]) for s in shots]
+
+
+def _by_tile(at: tuple[float, float]) -> tuple:
+    lat, lon = at
+    return deg2tile(max(-_MAP_ENDS, min(_MAP_ENDS, lat)), lon, ZOOM), at
 
 
 def _own(obs: Iterable[Obs]) -> Iterator[Obs]:
@@ -861,6 +905,7 @@ __all__ = [
     "RELEASED_BY_WORDS",
     "SAYS_NOTHING",
     "SWEEP_GAPS",
+    "ZOOM",
     "Answers",
     "AnyRun",
     "Boundary",
@@ -878,7 +923,9 @@ __all__ = [
     "group",
     "judge",
     "kind_of",
+    "observe",
     "place",
+    "region_resolver",
     "regions_to_read",
     "status_of",
     "sweep",

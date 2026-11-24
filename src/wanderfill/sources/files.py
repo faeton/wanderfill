@@ -13,7 +13,7 @@ import json
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .base import DayPoint, Track
@@ -46,6 +46,7 @@ class CsvSource:
 
     path: Path
     name: str = "csv"
+    skipped: int = field(default=0, init=False)
 
     DATE = ("date", "day", "timestamp", "time", "when")
     LAT = ("lat", "latitude", "y")
@@ -71,13 +72,15 @@ class CsvSource:
             c_country = self._pick(header, self.COUNTRY)
             if not (c_date and c_lat and c_lon):
                 raise ValueError(f"{self.path}: need date, lat and lon columns; saw {header}")
+            self.skipped = 0
             for row in reader:
                 date = _as_date(row[c_date])
-                if date is None:
-                    continue
                 try:
                     lat, lon = float(row[c_lat]), float(row[c_lon])
                 except (TypeError, ValueError):
+                    date = None
+                if date is None:
+                    self.skipped += any((row[c] or "").strip() for c in (c_date, c_lat, c_lon))
                     continue
                 yield DayPoint(
                     date=date, lat=lat, lon=lon,
@@ -166,4 +169,5 @@ def load(path: str | Path) -> Track:
         src = GeoJsonSource(p)
     else:
         raise ValueError(f"no parser for {p.name}; supported: .csv .gpx .json .geojson")
-    return Track(points=list(src.points()), origin=str(p))
+    points = list(src.points())
+    return Track(points=points, origin=str(p), skipped=getattr(src, "skipped", 0))

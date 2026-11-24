@@ -1,6 +1,6 @@
 # `wanderfill trips`: photos to a trip plan
 
-Status: approved to build, 2026-11-24. Second version, after design reviews by Codex and Grok. The owner's answers: one silent day joins; all new regions of a journey in one trip; 150 km/h; layovers held; a stay is over by a later photo elsewhere or the owner's typed words; quality per region stay.
+Status: built, 2026-11-24. Second version, after design reviews by Codex and Grok. The owner's answers: one silent day joins; all new regions of a journey in one trip; 150 km/h; layovers held; a stay is over by a later photo elsewhere or the owner's typed words; quality per region stay.
 
 ## Purpose
 

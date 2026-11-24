@@ -63,6 +63,8 @@ class Track:
 
     points: list[DayPoint] = field(default_factory=list)
     origin: str = ""
+    # Rows with something in them that could not be read as a day and a coordinate.
+    skipped: int = 0
 
     def __len__(self) -> int:
         return len(self.points)

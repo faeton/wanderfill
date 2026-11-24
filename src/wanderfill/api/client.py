@@ -1246,11 +1246,11 @@ class NomadMania:
             regions_json=json.dumps(list(regions)),
         )
 
-    def _trip_listing(self, span: tuple[str, str]) -> dict[int, list[dict]]:
+    def trip_listing(self, span: tuple[str, str]) -> dict[int, list[dict]]:
         """The trips listed under each year of ``span``, whole, each with a readable id.
 
         Nothing says which of its years a trip is listed under, or that it is
-        only one; the new span contains the old header.
+        only one. Strict: a listing that was not read raises and is not an empty one.
         """
         action = "trips/get-trips-for-year-app"
         out = {}
@@ -1324,7 +1324,7 @@ class NomadMania:
             "day_from": int(r["day_from"]), "year_to": int(r["year_to"]),
             "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
         } for r in regions]
-        listing = self._trip_listing(now)
+        listing = self.trip_listing(now)
         visits = {r["id"]: self._visits_strict(r["id"]) for r in body}
         mine = {rid: [v.id for v in there if v.trip_id == trip_id]
                 for rid, there in visits.items()}
@@ -1497,7 +1497,7 @@ class NomadMania:
                 same = False
                 known.append(f"trip {trip_id} could not be read: {exc}")
             try:
-                listing = self._trip_listing(saving.now)
+                listing = self.trip_listing(saving.now)
                 changes = _listing_changes(saving.listing, listing)
                 maybe: list[int] | str = candidates(listing)
                 still = bool(listed_as(listing, trip_id))
@@ -1533,7 +1533,7 @@ class NomadMania:
             listing = None
             saved = readback(saved_trip)
             if saved is None:
-                listing = readback(lambda: self._trip_listing(saving.now))
+                listing = readback(lambda: self.trip_listing(saving.now))
                 if listed_as(listing, trip_id):
                     raise fail(f"get-trip says {trip_id} is gone but the listing still has it")
                 found = candidates(listing)
@@ -1569,7 +1569,7 @@ class NomadMania:
                                f"{was[old_visit][:3]}")
                 visits[rid] = owned[0]
             if listing is None:
-                listing = readback(lambda: self._trip_listing(saving.now))
+                listing = readback(lambda: self.trip_listing(saving.now))
             entries = listed_as(listing, new_id)
             if not entries or not all(readback(lambda t=t: as_asked(t)) for t in entries):
                 raise fail(f"the listing has trip {new_id} as {entries}")
