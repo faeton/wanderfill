@@ -23,12 +23,12 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
+from ..api.client import YearOnly
 from ..api.errors import PlanInvalid
 
 SCHEMA = 1
@@ -115,6 +115,8 @@ class Plan:
         """
         try:
             raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except OSError as exc:  # missing, unreadable, a directory
+            raise PlanInvalid(f"{path}: cannot be read ({exc.strerror or exc})") from None
         except ValueError as exc:  # not JSON, or not UTF-8
             raise PlanInvalid(f"{path}: not a readable plan file ({exc})") from None
         if not isinstance(raw, dict):
@@ -209,8 +211,28 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
 
 # -- validation ---------------------------------------------------------------
 
-_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _PARTS = ("year", "month", "day")
+
+
+def parse_when(text: object):
+    """A plan's date string, as either a real date or a bare year; the one parser.
+
+    ``"2013"`` is not a shorthand for 1 January 2013. It is the profile saying
+    "some time in 2013", which the API stores natively and which YES reads
+    exactly as well as a precise date. Expanding it to a January the traveller
+    never claimed would invent evidence, so it stays a :class:`YearOnly`.
+
+    ``apply`` executes with this and :func:`validate` judges with this, so the
+    year range (``YearOnly``'s own) and the date forms cannot drift apart.
+    Raises ``ValueError`` for anything it cannot read, and for a non-string.
+    """
+    if text is None or text == "":
+        return None
+    if not isinstance(text, str):
+        raise ValueError(f"{text!r} is not text")
+    if len(text) == 4 and text.isdigit():
+        return YearOnly(int(text))
+    return dt.date.fromisoformat(text)
 
 
 def _is_id(value: object) -> bool:
@@ -221,21 +243,17 @@ def _is_id(value: object) -> bool:
 def _when_of(text: object, *, full: bool = False) -> tuple[str, Any] | str | None:
     """A plan date as ``("date", date)``, ``("year", int)`` or ``None``; an error is a ``str``.
 
-    The forms are the ones ``apply._when`` executes: ``YYYY-MM-DD``, a bare
-    ``YYYY``, or nothing. ``full`` accepts only the first.
+    ``full`` accepts only a precise day.
     """
-    if text is None:
+    try:
+        got = parse_when(text)
+    except ValueError as exc:
+        return f"{text!r} cannot be used as a date ({exc})"
+    if got is None:
         return None
-    if isinstance(text, str):
-        if _ISO_DAY.fullmatch(text):
-            try:
-                return ("date", dt.date.fromisoformat(text))
-            except ValueError:
-                pass
-        elif not full and len(text) == 4 and text.isdecimal() and int(text) > 0:
-            return ("year", int(text))
-    expected = "YYYY-MM-DD" if full else "YYYY-MM-DD or a bare YYYY"
-    return f"{text!r} is not {expected}"
+    if isinstance(got, YearOnly):
+        return f"{text!r} is not YYYY-MM-DD" if full else ("year", got.year)
+    return ("date", got)
 
 
 def _backwards(a: tuple[str, Any], b: tuple[str, Any]) -> bool:
@@ -279,12 +297,13 @@ def _side_of(region: dict, which: str) -> tuple[tuple[str, Any] | None, str | No
     nums = {p: _number(v) for p, v in given.items()}
     if None in nums.values():
         return None, f"{names} must be whole numbers"
-    if "month" not in nums:
-        return (("year", nums["year"]), None) if nums["year"] > 0 else (None, "year must be > 0")
     try:
+        YearOnly(nums["year"])  # the range execution and the read-back both enforce
+        if "month" not in nums:
+            return ("year", nums["year"]), None
         return ("date", dt.date(nums["year"], nums["month"], nums["day"])), None
-    except ValueError:
-        return None, f"{nums['year']}-{nums['month']}-{nums['day']} is not a real date"
+    except (ValueError, OverflowError) as exc:
+        return None, f"{', '.join(f'{k}={v}' for k, v in nums.items())} is not usable ({exc})"
 
 
 def _trip_problems(op: Op) -> list[str]:
@@ -298,7 +317,7 @@ def _trip_problems(op: Op) -> list[str]:
     if not out and _backwards(_when_of(op.date_from), _when_of(op.date_to)):
         out.append(f"starts {op.date_from} after it ends {op.date_to}")
     if not isinstance(op.regions, list) or not op.regions:
-        return [*out, "has no regions"]
+        return [*out, f"needs a non-empty list of regions, not {op.regions!r}"]
     seen: set[int] = set()
     for n, r in enumerate(op.regions):
         at = f"regions[{n}]"
@@ -323,16 +342,37 @@ def _trip_problems(op: Op) -> list[str]:
     return out
 
 
+_INT_FIELDS = ("region", "visit_id", "series", "item", "quality")
+
+
 def _op_problems(op: Op) -> list[str]:
-    """What is wrong with one apply-bucket op on its own, as short phrases."""
+    """What is wrong with one apply-bucket op on its own, as short phrases.
+
+    Every field is type-checked whether or not the kind uses it, because every
+    one reaches the op's key, and some reach the server (``allow_vaguer`` as the
+    string ``"false"`` is truthy, and permits erasing a date).
+    """
     out: list[str] = []
+    for name in _INT_FIELDS:
+        v = getattr(op, name)
+        if v is not None and not _is_id(v):
+            out.append(f"{name} must be an integer or absent, not {v!r}")
+    if type(op.allow_vaguer) is not bool:
+        out.append(f"allow_vaguer must be true or false, not {op.allow_vaguer!r}")
+    if not isinstance(op.regions, list) or not all(isinstance(r, dict) for r in op.regions):
+        out.append(f"regions must be a list of objects, not {op.regions!r}")
+    if out:
+        return out
 
     def need(field_name: str) -> None:
-        if not _is_id(getattr(op, field_name)):
+        if getattr(op, field_name) is None:
             out.append(f"needs an integer {field_name}")
 
     if op.kind == "create_trip":
         return _trip_problems(op)
+    # Execution parses both dates of every kind, so every kind's are judged.
+    if why := _span_problem(op.date_from, op.date_to):
+        out.append(f"dates: {why}")
     if op.kind in ("add_visit", "update_visit", "mark_dare"):
         need("region")
     if op.kind == "update_visit":
@@ -343,10 +383,8 @@ def _op_problems(op: Op) -> list[str]:
         need("series")
     if op.kind in ("add_visit", "update_visit"):
         # 0 is "no visit", and an absent quality is a broken plan, not a default 3.
-        if not _is_id(op.quality) or not 1 <= op.quality <= 6:
+        if op.quality is None or not 1 <= op.quality <= 6:
             out.append(f"needs a quality from 1 to 6, not {op.quality!r}")
-        if why := _span_problem(op.date_from, op.date_to):
-            out.append(f"dates: {why}")
     return out
 
 
@@ -363,6 +401,8 @@ def validate(plan: Plan) -> list[str]:
     every earlier op had already been written to a real profile.
     """
     out: list[str] = []
+    if not isinstance(plan.basis, dict):
+        out.append(f"plan basis must be an object, not {plan.basis!r}")
     if type(plan.schema) is not int or plan.schema != SCHEMA:
         out.append(f"plan schema is {plan.schema!r}; this version reads schema {SCHEMA} only")
     if not _is_id(plan.account):
@@ -387,11 +427,16 @@ def validate(plan: Plan) -> list[str]:
             out += [f"{who}: {p}" for p in own]
             continue
 
-        if op.key in seen_key:
-            out.append(f"{who}: the same write twice: it has the same key {op.key} as "
-                       f"ops[{seen_key[op.key]}]. Remove one and re-plan.")
+        try:
+            key = op.key
+        except Exception as exc:  # a shape _op_problems does not reach, e.g. mixed region ids
+            out.append(f"{who}: its regions cannot be keyed ({exc})")
             continue
-        seen_key[op.key] = i
+        if key in seen_key:
+            out.append(f"{who}: the same write twice: it has the same key {key} as "
+                       f"ops[{seen_key[key]}]. Remove one and re-plan.")
+            continue
+        seen_key[key] = i
         if op.kind == "add_visit":
             same = (op.region, op.date_from, op.date_to)
             if same in adds:

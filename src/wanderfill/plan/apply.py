@@ -33,7 +33,7 @@ from ..api.errors import (
     UnknownWriteOutcome,
     VerificationFailed,
 )
-from .model import Op, Plan, basis_of, fingerprint, regions_touched, validate
+from .model import Op, Plan, basis_of, fingerprint, parse_when, regions_touched, validate
 
 # The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
 PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
@@ -646,18 +646,8 @@ def _region_span(r: dict) -> tuple[str, str] | None:
 
 
 def _when(text: str | None):
-    """A plan's date string, as either a real date or a bare year.
-
-    ``"2013"`` is not a shorthand for 1 January 2013. It is the profile saying
-    "some time in 2013", which the API stores natively and which YES reads
-    exactly as well as a precise date. Expanding it to a January the traveller
-    never claimed would invent evidence, so it stays a :class:`YearOnly`.
-    """
-    if not text:
-        return None
-    if len(text) == 4 and text.isdigit():
-        return YearOnly(int(text))
-    return dt.date.fromisoformat(text)
+    """A plan's date string, as either a real date or a bare year: see ``parse_when``."""
+    return parse_when(text)
 
 
 def _execute(client: NomadMania, op: Op):

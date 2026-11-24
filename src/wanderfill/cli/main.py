@@ -794,12 +794,15 @@ def cmd_show(args) -> int:
             if op.allow_vaguer:
                 bits.append("ALLOW_VAGUER — this may erase precision")
             if op.regions:
-                bits.append(f"{len(op.regions)} trip region(s): "
-                            + ",".join(str(r.get('id') if isinstance(r, dict) else r)
-                                       for r in op.regions))
+                if isinstance(op.regions, list):
+                    bits.append(f"{len(op.regions)} trip region(s): "
+                                + ",".join(str(r.get('id') if isinstance(r, dict) else r)
+                                           for r in op.regions))
+                else:  # not a plan the tool wrote; the problems below say so
+                    bits.append(f"regions={op.regions!r}")
             print(f"      {'  '.join(bits)}")
             print(f"      confidence {op.confidence}  |  {op.method}")
-            for e in op.evidence:
+            for e in op.evidence if isinstance(op.evidence, list) else [op.evidence]:
                 print(f"        - {e}")
     elif plan.ops:
         print("Run with -v to see dates, ids, quality and the evidence behind each op.")

@@ -2434,6 +2434,16 @@ REJECTED = {
     "year after year": lambda: _vplan(_vop(region=1, quality=3, date_from="2025", date_to="2024")),
     "year after a date": lambda: _vplan(_vop(region=1, quality=3, date_from="2025",
                                        date_to="2024-05-01")),
+    "year past what YearOnly takes": lambda: _vplan(_vop(region=1, quality=3, date_from="2101")),
+    "year before what YearOnly takes": lambda: _vplan(
+        _vop(region=1, quality=3, date_from="1899", date_to="1899")),
+    "a bad date on a mark_dare": lambda: _vplan(_vop("mark_dare", region=1, date_from="bad")),
+    "a date that is not text": lambda: _vplan(_vop("mark_kye", item=1, date_to=2024)),
+    "trip region year out of range": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2101}])),
+    "trip region year huge": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 10**30, "day_from": 1}])),
+    "allow_vaguer as text": lambda: _vplan(_vop(region=1, quality=3, allow_vaguer="false")),
     "same add, other quality": lambda: _vplan(
         _vop(region=1, quality=2, date_from="2024-01-01", date_to="2024-01-02"),
         _vop(region=1, quality=3, date_from="2024-01-01", date_to="2024-01-02")),
@@ -2541,3 +2551,103 @@ def test_a_plan_file_that_cannot_load_says_so_plainly(tmp_path, text):
     with pytest.raises(PlanInvalid) as e:
         Plan.load(path)
     assert str(path) in str(e.value)
+
+
+@pytest.mark.parametrize("late", [
+    pytest.param({"kind": "add_visit", "region": 2, "quality": 3, "date_from": "2101"},
+                 id="year out of YearOnly's range"),
+    pytest.param({"kind": "mark_dare", "region": 3, "date_from": "bad"},
+                 id="a bad date on a kind that does not use it"),
+    pytest.param({"kind": "add_visit", "region": 2, "quality": 3, "allow_vaguer": "false"},
+                 id="allow_vaguer as text"),
+])
+def test_a_late_op_execution_would_choke_on_sends_nothing(tmp_path, late):
+    """Execution parses every op's dates; validation used to parse some of them."""
+    from wanderfill.api.errors import PlanInvalid
+    from wanderfill.plan.apply import apply_plan
+
+    c, t = client({"user/status-quick": {"result": "OK", "uid": 7}})
+    plan = _vplan(_vop("mark_dare", region=1), Op(bucket="apply", **late))
+    with pytest.raises(PlanInvalid, match=r"ops\[1\]"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert t.sent == []
+
+
+@pytest.mark.parametrize("value,ok", [
+    ("false", False), ("true", False), (0, False), (1, False), (None, False),
+    (True, True), (False, True),
+])
+def test_allow_vaguer_must_be_a_real_bool(value, ok):
+    """A non-empty string is truthy, and client.update_visit then erases precision."""
+    from wanderfill.plan.model import validate
+
+    plan = _vplan(_vop("update_visit", region=1, visit_id=2, quality=3, allow_vaguer=value))
+    assert (validate(plan) == []) is ok
+
+
+@pytest.mark.parametrize("make", [
+    pytest.param(lambda d: d / "nope.json", id="missing"),
+    pytest.param(lambda d: d, id="a directory"),
+])
+def test_a_plan_path_that_cannot_be_read_says_so_plainly(tmp_path, make):
+    from wanderfill.api.errors import PlanInvalid
+
+    path = make(tmp_path)
+    with pytest.raises(PlanInvalid) as e:
+        Plan.load(path)
+    assert str(path) in str(e.value)
+
+
+WRONG = [None, 0, 1, -1, 1.5, True, "", "x", "2024-01-01", [], [1], [[]], {}, {"a": 1},
+         [{"id": [1], "quality": {}}], [{"id": 1, "quality": None}, {"id": 1, "quality": 2}]]
+
+
+@pytest.mark.parametrize("field", [
+    "kind", "bucket", "label", "region", "visit_id", "series", "item", "date_from", "date_to",
+    "quality", "regions", "allow_vaguer", "confidence", "method", "evidence"])
+@pytest.mark.parametrize("base", [
+    {"kind": "mark_dare", "region": 1},
+    {"kind": "add_visit", "region": 1, "quality": 3, "date_from": "2024"},
+    {"kind": "create_trip", "date_from": "2024-01-01", "date_to": "2024-01-02",
+     "regions": [{"id": 1, "quality": 3, "year_from": 2024}]},
+], ids=lambda b: b["kind"])
+def test_validate_never_raises_on_a_wrong_typed_field(base, field):
+    from wanderfill.plan.model import validate
+
+    for value in WRONG:
+        op = Op(**({"bucket": "apply"} | base | {field: value}))
+        assert isinstance(validate(Plan(account=7, ops=[op])), list), (field, value)
+        assert isinstance(validate(Plan(account=7, ops=[
+            Op(kind="mark_dare", bucket="apply", region=2), op])), list), (field, value)
+
+
+@pytest.mark.parametrize("field", ["account", "basis", "schema", "params", "sources"])
+def test_validate_never_raises_on_a_wrong_typed_plan_field(field):
+    from wanderfill.plan.model import validate
+
+    for value in WRONG:
+        plan = Plan(account=7, ops=[Op(kind="mark_dare", bucket="apply", region=1)])
+        setattr(plan, field, value)
+        assert isinstance(validate(plan), list), (field, value)
+
+
+def test_a_loaded_plan_with_regions_on_a_mark_dare_is_a_problem_not_a_crash(tmp_path):
+    from wanderfill.plan.model import validate
+
+    for regions in ("null", "1", "[1]"):
+        path = tmp_path / "p.json"
+        path.write_text('{"account": 7, "ops": [{"kind": "mark_dare", "bucket": "apply", '
+                        f'"region": 1, "regions": {regions}}}]}}')
+        assert validate(Plan.load(path))
+
+
+def test_show_renders_malformed_values_and_still_prints_the_problems(tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"account": 7, "ops": [
+        {"kind": "create_trip", "bucket": "apply", "regions": 42, "evidence": 5},
+        {"kind": "create_trip", "bucket": "apply", "regions": [1, None], "evidence": "x"},
+        {"kind": "mark_dare", "bucket": "apply", "region": [1], "label": None}]}))
+    assert cli.main(["show", str(path), "-v"]) == 0
+    assert "INVALID" in capsys.readouterr().out
