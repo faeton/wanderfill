@@ -3370,9 +3370,11 @@ def test_a_day_with_a_photo_that_is_nowhere_is_a_barrier():
     assert spans(find_runs(obs)) == [(1, 6)]
     assert spans(find_runs(obs, unplaced=[day(4)])) == [(1, 3), (5, 6)]
     assert spans(find_runs(obs, unplaced=[day(2), day(5), day(9)])) == [(1, 6)]
-    near = [*obs, ob(4, state="edge")]  # compatible, but for the photo with no place
+    near = [*obs, ob(4, state="edge")]  # its other photos are all here, and that stands
     assert spans(find_runs(near, gap_days=1)) == [(1, 6)]
-    assert spans(find_runs(near, gap_days=1, unplaced=[day(4)])) == [(1, 3), (5, 6)]
+    assert spans(find_runs(near, gap_days=1, unplaced=[day(4)])) == [(1, 6)]
+    away = [*obs, ob(4, state="edge"), ob(4, kind="fast")]
+    assert spans(find_runs(away, unplaced=[day(4)])) == [(1, 3), (5, 6)]
     both = {R: []}
     for gap, n in ((1, 2), (2, 2)):
         (row,) = sweep(obs, both, since=None, until=None, gaps=[gap], unplaced=[day(4)])

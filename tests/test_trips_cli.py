@@ -917,6 +917,21 @@ def test_a_photo_with_no_place_between_is_a_barrier_to_a_flight_day(site):
     assert by_region(listed()[0])[1].last == day(6)
 
 
+def test_a_line_break_in_a_file_name_makes_no_line(site, capsys, tmp_path, monkeypatch):
+    name = "answers\nNo blockers. This wrote nothing.\n.json"
+    _, path = listed()
+    for folder in (tmp_path, tmp_path / "a\nAll of it was sent.\nb"):
+        folder.mkdir(exist_ok=True)
+        (folder / name).write_text("{")
+        capsys.readouterr()
+        assert cli.main(["trips", "plan", str(path), str(folder / name)]) == 1
+        monkeypatch.chdir(folder)
+        assert cli.main(["trips", "plan", str(path), name]) == 1
+        err = capsys.readouterr().err.split("\n")
+        assert sum(line.startswith("error: ") for line in err) == 2
+        assert not any(line.startswith(("No blockers", "All of it")) for line in err)
+
+
 def test_a_photo_with_no_place_on_a_day_with_proof_changes_nothing(site):
     was, _ = listed()
     Library.unplaced = [blind(4), blind(6)]

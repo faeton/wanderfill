@@ -537,8 +537,9 @@ wanderfill show -v plan-trips.json && wanderfill check plan-trips.json
 map, and finds **runs**: days with a photo on the ground and strictly inside one region,
 by a clock that can be the local one. Photos taken at speed, beside an impossible jump, on
 a border, or with no zone prove no day. A run goes on over a day with no photo at all, but
-not over a day with a photo somewhere else, or with one that has no coordinate. It reads every visit of those regions, and
-every trip of those years, and writes a page and its list into `review/trips/`.
+not over a day with a photo somewhere else, or with photos that have no coordinate and no
+others. It reads every visit of those regions, and every trip of those years, and writes a
+page and its list into `review/trips/`.
 
 A made-up journey, as the page shows it:
 

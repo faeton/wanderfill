@@ -2688,9 +2688,23 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _print_error(exc: Exception) -> None:
-    """Names of files are in it, and lines of its own."""
-    print("error: " + "\n".join(_shown(line) for line in str(exc).split("\n")), file=sys.stderr)
+def _print_error(exc: Exception, args) -> None:
+    """Lines of its own are in it, and names of files, which are to make none."""
+    text = str(exc)
+    for part in _broken_names(args):
+        text = text.replace(part, _shown(part))
+    print("error: " + "\n".join(_shown(line) for line in text.split("\n")), file=sys.stderr)
+
+
+def _broken_names(args) -> list[str]:
+    """The names with a line break in them, longest first, of the paths this command was given.
+
+    By their parts, which are the same in a path that was made absolute.
+    """
+    given = [x for v in vars(args).values() for x in (v if isinstance(v, (list, tuple)) else [v])]
+    parts = {part for x in (*given, Path.cwd()) if isinstance(x, (str, Path))
+             for part in str(x).split("/") if "\n" in part}
+    return sorted(parts, key=len, reverse=True)
 
 
 def main(argv=None) -> int:
@@ -2699,10 +2713,10 @@ def main(argv=None) -> int:
     try:
         return args.func(args)
     except PlanInvalid as exc:  # a file that is not a plan, or a plan that is not valid
-        _print_error(exc)
+        _print_error(exc, args)
         return 1
     except WanderfillError as exc:
-        _print_error(exc)
+        _print_error(exc, args)
         return 2
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)

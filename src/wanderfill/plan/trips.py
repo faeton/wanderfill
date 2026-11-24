@@ -286,11 +286,12 @@ def find_runs(
     other, join when each day strictly between is compatible or silent, with at most
     ``gap_days`` - 1 silent days in a row. Compatible: every photo of the day is on the
     ground, not set aside, and placed in this region, on its edge or beside it. Silent: no
-    photo at all, and no ``track`` row in another region. Any other day is a barrier, and so
-    is one of ``unplaced``: the days with a photo of the owner's camera that has no location. What
-    else there is on a proof day does not matter: a day trip and a transfer leave proof of
-    two regions on one day. With ``flight_days`` a run may begin and end a day wider than its
-    proof; see :func:`_with_flight_days`.
+    photo at all, and no ``track`` row in another region. Any other day is a barrier.
+    ``unplaced`` are the days with a photo of the owner's camera that has no location: such a
+    day is not silent, and what its other photos make of it stands. What else there is on a
+    proof day does not matter: a day trip and a transfer leave proof of two regions on one
+    day. With ``flight_days`` a run may begin and end a day wider than its proof; see
+    :func:`_with_flight_days`.
 
     What comes back is ``fixed``, as ``not judged``: :func:`judge` says what each may be.
     """
@@ -305,7 +306,8 @@ def find_runs(
             only[o.day] = None
         if o.proof:
             proof[o.place.region][o.day].append(o)
-    only |= dict.fromkeys(unplaced)
+    for day in unplaced:
+        only.setdefault(day, None)
     rows: dict[dt.date, set[int | None]] = defaultdict(set)
     for day, region in track:
         rows[day].add(region)
