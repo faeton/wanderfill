@@ -43,6 +43,14 @@ macOS DETAILS
   to catch.
 - ``ZKIND = 0, ZKINDSUBTYPE = 10`` is a screenshot. A screenshot of a map is
   not a place you have been, so those go too.
+- ``ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBYBUNDLEIDENTIFIER`` is the app that put
+  the photo in the library, where Photos recorded it. The two filters above do
+  not catch an AirDropped photo (``com.apple.sharingd``) or one saved by a
+  messenger or a glasses importer, and those carry somebody else's coordinate or
+  a stale one. ``PhotoAsset.origin`` says which it is and ``origins=`` filters on
+  it; by default nothing is filtered. Older libraries have no importer, or not
+  even the column, and a missing importer is ``unknown``: never the owner's
+  camera, and not evidence that it was somebody else's.
 - ``ZADDITIONALASSETATTRIBUTES.ZCAMERACAPTUREDEVICE = 1`` means the front
   camera. That is as close as a database can get to "selfie", and NomadMania
   counts a selfie as stronger proof than an ordinary photo.
@@ -63,14 +71,34 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, get_args
 
 from .base import DayPoint, Track
 
 APPLE_EPOCH_OFFSET = 978307200  # 2001-01-01 in unix seconds
 
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
+
+Origin = Literal["own-camera", "airdrop", "other", "unknown"]
+ORIGINS: frozenset[str] = frozenset(get_args(Origin))
+
+
+def origin_of(importer: str | None) -> Origin:
+    """Where a photo came from, by the bundle id that put it in the library.
+
+    ``assets()``, ``points()`` and ``PhotoAsset.origin`` all ask this one function,
+    the queries included, so the two readings cannot come to differ about a photo.
+    """
+    if importer is None or importer == "":
+        return "unknown"
+    if importer == "com.apple.camera":
+        return "own-camera"
+    if importer == "com.apple.sharingd":
+        return "airdrop"
+    return "other"
+
 
 MINE = """
   a.ZLATITUDE BETWEEN -90 AND 90
@@ -130,9 +158,11 @@ SELECT date({LOCAL}, 'unixepoch')                 AS day,
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 WHERE {MINE}
-{WINDOW}GROUP BY day, lat, lon
+{WINDOW}{{origin}}GROUP BY day, lat, lon
 ORDER BY day, lat, lon
 """
+"""``{origin}`` is empty unless ``origins`` is set. ``_read`` fills it in, and the
+``{importer}`` below, once it has seen which columns the library has."""
 
 ASSET_QUERY = f"""
 SELECT a.ZUUID                                    AS uuid,
@@ -145,12 +175,14 @@ SELECT a.ZUUID                                    AS uuid,
        COALESCE(aa.ZCAMERACAPTUREDEVICE, 0)       AS capture_device,
        COALESCE(a.ZFAVORITE, 0)                   AS favorite,
        a.ZKIND                                    AS kind,
-       m.ZTITLE                                   AS place
+       m.ZTITLE                                   AS place,
+       {{importer}}                               AS importer,
+       a.ZDATECREATED + :epoch                    AS utc
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
 WHERE {MINE}
-{WINDOW}ORDER BY ts
+{WINDOW}{{origin}}ORDER BY ts
 """
 
 
@@ -162,6 +194,11 @@ class PhotoAsset:
     stores only what fits: with iCloud optimisation on, roughly half a library
     is a thumbnail whose original lives on Apple's servers. The exhibit is still
     real — it just has to be downloaded before it can be sent to anyone.
+
+    ``taken`` is the clock where the photo was taken, and is what dates it. It does
+    not order photos taken in different zones: over the date line the later photo
+    can have the earlier clock. ``taken_utc`` is the same instant without the zone,
+    and is the one to sort by or to take a speed from.
     """
 
     uuid: str
@@ -175,6 +212,13 @@ class PhotoAsset:
     selfie: bool = False
     favorite: bool = False
     video: bool = False
+    importer: str | None = None
+    taken_utc: dt.datetime | None = None
+
+    @property
+    def origin(self) -> Origin:
+        """``unknown`` when no importer was recorded, which is not ``own-camera``."""
+        return origin_of(self.importer)
 
     @property
     def date(self) -> dt.date:
@@ -216,6 +260,15 @@ class PhotosAppSource:
         case — you already imported everything up to some date.
     precision:
         Decimal places to round coordinates to. 3 is roughly 110 m.
+    origins:
+        Read only photos of these origins (``own-camera``, ``airdrop``, ``other``,
+        ``unknown``), in ``points()`` and ``assets()`` alike. ``None`` reads them
+        all. Not a filter to apply blind: where no importer was recorded every
+        photo is ``unknown``, so ``{"own-camera"}`` drops the owner's own photos too.
+
+    ``importer_column`` says whether the library has an importer column, and is
+    ``None`` until something has been read. Print it beside an empty filtered
+    reading: ``False`` means the library cannot say, not that it holds nothing.
     """
 
     library: Path = DEFAULT_LIBRARY
@@ -223,6 +276,21 @@ class PhotosAppSource:
     until: dt.date | None = None
     precision: int = 3
     name: str = "photos.app"
+    origins: frozenset[str] | None = None
+    importer_column: bool | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._origin_names()
+
+    def _origin_names(self) -> list[str] | None:
+        """The names to keep. A typo would keep nothing and read as an empty library."""
+        if self.origins is None:
+            return None
+        if not ORIGINS.issuperset(self.origins):
+            raise ValueError(
+                f"origins={self.origins!r}: each must be one of {', '.join(get_args(Origin))}"
+            )
+        return sorted(self.origins)
 
     def _copy_database(self, into: Path) -> Path:
         """Copy the live database aside before reading it.
@@ -245,10 +313,22 @@ class PhotosAppSource:
         return dst
 
     def _read(self, sql: str, params: dict) -> list[tuple]:
+        names = self._origin_names()
         with tempfile.TemporaryDirectory(prefix="wanderfill-photos-") as tmp:
             db = self._copy_database(Path(tmp))
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             try:
+                columns = con.execute("PRAGMA table_info(ZADDITIONALASSETATTRIBUTES)")
+                self.importer_column = any(
+                    c[1] == "ZIMPORTEDBYBUNDLEIDENTIFIER" for c in columns
+                )
+                importer = "aa.ZIMPORTEDBYBUNDLEIDENTIFIER" if self.importer_column else "NULL"
+                origin = ""
+                if names is not None:
+                    con.create_function("origin_of", 1, origin_of)
+                    keep = ", ".join(f"'{n}'" for n in names)  # four known names, checked above
+                    origin = f"  AND origin_of({importer}) IN ({keep})\n"
+                sql = sql.format(importer=importer, origin=origin)
                 return con.execute(sql, params).fetchall()
             finally:
                 con.close()
@@ -274,7 +354,7 @@ class PhotosAppSource:
         rows = self._read(ASSET_QUERY, self._bounds())
         for (
             uuid, ts, lat, lon, directory, filename,
-            original_name, capture_device, favorite, kind, place,
+            original_name, capture_device, favorite, kind, place, importer, utc,
         ) in rows:
             yield PhotoAsset(
                 uuid=str(uuid),
@@ -295,6 +375,8 @@ class PhotosAppSource:
                 selfie=int(capture_device or 0) == 1,
                 favorite=bool(favorite),
                 video=int(kind or 0) == 1,
+                importer=None if importer in (None, "") else str(importer),
+                taken_utc=dt.datetime.fromtimestamp(float(utc), dt.timezone.utc),
             )
 
     def points(self) -> Iterator[DayPoint]:

@@ -1896,6 +1896,133 @@ def test_grade_holds_rather_than_rejects():
     assert not v.ok and "single day" in v.reason
 
 
+def _frozen():
+    """12 photos over 2 h 45 min in the air, every one stamped with the same coordinate."""
+    d = dt.date(2025, 10, 22)
+    return [_fix(-17.553412, -149.606731, d, 9 + i * 15 // 60, i * 15 % 60) for i in range(12)]
+
+
+def test_grade_holds_a_frozen_fix():
+    """A phone repeated one stale coordinate for hours in flight, and 12 photos of
+    it read as a day on the ground."""
+    from wanderfill.grade import grade
+
+    for fixes in (_frozen(), _frozen()[::-1]):
+        v = grade(fixes)
+        assert not v.ok and v.repeated == 11
+        assert "one coordinate repeated" in v.reason
+        assert "frozen fix" in v.reason and "phone lying still" in v.reason
+        assert (v.days, v.points, v.span_hours, v.fast_legs, v.timed_legs) == (1, 1, 0.0, 0, 0)
+
+
+def test_grade_sees_the_jump_after_a_frozen_fix():
+    """Eleven legs of 0 km/h outvoted the one that showed the aircraft."""
+    from wanderfill.grade import grade, looks_airborne
+
+    d = dt.date(2025, 10, 22)
+    v = grade([*_frozen(), _fix(33.942512, -118.408134, d, 12, 5)])
+    assert not v.ok and "km/h" in v.reason and "airborne" in v.reason
+    assert (v.fast_legs, v.timed_legs, v.repeated) == (1, 1, 11)
+    # 500 km in the 20 minutes since the last photo, not in the 3 hours since the first.
+    near = [*_frozen(), _fix(-22.05, -149.606731, d, 12, 5)]
+    assert looks_airborne(near) == (1, 1) and not grade(near).ok
+    # ...and a leg into a run ends at its first photo, not its last.
+    into = [_fix(-22.05, -149.606731, d, 8, 40), *_frozen()]
+    assert looks_airborne(into) == (1, 1) and not grade(into).ok
+
+
+def test_grade_survives_a_jump_in_the_second_a_frozen_fix_ended():
+    """No time passed, so no speed was measured: the leg is skipped, as it always was."""
+    from wanderfill.grade import grade
+
+    v = grade([*_frozen(), _fix(33.942512, -118.408134, dt.date(2025, 10, 22), 11, 45)])
+    assert not v.ok and (v.points, v.fast_legs, v.timed_legs, v.repeated) == (2, 0, 0, 11)
+
+
+def test_grade_holds_one_coordinate_on_two_dates():
+    """Two photos with one coordinate either side of midnight were two distinct days."""
+    from wanderfill.grade import grade
+
+    a = _fix(-17.553412, -149.606731, dt.date(2025, 10, 22), 23, 50)
+    b = _fix(-17.553412, -149.606731, dt.date(2025, 10, 23), 0, 10)
+    v = grade([a, b])
+    assert not v.ok and v.days == 1 and v.repeated == 1
+    assert "one coordinate repeated" in v.reason
+    # A day that stands without the repeat still stands.
+    v = grade([a, b, _fix(-17.553, -149.607, dt.date(2025, 10, 24))])
+    assert v.ok and v.reason == "2 distinct days" and v.repeated == 1
+
+
+def test_grade_does_not_collapse_rounded_or_untimed_points():
+    """A coordinate rounded to a hundred metres repeats whenever somebody sits down,
+    and a day-level row repeats by construction. Neither is a frozen receiver."""
+    from wanderfill.grade import Verdict, grade
+
+    d = dt.date(2024, 3, 3)
+    for lat, lon in ((-33.401, -70.79), (-33.4012, -70.7934), (-33.0, -70.0)):
+        v = grade([_fix(lat, lon, d, 9 + i * 15 // 60, i * 15 % 60) for i in range(12)])
+        assert v == Verdict(
+            True, "one day, 12 points over 2.8h at ground speed", 1, 12, 2.75, 0, 11)
+    rows = [_fix(50.450123, 30.523456, dt.date(2013, 7, n)) for n in (1, 2, 2)]
+    assert grade(rows) == Verdict(True, "2 distinct days", 2, 3, 0.0, 0, 0)
+    assert grade(rows[1:]) == Verdict(False, "single day, 2 point(s)", 1, 2, 0.0, 0, 0)
+
+
+def test_grade_collapses_past_four_decimals_however_the_float_prints():
+    """Beside the equator a float prints as `2e-05`, which has no decimal point to
+    count from; one full-precision axis is enough, whichever it is."""
+    from wanderfill.grade import grade
+
+    d = dt.date(2024, 3, 3)
+    for lat, lon in ((0.00002, 32.5), (0.5, 0.000012), (0.5, 32.50001), (-17.55341, 32.5)):
+        v = grade([_fix(lat, lon, d, 9, 0), _fix(lat, lon, d, 12, 0)])
+        assert v.repeated == 1, (lat, lon)
+    for lat, lon in ((0.0001, 32.5), (0.5, 32.5001)):
+        assert grade([_fix(lat, lon, d, 9, 0), _fix(lat, lon, d, 12, 0)]).repeated == 0
+
+
+def test_an_untimed_row_neither_joins_nor_breaks_a_run():
+    from wanderfill.grade import grade
+
+    d = dt.date(2025, 10, 22)
+    row = _fix(-17.553412, -149.606731, d)
+    run = _frozen()
+    v = grade([*run[:6], row, *run[6:]])
+    assert (v.repeated, v.points, v.ok) == (11, 2, False)
+
+
+def test_a_coordinate_that_comes_back_is_not_a_run():
+    """Out and back to the same spot is movement; only consecutive repeats collapse."""
+    from wanderfill.grade import grade
+
+    d = dt.date(2024, 3, 3)
+    v = grade([_fix(*((-33.401234, -70.791234) if i % 2 else (-33.411234, -70.791234)), d,
+                    9 + i // 4, i % 4 * 15) for i in range(12)])
+    assert v.ok and (v.repeated, v.points, v.timed_legs) == (0, 12, 11)
+
+
+def test_grade_accepts_a_stay_that_moves_a_little():
+    """A phone that is awake jitters by metres; that is what a real stay looks like."""
+    from wanderfill.grade import grade
+
+    d = dt.date(2025, 10, 22)
+    v = grade([_fix(-17.553412 + i % 3 * 1e-5, -149.606731 + i % 2 * 1e-5, d,
+                    9 + i // 5, i % 5 * 12) for i in range(12)])
+    assert v.ok and "ground speed" in v.reason and v.repeated == 0
+
+
+def test_a_burst_in_one_spot_does_not_hold_a_day_that_moves():
+    from wanderfill.grade import grade
+
+    d = dt.date(2024, 3, 3)
+    walk = [_fix(-33.401234 + i * 0.001, -70.791234, d, 9 + i // 4, i % 4 * 15)
+            for i in range(12)]
+    burst = [_fix(walk[4].lat, walk[4].lon, d, 10, 0, n) for n in range(1, 9)]
+    v = grade([*walk, *burst])
+    assert v.ok and (v.points, v.repeated) == (12, 8)
+    assert v.reason == "one day, 12 points over 2.8h at ground speed"
+
+
 # --------------------------------------------------------------------------
 # writes are never retried, and a lost answer is not a failure
 # --------------------------------------------------------------------------
@@ -2133,8 +2260,12 @@ def test_a_trip_region_without_dates_is_held_to_the_trips():
 # ------------------------------------------- the Photos date window
 
 
-def _photos_library(tmp_path, shots):
-    """A minimal Photos.sqlite: (utc datetime, offset seconds, lat, lon) per photo."""
+def _photos_library(tmp_path, shots, importers=None):
+    """A minimal Photos.sqlite: (utc datetime, offset seconds, lat, lon) per photo.
+
+    ``importers`` is one bundle id per photo; without it the column is not there at
+    all, as in an older library.
+    """
     import sqlite3
 
     from wanderfill.sources.photos_app import APPLE_EPOCH_OFFSET
@@ -2156,6 +2287,12 @@ def _photos_library(tmp_path, shots):
                     (pk, f"u{pk}", ts, lat, lon))
         con.execute("INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (?,?,'f.jpg',0)",
                     (pk, offset))
+    if importers is not None:
+        con.execute("ALTER TABLE ZADDITIONALASSETATTRIBUTES"
+                    " ADD COLUMN ZIMPORTEDBYBUNDLEIDENTIFIER")
+        for pk, (importer, _) in enumerate(zip(importers, shots, strict=True), 1):
+            con.execute("UPDATE ZADDITIONALASSETATTRIBUTES"
+                        " SET ZIMPORTEDBYBUNDLEIDENTIFIER = ? WHERE ZASSET = ?", (importer, pk))
     con.commit()
     con.close()
     return db.parents[1]
@@ -2206,6 +2343,162 @@ def test_unset_bounds_are_open(tmp_path, mac_on_tahiti_time):
         (tomorrow, 14 * 3600, 1.87, -157.4),  # Kiritimati, UTC+14
     ])
     assert len(list(PhotosAppSource(library=lib).assets())) == 2
+
+
+# ------------------------------------------- who a photo came from
+
+# One of each, in this order: camera, AirDrop, glasses, no importer, empty importer.
+IMPORTERS = ["com.apple.camera", "com.apple.sharingd", "com.facebook.stella", None, ""]
+
+
+def _mixed_shots():
+    """Five photos on five days; u6 and u7 share a day and a rounded coordinate."""
+    noon = dt.datetime(2024, 5, 1, 12)
+    return [(noon + dt.timedelta(days=i), 7200, 48.0 + i, 16.123456) for i in range(5)] + [
+        (noon + dt.timedelta(days=5), 7200, 60.00012, 16.5),
+        (noon + dt.timedelta(days=5, hours=1), 7200, 60.00034, 16.5)]
+
+
+def _mixed_library(tmp_path):
+    return _photos_library(tmp_path, _mixed_shots(),
+                           [*IMPORTERS, "com.apple.camera", "com.apple.sharingd"])
+
+
+def test_a_library_without_the_importer_column_reads_as_unknown(tmp_path):
+    """An older library records no importer at all. It must still open, and a filter
+    on it must not look like a library with no photos in it."""
+    from wanderfill.sources import PhotosAppSource
+
+    lib = _photos_library(tmp_path, _mixed_shots())
+    src = PhotosAppSource(library=lib)
+    assert src.importer_column is None  # not read yet
+    assets = list(src.assets())
+    assert len(assets) == 7 and src.importer_column is False
+    assert {(a.importer, a.origin) for a in assets} == {(None, "unknown")}
+
+    own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
+    assert list(own.assets()) == [] and own.importer_column is False
+    own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
+    assert list(own.points()) == [] and own.importer_column is False
+    unknown = PhotosAppSource(library=lib, origins=frozenset({"unknown"}))
+    assert list(unknown.assets()) == assets
+    assert list(unknown.points()) == list(src.points())
+
+
+def test_unknown_is_never_own_camera(tmp_path):
+    """No importer is no statement. Reading it as the owner's camera would claim for
+    them every photo that arrived before Photos began recording where from."""
+    import sqlite3
+
+    from wanderfill.sources import PhotosAppSource
+
+    lib = _mixed_library(tmp_path)
+    src = PhotosAppSource(library=lib)
+    assets = {a.uuid: a for a in src.assets()}
+    assert src.importer_column is True
+    assert {u: a.origin for u, a in assets.items()} == {
+        "u1": "own-camera", "u2": "airdrop", "u3": "other", "u4": "unknown", "u5": "unknown",
+        "u6": "own-camera", "u7": "airdrop"}
+    assert assets["u3"].importer == "com.facebook.stella"
+    assert assets["u4"].importer is None and assets["u5"].importer is None
+
+    # A photo with no attributes row at all has no importer either.
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.execute("DELETE FROM ZADDITIONALASSETATTRIBUTES WHERE ZASSET = 1")
+    con.commit()
+    con.close()
+    own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
+    assert [a.uuid for a in own.assets()] == ["u6"]
+    assert [p.date for p in own.points()] == [dt.date(2024, 5, 6)]
+
+
+def test_points_and_assets_apply_the_same_origin_filter(tmp_path):
+    """Two readings that disagree prove a region the importer never claimed."""
+    from itertools import combinations
+
+    from wanderfill.sources import PhotosAppSource
+
+    lib = _mixed_library(tmp_path)
+    everything = list(PhotosAppSource(library=lib).assets())
+    names = ("own-camera", "airdrop", "other", "unknown")
+    for n in range(len(names) + 1):
+        for chosen in map(frozenset, combinations(names, n)):
+            src = PhotosAppSource(library=lib, origins=chosen)
+            assets = list(src.assets())
+            assert assets == [a for a in everything if a.origin in chosen]
+            weights = {}
+            for a in assets:
+                weights[(a.date, *a.key)] = weights.get((a.date, *a.key), 0) + 1
+            assert {(p.date, p.lat, p.lon): p.weight for p in src.points()} == weights
+    # The window still applies beside the filter.
+    src = PhotosAppSource(library=lib, since=dt.date(2024, 5, 2),
+                          origins=frozenset({"own-camera"}))
+    assert [a.uuid for a in src.assets()] == ["u6"]
+    assert [(p.date, p.weight) for p in src.points()] == [(dt.date(2024, 5, 6), 1)]
+
+
+def test_an_unknown_origin_name_is_refused(tmp_path):
+    """A typo that filters everything out reads as a library with nothing in it."""
+    from wanderfill.sources import PhotosAppSource
+
+    lib = _mixed_library(tmp_path)
+    for bad in (frozenset({"own-camera", "own_camera"}), "own-camera"):
+        with pytest.raises(ValueError) as exc:
+            PhotosAppSource(library=lib, origins=bad)
+        for name in ("own-camera", "airdrop", "other", "unknown"):
+            assert name in str(exc.value)
+    src = PhotosAppSource(library=lib)
+    src.origins = frozenset({"camera"})  # set afterwards, it is still refused
+    for read in (src.points, src.assets):
+        with pytest.raises(ValueError, match="own-camera"):
+            list(read())
+
+
+def test_no_filter_reads_exactly_what_it_read_before(tmp_path, mac_on_tahiti_time):
+    """Every plan and dossier so far was built from the unfiltered reading."""
+    from wanderfill.sources import DayPoint, PhotosAppSource
+
+    day = [dt.date(2024, 5, 1) + dt.timedelta(days=i) for i in range(6)]
+    points = [DayPoint(day[i], 48.0 + i, 16.123, source="photos.app") for i in range(5)]
+    points.append(DayPoint(day[5], 60.0, 16.5, source="photos.app", weight=2))
+    old = ("uuid", "taken", "lat", "lon", "directory", "filename", "original_name", "place",
+           "selfie", "favorite", "video")
+    rows = [(f"u{i}", (utc + dt.timedelta(hours=2)), lat, lon, "d", "f.jpg", "f.jpg", "",
+             False, False, False) for i, (utc, _, lat, lon) in enumerate(_mixed_shots(), 1)]
+    for name, lib in (("with", _mixed_library(tmp_path / "with")),
+                      ("without", _photos_library(tmp_path / "without", _mixed_shots()))):
+        src = PhotosAppSource(library=lib)
+        assert list(src.points()) == points, name
+        assert [tuple(getattr(a, f) for f in old) for a in src.assets()] == rows, name
+
+
+def test_taken_utc_orders_photos_across_a_date_line_flight(tmp_path, mac_on_tahiti_time):
+    """Auckland at 10:00 on the 2nd is before Tahiti at 16:00 on the 1st. The wall
+    clock, which dates both correctly, puts them in the wrong order."""
+    from wanderfill.sources import PhotosAppSource
+
+    lib = _photos_library(tmp_path, [
+        (dt.datetime(2026, 11, 1, 21, 0), 13 * 3600, -37.008, 174.785),   # 2 Nov 10:00
+        (dt.datetime(2026, 11, 2, 2, 0), -10 * 3600, -17.553, -149.607),  # 1 Nov 16:00
+    ])
+    assets = list(PhotosAppSource(library=lib).assets())
+    assert [a.uuid for a in sorted(assets, key=lambda a: a.taken)] == ["u2", "u1"]
+    flown = sorted(assets, key=lambda a: a.taken_utc)
+    assert [a.uuid for a in flown] == ["u1", "u2"]
+    assert flown[0].taken_utc == dt.datetime(2026, 11, 1, 21, 0, tzinfo=dt.timezone.utc)
+    assert flown[0].taken_utc.utcoffset() == dt.timedelta(0)
+    assert flown[1].taken_utc - flown[0].taken_utc == dt.timedelta(hours=5)
+    assert [a.taken for a in flown] == [dt.datetime(2026, 11, 2, 10), dt.datetime(2026, 11, 1, 16)]
+    assert all(a.taken.tzinfo is None for a in flown)
+
+
+def test_a_photo_asset_still_builds_from_its_old_positions():
+    from wanderfill.sources import PhotoAsset
+
+    a = PhotoAsset("u", dt.datetime(2024, 5, 1, 12), 48.0, 16.0, "d", "f.jpg", "o.jpg", "Wien",
+                   True, False, False)
+    assert (a.place, a.selfie, a.importer, a.taken_utc, a.origin) == (
+        "Wien", True, None, None, "unknown")
 
 # trip headers: update-visit moves the visit, never the trip around it
 # --------------------------------------------------------------------------

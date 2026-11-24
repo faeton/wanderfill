@@ -122,8 +122,10 @@ this command acts on.
 - **A region graded `none` is not a region you did not visit.** Batteries die
   and film has no EXIF. It is a region whose proof is somewhere other than this
   library — and knowing which ones those are, before anyone asks, is the point.
-- **Photos somebody sent you are excluded at the source**, along with
-  screenshots. A friend's geotagged photo is evidence about their travel.
+- **Photos somebody sent you in Messages are excluded at the source**, along with
+  screenshots. A friend's geotagged photo is evidence about their travel. One they
+  AirDropped, or that another app saved, is not excluded; `asset.origin` tells it
+  apart where the library recorded the importer.
 
 ### What "serial photos" is taken to mean
 
@@ -465,6 +467,21 @@ from wanderfill.sources.photos_app import load_photo_assets
 assets = load_photo_assets()          # uuid, timestamp, coordinate, selfie flag
 ```
 
+Not every photo in a library came from its owner's camera. Each asset says where
+it came from, and either reading can be limited to it:
+
+```python
+from wanderfill.sources import PhotosAppSource
+
+src = PhotosAppSource(origins=frozenset({"own-camera"}))   # or airdrop, other, unknown
+own = list(src.assets())
+src.importer_column                   # False when the library records no importer at all
+```
+
+Nothing is filtered unless you ask. A library from before Photos recorded the
+importer reads as `unknown` throughout, so that filter would drop your own photos
+from those years: compare the days by `asset.origin` rather than filtering blind.
+
 ## Do you have a home?
 
 The single question that changes the output most, and the one every other trip
@@ -540,6 +557,9 @@ cost a wrong write or a wrong number the first time.
 | UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
 | A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |
 | urllib asks for no compression, and the catalogue is 173 KB plain | Every request sends `Accept-Encoding: gzip`; `_inflate` also sniffs the magic bytes |
+| A phone can stamp one stale coordinate on every photo for hours in flight: 12 of them graded `ok` as ground speed, and two on two dates as two distinct days | `grade` counts consecutive photos with exactly one unrounded coordinate once, times the next leg from the last of them, and reports `Verdict.repeated`; held, not rejected, because a phone lying still looks the same; `test_grade_holds_a_frozen_fix` |
+| An AirDropped photo or a glasses import carries somebody else's coordinate or a stale one, and read like the owner's camera | `PhotoAsset.origin` from the importer Photos recorded, and `PhotosAppSource(origins=…)` for both readings; no importer is `unknown`, never `own-camera`, and `importer_column` says when a library has none; `test_unknown_is_never_own_camera` |
+| A photo's local clock runs backwards across the date line, so sorting by it puts the arrival before the departure | `PhotoAsset.taken_utc` is the absolute time; `taken` still dates the photo; `test_taken_utc_orders_photos_across_a_date_line_flight` |
 | Photos stores absolute time and the offset apart, so a date window cut at the Mac's midnight trims or pads the edge days when the Mac and the camera are in different zones | `WINDOW` cuts on the photo's own wall clock; `test_since_is_the_photos_date_not_the_macs` |
 
 ## KYE: the one list with no judgement call in the geometry
@@ -561,7 +581,9 @@ real profile's 105 candidate cells:
 The twelve held include two mid-Pacific boxes 1,100 km apart 2.5 hours apart, a
 flight over Yemen at 305 km/h, and two airport layovers — every one of which a
 point-count test marks and a speed test refuses. Held is not rejected: the user
-decides, which is the same rule the series thresholds follow.
+decides, which is the same rule the series thresholds follow. Photos in a row with
+exactly one coordinate have since been counted once, because a phone in flight can
+repeat a stale fix for hours; a phone lying still does too, so that is also a hold.
 
 ## Series: what the measurements actually showed
 

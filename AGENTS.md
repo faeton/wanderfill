@@ -349,6 +349,15 @@ apart 2.5 hours apart, a flight over Yemen at 305 km/h, and two airport layovers
 that a point-count test would have waved through. Hold those for the user; do
 not reject them, and do not mark them.
 
+**Give `grade` the raw coordinate, not a rounded one.** A phone can repeat one
+stale fix for hours in flight, and twelve copies of it look like a day on the
+ground. `grade.grade` counts consecutive photos with exactly one coordinate once
+and reports how many in `Verdict.repeated`, but only where a coordinate has more
+than four decimals: rounded and day-level points repeat anyway and are graded as
+they are. A cell held for this may equally be a phone lying still, so it is a
+hold like the others. Order the photos by `PhotoAsset.taken_utc`; the local
+clock runs backwards across the date line.
+
 **TCC is not a series either.** The Travelers' Century Club list has 330
 destinations and NomadMania derives almost all of them from your regions — no
 endpoint lists those, only `score_tcc` on the profile. The exceptions are the
@@ -444,9 +453,17 @@ The technical parts that are easy to get wrong:
   glasses importer stamped a stale coordinate from another country on photos
   taken a sea away, and AirDrop put a second person in one capital while the
   camera was still in another country. Before a write, split the days by
-  importer: when the own camera (`com.apple.camera`) is somewhere else the
-  same day, the other photo is not evidence. Older libraries have no importer
-  recorded at all, so this is a check to run, not a filter to apply blind.
+  `PhotoAsset.origin` (`own-camera`, `airdrop`, `other` or `unknown`; the bundle
+  id itself is `importer`): when the own camera (`com.apple.camera`) is
+  somewhere else the same day, the other photo is not evidence.
+  `PhotosAppSource(origins=frozenset({"own-camera"}))` reads one origin only, in
+  `points()` and `assets()` alike. Nothing uses it by default: `evidence` and
+  `history` read every origin. Older libraries have no importer recorded at
+  all, and those photos are `unknown`, never `own-camera`, so this is a check to
+  run, not a filter to apply blind: it would drop the owner's own photos from
+  those years. `importer_column` is `False` when the library has no such column;
+  a filtered reading that came back empty from one says nothing. An `unknown`
+  photo is not shown to be anybody's.
 - Attribute exhibits against the **live tiles**, and carry the
   nearest-polygon flag through to the output. Offering a photo taken across a
   border as proof of the region on this side of it is precisely the accusation
@@ -783,7 +800,7 @@ Left to right, and the invariant is structural rather than a convention:
 | `plan/series.py` | shortlists and the recall curve, never an auto-marker |
 | `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |
 | `geo/tiles.py` | gzip sniffing, polygons, the series harvest, and which tiles `failed` |
-| `grade.py` | is-this-coordinate-a-visit, by speed and time spread |
+| `grade.py` | is-this-coordinate-a-visit, by speed and time spread, a repeated coordinate counted once |
 | `evidence.py`, `share.py` | read-only leaves; nothing in the write path imports them |
 | `api/cache.py` | the slow-link cache for `history`, `evidence` and `share` only |
 
