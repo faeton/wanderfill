@@ -86,7 +86,7 @@ bulk reads four at a time.
 | `maps/get-visited-dare-ids-simple` | same for DARE; **trust this** over `get-regions-mqp` |
 | `maps/get-visited-countries-ids-simple` | same for countries |
 | `quickEnter/get-visits-to-region` `{region}` | every visit record for one region |
-| `trips/get-trips-for-year-app` `{year}` | trip index by year |
+| `trips/get-trips-for-year-app` `{year}` | trip index by year. The order of the trips varies between reads, and so does `statistics`; the entries were otherwise identical over 15 reads on 2026-11-24 |
 | `trips/get-trip` `{trip_id}` | `trip`: one trip with its regions; its header `date_from` and `date_to` are `YYYY-MM-DD` strings (read on one live trip, 2026-11-24) |
 | `slow/get-slow-app` | 196 SLOW/YES countries: visited flag, `visited_regions`, `slow11/31/101`, per-country `yes`. **Not** the UN+ list. |
 | `profile/get-profile-data` `{profile_id}` | what the profile page draws: `scores.score_un`, `score_unp` (UN+), `score_nm`, `score_mqp` (DARE), `score_kye`, `score_tcc`, `score_yes`, `score_slow*`, `score_deep`, `score_whs`, `rank_nm`, `rank_country`; plus `user_data`, `friends`, `series`. Missing `profile_id` answers `Missing params: profile_id.` |

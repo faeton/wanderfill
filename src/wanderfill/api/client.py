@@ -282,25 +282,38 @@ def _trip_rows(trip: dict) -> list[tuple]:
                    r.get("date_from"), r.get("date_to")) for r in trip["regions"])
 
 
+def _by_content(raw: object) -> str:
+    return json.dumps(raw, sort_keys=True)
+
+
+def _regions_in_order(trip: dict) -> dict:
+    """The trip with its region rows in a fixed order, every one of them and every field kept."""
+    rows = trip.get("regions")
+    return trip | {"regions": sorted(rows, key=_by_content)} if isinstance(rows, list) else trip
+
+
 def _trip_seen(trip: dict) -> tuple:
     """A trip's header, description and every region row, as sent by the server."""
     return (trip.get("date_from"), trip.get("date_to"), trip.get("description") or "",
-            sorted(json.dumps(r, sort_keys=True) for r in trip.get("regions") or []))
+            sorted(map(_by_content, trip.get("regions") or [])))
 
 
 def _listing_changes(
     was: dict[int, list[dict]], now: dict[int, list[dict]], *, apart: frozenset[int] = frozenset()
 ) -> list[str]:
-    """Every difference between two listings of the same years, the trips in ``apart`` left out."""
+    """Every difference between two listings of the same years, the trips in ``apart`` left out.
+
+    The order of the trips, which the server does not keep from read to read, and of
+    the regions in one is not a difference. A field is, and how often a row is there.
+    """
     out = []
     for year in sorted(was):
         sides: list[dict[int, list[dict]]] = [{}, {}]
         for side, entries in zip(sides, (was[year], now[year]), strict=True):
             for t in entries:
-                side.setdefault(_whole(t["id"]) or 0, []).append(t)
+                side.setdefault(_whole(t["id"]) or 0, []).append(_regions_in_order(t))
         for tid in sorted((sides[0].keys() | sides[1].keys()) - apart):
-            old, new = (sorted(side.get(tid, []), key=lambda t: json.dumps(t, sort_keys=True))
-                        for side in sides)
+            old, new = (sorted(side.get(tid, []), key=_by_content) for side in sides)
             if old == new:
                 continue
             if not old:
@@ -1413,8 +1426,8 @@ class NomadMania:
             return [t for trips in listing.values() for t in trips if _whole(t["id"]) == tid]
 
         def as_asked(t: dict) -> bool:
-            return (t.get("date_from"), t.get("date_to")) == saving.now and ids == {
-                int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
+            return (t.get("date_from"), t.get("date_to")) == saving.now and sorted(ids) == sorted(
+                int(r.get("id", r.get("region"))) for r in t.get("regions") or [])
 
         def candidates(listing: dict[int, list[dict]]) -> list[int]:
             return readback(lambda: sorted({

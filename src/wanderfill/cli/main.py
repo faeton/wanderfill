@@ -1175,7 +1175,7 @@ def _fmt_visit(v) -> str:
 
 def _undo(
     args, *, kind: str, key: str, label: str, preview: list[str], snapshot: object, run,
-    on_open=None,
+    on_open=None, on_close=None,
 ) -> int:
     """The shared shape of every ``wanderfill delete`` kind, and of ``sync-header``.
 
@@ -1200,6 +1200,8 @@ def _undo(
 
     ``on_open`` is given the error that left an entry open and the journal's path,
     and returns lines to print below it: what is known about the state it left.
+    ``on_close`` is given the path and returns lines for an entry that closed, refused
+    or done.
     """
     from types import SimpleNamespace
 
@@ -1255,6 +1257,8 @@ def _undo(
                     raise
                 journal.note(op, None, error=str(exc))
                 print(f"refused, nothing changed: {exc}")
+                for line in on_close(journal.path) if on_close else ():
+                    print(line)
                 return 1
             journal.note(op, removed)
         except (Exception, KeyboardInterrupt) as exc:
@@ -1267,6 +1271,8 @@ def _undo(
             print(f"error: {exc}")
             return 1
         print(f"done; server confirms. journal: {journal.path}")
+        for line in on_close(journal.path) if on_close else ():
+            print(line)
         return 0
 
 
@@ -1465,6 +1471,7 @@ def cmd_sync_header(args) -> int:
         print(f"trip {ident}: refused, nothing was sent: {exc}")
         return 2
     names = {int(r["id"]): str(r.get("region_name") or "")[:50] for r in shown.trip["regions"]}
+    key = f"sync_trip_header:{ident}"
     began: list[bool] = []
     result: dict = {}
 
@@ -1479,21 +1486,36 @@ def cmd_sync_header(args) -> int:
         )
         return result
 
-    def new_ids() -> list[str]:
+    def saved_copy(journal) -> str:
+        return ("The saved copy of the trip and of every visit in its regions is the 'snapshot' of "
+                f"the last open line of {key} in {journal}.")
+
+    def what_changed() -> list[str]:
+        def ids(name: str, old: int, new: int) -> str:
+            return f"{name} {old} → {new}" if old != new else f"{name} {old} kept its id"
+
+        pairs = [(ident, result["trip_id"]), *((v["old"], v["new"]) for v in result["visits"])]
         return [
-            f"trip {ident} → {result['trip_id']}",
-            *(f"  region {v['region']}: visit {v['old']} → {v['new']}" for v in result["visits"]),
-            "Record the new ids: whatever names the old ones is stale.",
+            f"{ids('trip', *pairs[0])}; it reads {'..'.join(result['now'])}, was "
+            f"{'..'.join(result['was'])}",
+            *(f"  region {v['region']}: {ids('visit', v['old'], v['new'])}"
+              for v in result["visits"]),
+            "Record the new ids: whatever names the old ones is stale."
+            if any(old != new for old, new in pairs) else "No id changed.",
         ]
+
+    def at_the_end(journal) -> list[str]:
+        return [*(what_changed() if result else ()), saved_copy(journal)]
 
     def what_is_known(exc, journal) -> list[str]:
         """Said under an entry left open, and nothing here that reads have not shown."""
         if not began or getattr(exc, "nothing_sent", False):
-            return [f'Nothing was sent: trip {ident} was not saved. Its "done" line is one with '
-                    '"error" set.']
+            return [f"Nothing was sent: trip {ident} was not saved by this run. To close the "
+                    'entry, the owner appends a "done" line with "error" set.',
+                    saved_copy(journal)]
         if result:
             lines = ["The save was read back and proved, only its journal line is missing:",
-                     *new_ids()]
+                     *what_changed()]
         elif hasattr(exc, "known"):
             lines = ["What the server showed afterwards:", *(f"  {x}" for x in exc.known),
                      "  new trips that could be its replacement: "
@@ -1507,13 +1529,10 @@ def cmd_sync_header(args) -> int:
                 f"{shown.now[0]}..{shown.now[1]}; and `wanderfill export --full`, which has the "
                 f"trip_id of every visit, for the visits of region(s) "
                 f"{', '.join(map(str, shown.owned))}.")
-        lines.append(f"The saved copy of the trip and of every visit in its regions is the "
-                     f"'snapshot' of the open entry in {journal}. This tool sends nothing again "
-                     "and repairs nothing.")
-        return lines
+        return [*lines, saved_copy(journal), "This tool sends nothing again and repairs nothing."]
 
-    rc = _undo(
-        args, kind="sync_trip_header", key=f"sync_trip_header:{ident}",
+    return _undo(
+        args, kind="sync_trip_header", key=key,
         label=f"asked to widen trip {ident}, {shown.was[0]}..{shown.was[1]}, to "
               f"{shown.now[0]}..{shown.now[1]}, {len(shown.owned)} region(s)",
         preview=[
@@ -1535,11 +1554,8 @@ def cmd_sync_header(args) -> int:
                   "visits": [_visit_snapshot(v) for there in shown.visits.values() for v in there]},
         run=run_sync,
         on_open=what_is_known,
+        on_close=at_the_end,
     )
-    if rc == 0 and result:
-        for line in new_ids():
-            print(line)
-    return rc
 
 
 # ------------------------------------------------------------------ parser

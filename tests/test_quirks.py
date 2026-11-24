@@ -3477,6 +3477,125 @@ def test_sync_header_compares_the_listing_of_every_year_of_the_span():
                 c.sync_trip_header(7)
 
 
+def _entry(tid=3, *regions, **over):
+    return {"id": tid, "date_from": "2026-03-01", "date_to": "2026-03-04",
+            "regions": [{"id": r, "quality": q} for r, q in regions]} | over
+
+
+def test_listing_changes_ignore_order_and_nothing_else():
+    """The server gives the trips in another order on every read (2026-11-24). The order
+    of a trip's regions is no more a change than that, and every field and count is."""
+    from wanderfill.api.client import _listing_changes
+
+    a, b = _entry(3, (4, 3), (5, 2), (4, 1)), _entry(9, (1, 1))
+    shuffled = _entry(3, (4, 1), (4, 3), (5, 2))
+    assert _listing_changes({2026: [a, b]}, {2026: [b, shuffled]}) == []
+    # the same trip twice in one year, each copy in its own order, and paired by content
+    twice = [_entry(3, (4, 3), (5, 2)), _entry(3, (5, 2), (4, 3), date_to="2026-03-09")]
+    other = [_entry(3, (4, 3), (5, 2), date_to="2026-03-09"), _entry(3, (5, 2), (4, 3))]
+    assert _listing_changes({2026: twice}, {2026: other}) == []
+    for now in (
+        _entry(3, (4, 3), (5, 2)),                   # a row gone
+        _entry(3, (4, 3), (5, 2), (4, 1), (4, 1)),   # a row twice
+        _entry(3, (4, 3), (5, 2), (5, 2)),           # as many rows, another one twice
+        _entry(3, (4, 3), (5, 3), (4, 1)),           # a row's field
+        _entry(3, (4, 3), (5, 2), (6, 1)),           # a row's region
+        _entry(3, regions=None),
+    ):
+        assert _listing_changes({2026: [a, b]}, {2026: [b, now]}) == [
+            "2026: trip 3 changed: regions"], now
+    assert _listing_changes({2026: [a, b]}, {2026: [_entry(3, (5, 2), (4, 3), (4, 1), extra=1), b]}
+                            ) == ["2026: trip 3 changed: extra"], "only what did change"
+    assert _listing_changes({2026: twice}, {2026: [twice[0], _entry(3, (5, 2), (4, 3))]}) == [
+        "2026: trip 3 changed: date_to"]
+    assert _listing_changes({2026: twice}, {2026: twice[:1]}) == [
+        "2026: trip 3 is listed 1 time(s), was 2"]
+
+
+def test_sync_header_is_not_stopped_by_regions_or_trips_in_another_order(
+        monkeypatch, tmp_path, capsys):
+    """A good save stayed open over "trip 3 changed: regions"; they were the same ones."""
+    def shuffle(t):
+        t.trips = dict(reversed(t.trips.items()))
+        for trip in t.trips.values():
+            trip["regions"].reverse()
+
+    def server(save):
+        t = TripServer([dict(r) for r in TWO], ("2026-10-27", "2026-10-29"), on_save=save)
+        t.trips[3]["regions"] = [_row(4), _row(5), _row(6)]
+        t.visits = {k: list(reversed(v)) for k, v in t.visits.items()}
+        return t
+
+    def refuse(t, fields):
+        shuffle(t)
+        raise ApiError("trips/update-trip", "Database error.", {})
+
+    assert _sync_cli(monkeypatch, tmp_path, server(_ok_but(shuffle)), *SYNC) == 0
+    # a refusal is proved over a trip whose own rows come back in another order too
+    assert _sync_cli(monkeypatch, tmp_path, server(refuse), *SYNC) == 1
+    assert "refused, nothing changed" in capsys.readouterr().out
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open", "done"] * 2
+    for change in (lambda t: t.trips[3]["regions"].append(_row(5)),
+                   lambda t: t.trips[3]["regions"].pop(0)):
+        def save(t, fields, change=change):
+            t.replace(fields)
+            shuffle(t)
+            change(t)
+            return {"result": "OK"}
+        with pytest.raises(VerificationFailed, match="trip 3 changed: regions"):
+            NomadMania(token="fake", transport=server(save)).sync_trip_header(7)
+
+
+def test_sync_header_replacement_that_lists_its_region_twice_is_not_it():
+    new = _visits((101, 8, 5, *FIXED), (50, None, 3, "2025-10-22", "2025-10-30"))
+    c, _ = _sync([_trip(7, "2026-10-31", "2026-11-02"), NOT_FOUND, _trip(8, *FIXED)],
+                 [OLD, new], [_listing(STALE)] + [_listing((8, *FIXED, [1266, 1266]))] * 2)
+    with pytest.raises(VerificationFailed, match="0 NEW trip"):
+        c.sync_trip_header(7)
+
+
+def test_sync_header_that_kept_an_id_does_not_call_it_stale(monkeypatch, tmp_path, capsys):
+    """"The old ids are stale", over a save that changed none."""
+    def in_place(t, fields):
+        t.trips[7].update(date_from=fields["date_from"], date_to=fields["date_to"])
+        return {"result": "OK"}
+
+    t = _two()
+    t.on_save = in_place
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 0
+    said = capsys.readouterr().out.split("done; server confirms")[1]
+    assert "trip 7 kept its id" in said and "No id changed" in said
+    assert "2026-10-25..2026-10-30" in said and "was 2026-10-27..2026-10-29" in said
+    assert "stale" not in said and "→" not in said
+
+
+SAVED_COPY = "saved copy of the trip and of every visit in its regions is the 'snapshot' of"
+
+
+def test_sync_header_says_where_the_saved_copy_is_however_it_ends(monkeypatch, tmp_path, capsys):
+    def refused(t, fields):
+        raise ApiError("trips/update-trip", "Database error.", {})
+
+    def stale(t, action, fields):
+        if len([a for a, _ in t.sent if a == "trips/get-trip"]) == 2:
+            t.trips[7]["description"] = "x"
+
+    for t, rc, word in (
+        (TripServer(), 0, "done; server confirms"),
+        (TripServer(on_save=refused), 1, "refused, nothing changed"),
+        (TripServer(on_read=stale), 1, "refused, nothing changed"),
+        (TripServer(on_save=_lost_after(land=True)), 1, "left OPEN"),
+    ):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == rc
+        said = capsys.readouterr().out
+        assert word in said
+        (line,) = [x for x in said.splitlines() if SAVED_COPY in x]
+        assert str(tmp_path / "deletes-79597.ndjson") in line
+        assert "snapshot" in _journal_lines(tmp_path)[0]
+
+
 def test_sync_header_that_sent_nothing_says_so(monkeypatch, tmp_path, capsys):
     """"Whether trip 7 is still there is not known" over a request that never went."""
     from wanderfill.api.errors import UnreadableAnswer
@@ -3510,8 +3629,12 @@ def test_sync_header_that_sent_nothing_says_so(monkeypatch, tmp_path, capsys):
         assert [e["phase"] for e in lines] == phases and not _posts(t)
         assert "othing was sent" in said
         assert "not known" not in said and "replacement" not in said
+        assert SAVED_COPY in said
         if phases == ["open"]:
-            assert '"error" set' in said.split("othing was sent")[1]
+            tail = said.split("othing was sent")[1]
+            assert 'the owner appends a "done" line with "error" set' in tail
+            assert "Its " not in tail, "no such line is there yet"
+            assert tail.index("appends") < tail.index(SAVED_COPY)
         else:
             assert "nothing was sent" in lines[1]["error"] and lines[1]["result"] is None
         for e in lines:  # the label is on the done line too, and is what was asked for
