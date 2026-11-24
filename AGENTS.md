@@ -612,8 +612,21 @@ At apply time:
   nor skip it: read the server back, then rebuild the plan from the live profile,
   without that trip if it is already there. A rebuilt plan whose basis records
   when it was taken has its own journal, and drift compares with what that plan
-  saw, so neither would stop a second copy. `check` lists the refusal too.
-- Snapshot everything first, and refuse to start if the snapshot fails.
+  saw, so neither would stop a second copy; the next rule stops only one with
+  the same full dates. `check` lists the refusal too.
+- Refuse a visit, added on its own or by a trip, whose region and full dates
+  match a visit already on the profile, trip-owned or not, or another op in the
+  plan. `check` lists each one. Undated and year-only visits, and dates that
+  merely overlap, are not compared, and neither is an `update_visit`: look for
+  those yourself.
+- Snapshot everything first, and refuse to start if the snapshot fails. A reply
+  without its list, or with an id that is not a number, is a failure and not an
+  empty profile.
+- Read every series, KYE, DARE and TCC list the plan ticks before the first
+  write, and never send an item that is already in it: a series tick is a toggle,
+  and a repeat may undo it. Such an op is skipped, not journalled, and printed as
+  `already ticked, not sent`. The series and KYE lists as they were are in the
+  snapshot file under `ticked`.
 - Cap the number of writes per run.
 - Journal every request and its response, including the id of any phantom trip
   created behind your back.
@@ -644,8 +657,8 @@ is not a pass; read the server yourself before reporting the write as done.
 
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
-duplicate ops and every open or unreadable journal entry of the account without
-sending a write.
+duplicate ops, second copies, lists that cannot be read, and every open or
+unreadable journal entry of the account without sending a write.
 
 ---
 

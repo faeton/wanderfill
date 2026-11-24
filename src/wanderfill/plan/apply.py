@@ -33,7 +33,16 @@ from ..api.errors import (
     UnknownWriteOutcome,
     VerificationFailed,
 )
-from .model import Op, Plan, basis_of, fingerprint, parse_when, regions_touched, validate
+from .model import (
+    TRIP_REGION_FIELDS,
+    Op,
+    Plan,
+    basis_of,
+    fingerprint,
+    parse_when,
+    regions_touched,
+    validate,
+)
 
 # The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
 PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
@@ -211,10 +220,103 @@ def trips_under_old_keys(journal: Journal, plan: Plan) -> list[str]:
         "so whether it is this trip is not known. Read the server back, then "
         "rebuild the plan from the live profile, without this trip if it is already there: "
         "a rebuilt plan whose basis records when it was taken has its own journal, and "
-        "drift compares with what that plan saw, so neither would stop a second copy."
+        "drift compares with what that plan saw, so neither would stop a second copy, "
+        "and only one with the same two full dates is refused."
         for i, op in enumerate(plan.ops)
         if op.bucket == "apply" and op.legacy_key in done and op.key not in done
     ]
+
+
+def _full_days(start: object, end: object) -> tuple[str, str] | None:
+    """Both ends as ISO days, or ``None`` if either is absent, vague or unreadable."""
+    try:
+        days = [parse_when(start), parse_when(end)]
+    except ValueError:
+        return None
+    if not all(isinstance(d, dt.date) for d in days):
+        return None
+    return days[0].isoformat(), days[1].isoformat()
+
+
+def _new_visits(op: Op) -> Iterator[tuple[int, tuple[str, str]]]:
+    """Each region and its full dates that ``op`` would add a visit to."""
+    if op.kind == "add_visit":
+        if op.region is not None and (days := _full_days(op.date_from, op.date_to)):
+            yield int(op.region), days
+    elif op.kind == "create_trip":
+        for r in op.regions:
+            own = any(r.get(f) not in (None, "") for f in TRIP_REGION_FIELDS
+                      if f not in ("id", "quality", "hidden"))
+            span = _region_span(r) if own else (op.date_from, op.date_to)
+            if span and (days := _full_days(*span)):
+                yield int(r["id"]), days
+
+
+def doubles(snapshot: dict, ops: Sequence[Op]) -> list[str]:
+    """One line per region visit in ``ops`` that is on the profile, or in ``ops``, already.
+
+    A plan rebuilt after its trip landed has that trip in its own basis and a
+    journal of its own, so neither stops a second copy; ``verify`` would only
+    report it afterwards. Pass the ops that would be *sent*: one already done in
+    this plan's journal is on the profile because of it.
+
+    Only full dates are compared. Two real visits can share a year, or no date
+    at all, so those are not evidence of a copy. A trip region without dates of
+    its own takes the trip's header. Whether a trip owns the existing visit does
+    not matter: both kinds count.
+    """
+    out = []
+    planned: dict[tuple, Op] = {}
+    for op in ops:
+        for region, days in _new_visits(op):
+            there = [v for v in snapshot.get("visits", {}).get(str(region), [])
+                     if _full_days(v.get("date_from"), v.get("date_to")) == days]
+            first = planned.setdefault((region, days), op)
+            if there:
+                v = there[0]
+                owner = f"trip {v['trip_id']}" if v.get("trip_id") else "standalone"
+                why = f"is on the profile already (visit {v.get('id')}, {owner})"
+            elif first is not op:
+                why = f"is in the plan already, from {first.kind} {first.label!r}"
+            else:
+                continue
+            out.append(f"{op.kind} {op.label!r}: region {region} for {days[0]}..{days[1]} {why}; "
+                       "sending it would make a second copy")
+    return out
+
+
+def tick_of(op: Op) -> tuple[tuple[str, int], int] | None:
+    """Which hand-ticked list ``op`` ticks, as :func:`ticked_before` keys it, and the id."""
+    if op.kind == "tick_series":
+        return ("series", op.series), op.item
+    if op.kind == "mark_dare":
+        return ("dare", 0), op.region
+    if op.kind in ("mark_kye", "mark_tcc"):
+        return (op.kind.removeprefix("mark_"), 0), op.item
+    return None
+
+
+def ticked_before(
+    client: NomadMania, ops: Iterable[Op], snapshot: dict | None = None
+) -> dict[tuple[str, int], set[int]]:
+    """What is ticked now in every list ``ops`` would tick, one strict read per list.
+
+    Keys are ``("series", id)``, ``("kye", 0)``, ``("dare", 0)`` and ``("tcc", 0)``.
+    DARE and TCC come from ``snapshot`` where it holds them, since it has just
+    read them strictly; TCC alone is 29 requests.
+    """
+    held = {"dare": "visited_dare", "tcc": "visited_tcc"}
+    read = {"series": client.series_ticked, "kye": lambda _: client.kye_ticked(),
+            "dare": lambda _: client._dare_strict(), "tcc": lambda _: client.visited_tcc_ids()}
+    out: dict[tuple[str, int], set[int]] = {}
+    for op in ops:
+        tick = tick_of(op)
+        if tick is None or tick[0] in out:
+            continue
+        name, n = key = tick[0]
+        have = (snapshot or {}).get(held.get(name))
+        out[key] = read[name](n) if have is None else set(have)
+    return out
 
 
 @contextmanager
@@ -259,6 +361,9 @@ class ApplyReport:
     failed: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    # Labels of the ops skipped because the item was ticked already. Nothing was
+    # sent or journalled for them; they are in `skipped` too.
+    already: list[str] = field(default_factory=list)
     # Filled by `verify()` after the writes: what the server actually says now.
     verified: dict = field(default_factory=dict)
 
@@ -305,14 +410,23 @@ def apply_plan(
        writing somebody's history onto the wrong profile.
     4. No other run may hold the account's lock, from here to the read-back.
     5. No write may be open in any of the account's journals, this plan's or not.
-    6. A snapshot must be taken successfully. If state cannot be captured, it
-       cannot be compared afterwards, so the run does not start.
+    6. A snapshot must be taken successfully, and strictly: a reply without its
+       list is not an empty profile. If state cannot be captured, it cannot be
+       compared afterwards, so the run does not start.
     7. Live state must match the fingerprint taken at plan time. A profile that
        moved needs a new plan, not an optimistic write.
     8. The op count must fit under ``max_writes``. A ceiling means a logic bug
        cannot rewrite an entire profile in one go.
     9. No trip may be done in this plan's journal under the key earlier versions
        gave it and not under its own.
+    10. No visit the plan would add may be on the profile, or in the plan, already
+        with the same region and full dates (:func:`doubles`).
+    11. Every hand-ticked list the plan would tick must be readable
+        (:func:`ticked_before`). A series tick is a toggle and a repeat may undo
+        it, so an item in its list already is skipped: nothing is sent or
+        journalled for it, its label goes in ``ApplyReport.already``, and
+        ``on_progress`` is told ``True``. The series and KYE lists go into the
+        snapshot file, which is where to look to undo the ticks.
     """
     report = ApplyReport()
     ops = plan.to_apply()
@@ -363,10 +477,14 @@ def _apply_locked(
     # fetches an unrelated region's visits and fails drift for the wrong reason.
     regions = sorted(regions_touched(ops))
     wants_tcc = any(o.kind == "mark_tcc" for o in ops)
-    snapshot = client.snapshot(regions or None, tcc=wants_tcc)
-    (workdir / f"snapshot-{stamp}.json").write_text(
-        json.dumps(snapshot, indent=1, default=str), encoding="utf-8"
-    )
+    snapshot = client.snapshot(regions, tcc=wants_tcc)
+
+    def keep_snapshot() -> None:
+        (workdir / f"snapshot-{stamp}.json").write_text(
+            json.dumps(snapshot, indent=1, default=str), encoding="utf-8"
+        )
+
+    keep_snapshot()
 
     expected = plan.basis.get("fingerprint")
     if not expected:
@@ -396,15 +514,36 @@ def _apply_locked(
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
     if old := trips_under_old_keys(journal, plan):
         raise DriftError("; ".join(old) + " Nothing was sent.")
-    already = journal.done_keys()
+    done = journal.done_keys()
+    to_send = [op for op in ops if op.key not in done]
+    if twice := doubles(snapshot, to_send):
+        raise DriftError("; ".join(twice) + ". Nothing was sent.")
+
+    ticked = ticked_before(client, to_send, snapshot)
+    lists: dict[str, Any] = {}
+    for (name, n), ids in ticked.items():
+        if name == "series":
+            lists.setdefault("series", {})[str(n)] = sorted(ids)
+        elif name == "kye":  # DARE and TCC are in the snapshot already
+            lists["kye"] = sorted(ids)
+    if lists:
+        snapshot["ticked"] = lists  # beside what `basis_of` reads, not part of it
+        keep_snapshot()
 
     # What the server answered, per op, for this run only. verify() needs the
     # trip id a create_trip was given: without it a visit that was already
     # there is indistinguishable from the one the trip was meant to create.
     results: dict[str, Any] = {}
     for i, op in enumerate(ops, 1):
-        if op.key in already:
+        if op.key in done:
             report.skipped += 1
+            continue
+        tick = tick_of(op)
+        if tick and tick[1] in ticked[tick[0]]:
+            report.skipped += 1
+            report.already.append(op.label or f"{op.kind} {tick[1]}")
+            if on_progress:
+                on_progress(i, len(ops), op, True)
             continue
         report.attempted += 1
         ok = False
@@ -414,7 +553,9 @@ def _apply_locked(
             ok = True
             results[op.key] = result
             journal.note(op, result)
-            already.add(op.key)
+            done.add(op.key)
+            if tick:  # a plan can spell one tick two ways, under two keys
+                ticked[tick[0]].add(tick[1])
             report.succeeded += 1
         except Exception as exc:
             # Anything that does not prove the write was refused is deliberately
@@ -605,7 +746,7 @@ def verify(
 
         elif op.kind == "mark_kye":
             out["checked"] += 1
-            if op.item not in set(client.kye().get("visited", [])):
+            if not _holds(client.kye().get("visited", []), op.item):
                 out["mismatches"].append(f"KYE quadrant {op.item} did not stick")
 
         elif op.kind == "mark_tcc":
@@ -625,15 +766,20 @@ def verify(
 
         elif op.kind == "mark_dare":
             out["checked"] += 1
-            if op.region not in client.visited_dare_ids():
+            if not _holds(client.visited_dare_ids(), op.region):
                 out["mismatches"].append(f"DARE area {op.region} did not stick")
 
         elif op.kind == "tick_series":
             out["checked"] += 1
-            if op.item not in set(client.series(op.series).get("visited", [])):
+            if not _holds(client.series(op.series).get("visited", []), op.item):
                 out["mismatches"].append(f"series {op.series} item {op.item} did not stick")
 
     return out
+
+
+def _holds(ids: Iterable[object], wanted: int) -> bool:
+    """Whether a server's id list holds an id; some lists spell theirs as text."""
+    return str(wanted) in {str(i) for i in ids}
 
 
 def _iso_of(day) -> str | None:

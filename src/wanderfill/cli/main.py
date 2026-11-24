@@ -815,7 +815,15 @@ def cmd_show(args) -> int:
 
 def cmd_check(args) -> int:
     """Read-only: does this plan still match the profile it was built against?"""
-    from ..plan.apply import Journal, describe_open, open_entries, trips_under_old_keys
+    from ..plan.apply import (
+        Journal,
+        describe_open,
+        doubles,
+        open_entries,
+        tick_of,
+        ticked_before,
+        trips_under_old_keys,
+    )
     from ..plan.model import Plan, basis_of, fingerprint, regions_touched, validate
 
     plan = Plan.load(args.plan)
@@ -840,11 +848,15 @@ def cmd_check(args) -> int:
         problems.append("account mismatch")
 
     regions = sorted(regions_touched(ops))
-    snap = c.snapshot(regions or None, tcc=any(o.kind == "mark_tcc" for o in ops))
+    snap = None
+    try:
+        snap = c.snapshot(regions, tcc=any(o.kind == "mark_tcc" for o in ops))
+    except WanderfillError as exc:
+        problems.append(f"the profile cannot be read, so drift was not checked: {exc}")
     expected = plan.basis.get("fingerprint")
     if not expected:
         problems.append("no basis fingerprint — apply will refuse this plan")
-    else:
+    elif snap is not None:
         now = fingerprint(basis_of(snap, regions))
         same = now == expected
         print(f"drift:   {'unchanged since planning  ✓' if same else 'STATE HAS MOVED  ✗'}")
@@ -863,6 +875,18 @@ def cmd_check(args) -> int:
         done = set()
     if skipped := sum(op.key in done for op in ops):
         print(f"journal: {skipped} op(s) already applied and would be skipped")
+
+    if snap is not None:
+        to_send = [op for op in ops if op.key not in done]
+        problems += doubles(snap, to_send)
+        try:
+            ticked = ticked_before(c, to_send, snap)
+        except WanderfillError as exc:
+            problems.append(f"a list this plan ticks cannot be read: {exc}")
+        else:
+            ticks = [t for op in to_send if (t := tick_of(op))]
+            if have := sum(n in ticked[where] for where, n in ticks):
+                print(f"ticks:   {have} op(s) already ticked and would be skipped")
 
     print(f"\n{len(ops)} op(s) would execute across {len(regions)} region(s).")
     if problems:
@@ -1026,6 +1050,8 @@ def cmd_apply(args) -> int:
         f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
         f"failed {report.failed}, skipped {report.skipped}"
     )
+    for label in report.already:
+        print(f"  already ticked, not sent: {label}")
     for e in report.errors[:20]:
         print(f"  error: {e}")
     # Read back from the server, not from the responses. Printed, because a

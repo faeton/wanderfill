@@ -165,6 +165,9 @@ write  POST /ajax/my_series/
        → the literal string "OK"
 ```
 
+It is a toggle, so a repeat may undo the tick. The client sends only `state=1`,
+and `apply` does not send an item that is already in `visited`.
+
 `toggle2` exists for series that track two states per object. An object may
 belong to several series at once, so ticking it moves more than one score.
 

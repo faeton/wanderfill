@@ -31,7 +31,8 @@ class VerificationFailed(ApiError):
 
     Raised by the undo methods and ``sync_trip_header`` after the request went
     out, whether the read-back disagrees or could not be read at all, and by
-    any strict read whose answer lacks the list it needs. It is distinct from
+    any strict read whose answer lacks the list it needs or holds an id that is
+    not a number, before a write as well as after one. It is distinct from
     a plain :class:`ApiError` so that a caller keeping a journal can tell "the
     server refused, nothing changed" from "something was sent and the state is
     now unknown" — the second must stay unresolved until a human reads back.
@@ -74,7 +75,7 @@ class DriftError(WanderfillError):
     Applying a stale plan is how duplicates get created, so this stops the run
     and asks for a re-plan rather than guessing. A write still open in one of the
     account's journals, and another run holding the account's lock, stop it for
-    the same reason.
+    the same reason, and so does a visit that is on the profile already.
     """
 
 

@@ -718,7 +718,8 @@ def _apply_one(tmp_path, op, replies=None, transport=FakeTransport):
 
     state = {"user/status-quick": {"result": "OK", "uid": 7},
              "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
-             "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}}
+             "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []},
+             "V2/": {"title": "a series", "visited": []}}
     c = NomadMania(token="fake", transport=transport(state | (replies or {})))
     plan = Plan(account=7, ops=[op], basis={"fingerprint": fingerprint(basis_of({}, []))})
     with pytest.raises(Exception) as info:
@@ -770,7 +771,8 @@ def test_an_unexpected_exception_leaves_the_journal_open(tmp_path, monkeypatch):
 
 STATE = {"user/status-quick": {"result": "OK", "uid": 7},
          "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
-         "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}}
+         "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []},
+         READ: {"result": "OK", "data": []}}
 ACCOUNT_READ = [("user/status-quick", {})]
 
 
@@ -2986,3 +2988,319 @@ def test_check_reports_a_trip_done_under_the_old_key(monkeypatch, tmp_path, caps
         assert (str(path) in out and trip.legacy_key in out) == bool(rc)
         assert ("1 op(s) already applied" in out) == (not rc)
         assert _writes(t) == []
+
+
+# --------------------------------------------------------------------------
+# a missing list is not an empty profile, and nothing is sent a second time
+# --------------------------------------------------------------------------
+
+REGIONS_READ = "maps/get-visited-regions-ids-simple"
+JAN_DAYS = {"date_from": "2026-01-01", "date_to": "2026-01-02"}
+
+
+def _rebuilt(*ops, rows=(), replies=None):
+    """A plan of ``ops`` built from this very profile, its client, and what it sent."""
+    from wanderfill.plan.model import basis_of, fingerprint, regions_touched
+
+    c, t = client(STATE | {READ: visits(*rows), "trips/new-trip": {"result": "OK", "trip_id": 901}}
+                  | TCC_ROWS | (replies or {}))
+    regions = sorted(regions_touched(ops))
+    snap = c.snapshot(regions, tcc=any(o.kind == "mark_tcc" for o in ops))
+    basis = {"fingerprint": fingerprint(basis_of(snap, regions)), "taken_at": "2026-11-24"}
+    plan = Plan(account=7, ops=list(ops), basis=basis)
+    t.sent.clear()
+    return plan, c, t
+
+
+def _refused(plan, c, t, workdir, exc=DriftError):
+    """Apply, which must raise, send no write and leave no journal. Returns the message."""
+    from wanderfill.plan.apply import apply_plan
+
+    with pytest.raises(exc) as info:
+        apply_plan(c, plan, workdir=workdir, confirm=True)
+    assert _writes(t) == [] and not list(workdir.glob("journal-*"))
+    return str(info.value)
+
+
+def _checked(monkeypatch, capsys, plan, c, tmp_path, rc):
+    from wanderfill.cli import main as cli
+
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+    capsys.readouterr()
+    assert cli.main(["check", str(saved), "--workdir", str(tmp_path / "none")]) == rc
+    return capsys.readouterr().out
+
+
+def _jan_add(**kw):
+    return _vop(**({"region": 11, "quality": 3} | JAN_DAYS | kw))
+
+
+@pytest.mark.parametrize("owner", [None, 900], ids=["standalone", "trip-owned"])
+@pytest.mark.parametrize("op", [
+    pytest.param(lambda: _jan_add(), id="add_visit"),
+    pytest.param(lambda: _jan(), id="create_trip"),
+    pytest.param(lambda: _jan({"id": 11, "quality": 3}), id="dates from the header"),
+    pytest.param(lambda: _jan({"id": 12, "quality": 3}, TRIP_REGION | dict.fromkeys(JAN, "")),
+                 id="second region, empty dates"),
+])
+def test_a_rebuilt_plan_does_not_send_a_trip_that_is_already_there(
+        monkeypatch, tmp_path, capsys, op, owner):
+    """It carries the trip in its own basis, so drift passes, and its journal is new."""
+    plan, c, t = _rebuilt(op(), rows=[_stored(**JAN, trip_id=owner, quality=1)])
+    if len(plan.ops[0].regions) == 2:  # only region 11 holds the visit
+        real = t.webapi
+        monkeypatch.setattr(t, "webapi", lambda a, **f: visits() if f.get("region") == 12
+                            else real(a, **f))
+        from wanderfill.plan.model import basis_of, fingerprint
+        plan.basis["fingerprint"] = fingerprint(basis_of(c.snapshot([11, 12]), [11, 12]))
+    message = _refused(plan, c, t, tmp_path)
+    for wanted in (plan.ops[0].kind, "the op", "region 11", "2026-01-01..2026-01-02",
+                   "Nothing was sent"):
+        assert wanted in message
+    assert "region 12" not in message
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    assert "BLOCKERS" in out and "region 11" in out and _writes(t) == []
+    assert "drift:   unchanged" in out, "which is why drift alone did not stop it"
+
+
+def test_an_op_done_in_this_plans_journal_is_not_its_own_double(tmp_path):
+    from wanderfill.plan.apply import Journal, apply_plan
+    from wanderfill.plan.model import fingerprint
+
+    plan, c, t = _rebuilt(_jan(), rows=[_stored(**JAN)])
+    Journal(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson").note(plan.ops[0], "OK")
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).skipped == 1
+    assert _writes(t) == []
+
+
+@pytest.mark.parametrize("ops", [
+    pytest.param(lambda: [_jan_add(label="a"), _jan(label="b")], id="an add and a trip region"),
+    pytest.param(lambda: [_jan(label="a"), _jan(TRIP_REGION | {"quality": 4}, label="b")],
+                 id="two trips"),
+    pytest.param(lambda: [_jan({"id": 11, "quality": 3}, label="a"),
+                          _jan(TRIP_REGION | {"day_to": "02"}, label="b", date_to="2026-01-09")],
+                 id="header dates and own dates"),
+])
+def test_two_ops_for_one_region_and_dates_are_refused(monkeypatch, tmp_path, capsys, ops):
+    """Their keys differ, so nothing compared a trip region with an add, or two trips."""
+    from wanderfill.plan.apply import doubles
+
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1), *ops())
+    (line,) = doubles({}, plan.ops)
+    assert "'a'" in line and "'b'" in line and "region 11" in line
+    assert line in _refused(plan, c, t, tmp_path)
+    assert line in _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+
+
+def test_the_double_guard_ignores_undated_year_only_and_overlapping_visits(tmp_path):
+    """Two real visits can share a year or no date at all, and stays can overlap."""
+    from wanderfill.plan.apply import apply_plan, doubles
+
+    year = {"year_from": 2026, "month_from": None, "day_from": None,
+            "year_to": 2026, "month_to": None, "day_to": None}
+    rows = [_stored(**dict.fromkeys(JAN)), _stored(**year), _stored(**JAN | {"day_to": 3}),
+            _stored(**JAN | {"year_from": 2025}), _stored(**year | JAN | dict.fromkeys(
+                ("month_to", "day_to")))]
+    ops = [_jan_add(), _vop(region=11, quality=3),
+           _vop(region=11, quality=3, date_from="2026", date_to="2026"),
+           _vop(region=11, quality=3, date_from="2026-01-01", date_to="2026"),
+           _jan(TRIP_REGION | year), _jan(TRIP_REGION | {"day_to": 5}),
+           _jan({"id": 11, "quality": 3, "year_from": 2026, "month_from": 1, "day_from": 1}),
+           _jan(TRIP_REGION | {"id": 12})]
+    plan, c, t = _rebuilt(*ops, rows=rows)
+    assert doubles(c.snapshot([11, 12]), ops) == []
+    t.sent.clear()
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == len(ops)
+
+
+def test_an_update_visit_is_not_a_double_of_itself(tmp_path):
+    from wanderfill.plan.apply import apply_plan
+
+    op = _vop("update_visit", region=11, visit_id=1, quality=4, **JAN_DAYS)
+    plan, c, t = _rebuilt(op, rows=[_stored(**JAN)])
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 1
+    assert _writes(t) == ["quickEnter/update-visit"]
+
+
+BAD_LISTS = [{"result": "OK"}, {"result": "OK", "LIST": None}, {"result": "OK", "LIST": {}},
+             {"result": "OK", "LIST": ["x"]}, {"result": "OK", "LIST": [None]},
+             {"result": "OK", "LIST": [True]}, {"result": "OK", "LIST": [1.5]}, []]
+
+
+def _bad(reply, field):
+    return {field if k == "LIST" else k: v for k, v in reply.items()} if reply else reply
+
+
+@pytest.mark.parametrize("reply", BAD_LISTS, ids=str)
+@pytest.mark.parametrize("action,field", [
+    (REGIONS_READ, "ids"), ("maps/get-visited-dare-ids-simple", "ids"), (READ, "data")])
+def test_snapshot_refuses_a_reply_without_its_list(
+        monkeypatch, tmp_path, capsys, action, field, reply):
+    """Planning and applying both read it as an empty profile, so drift passed."""
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    plan, c, t = _rebuilt(_jan_add(), _vop("mark_dare", region=1))
+    plan.basis = {"fingerprint": fingerprint(basis_of({}, [11]))}  # planned against the same reply
+    t.replies[action] = _bad(reply, field)
+    assert action in _refused(plan, c, t, tmp_path, VerificationFailed)
+    assert not list(tmp_path.glob("snapshot-*"))
+    out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    assert "BLOCKERS" in out and action in out and "unchanged since planning" not in out
+
+
+def test_a_strict_read_answered_with_html_is_a_wanderfill_error(monkeypatch, tmp_path, capsys):
+    """A captive portal's page: ``json.loads`` raised a bare ValueError."""
+    for op, broken in ((_jan_add(), REGIONS_READ), (_vop("mark_kye", item=5), "kye/get-kye"),
+                       (_vop("tick_series", series=22, item=5), "V2/")):
+        plan, c, t = _rebuilt(op, replies={"kye/get-kye": {"visited": []}})
+
+        def reply(real, broken=broken):
+            def call(path, /, **fields):
+                return json.loads("<html>") if path == broken else real(path, **fields)
+            return call
+
+        monkeypatch.setattr(t, "webapi", reply(t.webapi))
+        monkeypatch.setattr(t, "ajax_json", reply(t.ajax_json))
+        _refused(plan, c, t, tmp_path, VerificationFailed)
+        assert "BLOCKERS" in _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+
+
+def test_check_reports_a_list_the_server_refuses_as_a_blocker(monkeypatch, tmp_path, capsys):
+    for op, broken in ((_jan_add(), READ), (_vop("mark_kye", item=5), "kye/get-kye")):
+        plan, c, t = _rebuilt(op, replies={"kye/get-kye": {"visited": []}})
+        t.replies[broken] = {"result": "ERROR", "result_description": "Database hiccup."}
+        _refused(plan, c, t, tmp_path, ApiError)
+        out = _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+        assert "BLOCKERS" in out and "Database hiccup." in out
+
+
+def _tick_replies(ids=(570, "571")):
+    return {"V2/": {"title": "Capitals", "visited": list(ids)},
+            "kye/get-kye": {"visited": list(ids)},
+            "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": list(ids)}}
+
+
+TICKED = {
+    "series": lambda: _vop("tick_series", series=1, item=570),
+    "series, a string in the list": lambda: _vop("tick_series", series=1, item=571),
+    "kye": lambda: _vop("mark_kye", item=570),
+    "kye, a string in the list": lambda: _vop("mark_kye", item=571),
+    "dare": lambda: _vop("mark_dare", region=570),
+    "dare, a string in the list": lambda: _vop("mark_dare", region=571),
+    "tcc": lambda: _vop("mark_tcc", item=325),
+}
+
+
+@pytest.mark.parametrize("name", TICKED)
+def test_apply_skips_an_item_that_is_already_ticked(monkeypatch, tmp_path, capsys, name):
+    """The series endpoint is a toggle: sending a tick again may undo it."""
+    from wanderfill.cli import main as cli
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, t = _rebuilt(TICKED[name](), replies=_tick_replies())
+    seen = []
+    report = apply_plan(c, plan, workdir=tmp_path / "w", confirm=True,
+                        on_progress=lambda *a: seen.append(a))
+    assert _writes(t) == [] and not any(a == "my_series/" for a, _ in t.sent)
+    assert report.already == ["the op"]
+    assert (report.attempted, report.succeeded, report.skipped) == (0, 0, 1)
+    assert seen == [(1, 1, plan.ops[0], True)]
+    assert not list((tmp_path / "w").glob("journal-*"))
+    assert (report.verified["checked"], report.verified["mismatches"]) == (1, [])
+
+    assert "1 op(s) already ticked" in _checked(monkeypatch, capsys, plan, c, tmp_path, 0)
+    path = plan.save(tmp_path / "p.json")
+    assert cli.main(["apply", str(path), "--confirm", "--workdir", str(tmp_path / "w2")]) == 0
+    out = capsys.readouterr().out
+    assert "already ticked, not sent: the op" in out and _writes(t) == []
+
+
+def test_a_tick_is_sent_once_however_the_plan_spells_it(tmp_path):
+    """Dates are in every op's key and reach no tick, so two keys can be one toggle."""
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, t = _rebuilt(_vop("tick_series", series=1, item=5),
+                          _vop("tick_series", series=1, item=5, date_from="2024", label="again"),
+                          _vop("tick_series", series=2, item=6), replies=_tick_replies())
+    report = apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert [f["series"] for a, f in t.sent if a == "my_series/"] == [1, 2]
+    assert report.already == ["again"] and report.succeeded == 2
+
+
+@pytest.mark.parametrize("op,action,field", [
+    (lambda: _vop("tick_series", series=1, item=5), "V2/", "visited"),
+    (lambda: _vop("mark_kye", item=5), "kye/get-kye", "visited"),
+])
+@pytest.mark.parametrize("reply", BAD_LISTS, ids=str)
+def test_a_tick_list_that_cannot_be_read_sends_nothing(
+        monkeypatch, tmp_path, capsys, op, action, field, reply):
+    """Read as empty, it says nothing is ticked, and the toggle goes out."""
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1), op(), replies=_tick_replies())
+    t.replies[action] = _bad(reply, field)
+    assert action in _refused(plan, c, t, tmp_path, VerificationFailed)
+    assert "BLOCKERS" in _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+
+
+def test_a_tcc_row_whose_id_is_not_a_number_is_a_failed_read():
+    c, _ = client({"quickEnter/get-regions": {"data": {"tcc": [{"id": "x", "visited": 1}]}}})
+    with pytest.raises(VerificationFailed):
+        c.tcc()
+    c, _ = client({"quickEnter/get-regions": {"data": {"tcc": [{"visited": 1}]}}})
+    with pytest.raises(VerificationFailed):
+        c.tcc()
+
+
+def test_ticked_before_reads_each_list_once():
+    from wanderfill.plan.apply import ticked_before
+
+    ops = [f() for f in TICKED.values()] + [_vop("tick_series", series=2, item=1), _jan_add()]
+    c, t = client(STATE | TCC_ROWS | _tick_replies())
+    snap = c.snapshot([], tcc=True)
+    t.sent.clear()
+    both = {570, 571}
+    want = {("series", 1): both, ("series", 2): both, ("kye", 0): both, ("dare", 0): both,
+            ("tcc", 0): {325}}
+    assert ticked_before(c, ops, snap) == want
+    assert [a for a, _ in t.sent] == ["V2/", "kye/get-kye", "V2/"], "DARE and TCC: the snapshot's"
+    assert ticked_before(c, ops) == want
+
+
+def test_a_tick_only_plan_does_not_read_every_region(monkeypatch, tmp_path, capsys):
+    """``regions or None`` turned "no regions" into all 398 of them."""
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, t = _rebuilt(_vop("mark_kye", item=5), _vop("tick_series", series=1, item=5),
+                          replies=_tick_replies() | {REGIONS_READ: {"ids": [1, 2, 3]}})
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 2
+    _checked(monkeypatch, capsys, plan, c, tmp_path, 0)
+    assert READ not in [a for a, _ in t.sent]
+
+
+def test_the_snapshot_file_keeps_the_ticks_it_is_about_to_change(tmp_path):
+    """The undo information: which of these were there before the run."""
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, _ = _rebuilt(_vop("tick_series", series=22, item=5), _vop("mark_kye", item=5),
+                          _vop("mark_dare", region=5), _vop("mark_tcc", item=64),
+                          replies=_tick_replies())
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 4
+    (path,) = tmp_path.glob("snapshot-*.json")
+    snap = json.loads(path.read_text(encoding="utf-8"))
+    assert snap["ticked"] == {"series": {"22": [570, 571]}, "kye": [570, 571]}
+    assert snap["visited_dare"] == [570, 571] and snap["visited_tcc"] == [325]
+
+
+def test_a_fingerprint_made_before_this_change_still_matches():
+    """Plans on disk were fingerprinted from snapshots of every region."""
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    old = {"visited_regions": [5, 6], "visited_dare": [7], "visits": {"5": [
+        {"id": 1, "date_from": "2026-01-01", "date_to": "2026-01-02", "quality": 3}]}}
+    golden = "091eb3c2162171bedddce8c38be944a1"
+    assert fingerprint(basis_of(old, [5])) == golden
+    assert fingerprint(basis_of(old | {"ticked": {"kye": [1]}}, [5])) == golden
+    c, _ = client(STATE | {REGIONS_READ: {"ids": [6, 5]}, READ: visits(_stored())})
+    every, none = c.snapshot(), c.snapshot([])
+    assert set(every["visits"]) == {"5", "6"} and none["visits"] == {}
+    assert fingerprint(basis_of(every, [])) == fingerprint(basis_of(none, []))

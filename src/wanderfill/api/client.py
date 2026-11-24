@@ -208,6 +208,23 @@ class Visit:
         return (self.region, self.date_from, self.date_to)
 
 
+def _ids(action: str, values: Iterable[Any]) -> set[int]:
+    """The ids of a list read as proof: whole numbers, or the digits of them.
+
+    Anything else raises instead of being dropped, because an id that is skipped
+    reads as "not ticked".
+    """
+    out = set()
+    for v in values:
+        if type(v) is int:
+            out.add(v)
+        elif isinstance(v, str) and len(v) <= 10 and v.isascii() and v.isdigit():
+            out.add(int(v))
+        else:
+            raise VerificationFailed(action, f"the list holds {str(v)[:60]!r}, which is not an id")
+    return out
+
+
 class NomadMania:
     """Thin, honest wrapper over both surfaces."""
 
@@ -409,12 +426,12 @@ class NomadMania:
     def visited_region_ids(self, *, strict: bool = False) -> set[int]:
         """Region ids that count as visited.
 
-        ``strict=True`` is for read-backs: a response with no ``ids`` list raises
-        instead of reading as an empty profile, which would otherwise "prove"
-        that nothing is marked.
+        ``strict=True`` is for snapshots and read-backs: a response with no
+        ``ids`` list raises instead of reading as an empty profile, which would
+        otherwise "prove" that nothing is marked.
         """
         if strict:
-            return {int(i) for i in self._strict("maps/get-visited-regions-ids-simple", "ids")}
+            return self._strict_ids("maps/get-visited-regions-ids-simple", "ids")
         return set(self.t.webapi("maps/get-visited-regions-ids-simple").get("ids", []))
 
     def visited_dare_ids(self) -> set[int]:
@@ -612,20 +629,34 @@ class NomadMania:
 
     # ---------------------------------------------------------------- undo
     #
-    # The read-backs below are *strict*: a response missing the list they need
+    # The reads below are *strict*: a response missing the list they need
     # is an error, not an empty list. The ordinary readers default a missing
     # field to empty because that is harmless for display; here an empty
     # answer is taken as proof of absence, and ``{"result": "OK"}`` with the
-    # field dropped would otherwise verify a deletion that never happened.
+    # field dropped would otherwise verify a deletion that never happened, or
+    # let a plan made against an "empty" profile write all of it again.
 
-    def _strict(self, action: str, field: str, **params: Any) -> list:
-        data = self.t.webapi(action, **params)
+    def _read(self, action: str, read: Callable[[], Any]) -> Any:
+        try:
+            return read()
+        except ValueError as exc:  # a captive portal's page, not JSON
+            raise VerificationFailed(action, f"the answer is not JSON ({exc})") from exc
+
+    def _list_in(self, action: str, data: Any, field: str) -> list:
         value = data.get(field) if isinstance(data, dict) else None
         if not isinstance(value, list):
             raise VerificationFailed(
-                action, f"read-back has no {field!r} list to check against: {str(data)[:200]}", data
+                action, f"the answer has no {field!r} list to check against: {str(data)[:200]}",
+                data,
             )
         return value
+
+    def _strict(self, action: str, field: str, **params: Any) -> list:
+        data = self._read(action, lambda: self.t.webapi(action, **params))
+        return self._list_in(action, data, field)
+
+    def _strict_ids(self, action: str, field: str) -> set[int]:
+        return _ids(action, self._strict(action, field))
 
     def _readback(self, action: str, fn: Callable[[], T]) -> T:
         """Run a read that follows the write ``action``; any failure is unproven.
@@ -648,14 +679,21 @@ class NomadMania:
             ) from exc
 
     def _visits_strict(self, region: int) -> list[Visit]:
-        rows = self._strict("quickEnter/get-visits-to-region", "data", region=region)
-        return [Visit.from_api(v, region) for v in rows]
+        action = "quickEnter/get-visits-to-region"
+        rows = self._strict(action, "data", region=region)
+        try:
+            return [Visit.from_api(v, region) for v in rows]
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise VerificationFailed(
+                action, f"region {region} has a visit that cannot be read ({exc!r})"
+            ) from exc
 
     def _dare_strict(self) -> set[int]:
-        return {int(i) for i in self._strict("maps/get-visited-dare-ids-simple", "ids")}
+        return self._strict_ids("maps/get-visited-dare-ids-simple", "ids")
 
-    def _kye_strict(self) -> set[int]:
-        return {int(q) for q in self._strict("kye/get-kye", "visited")}
+    def kye_ticked(self) -> set[int]:
+        """The ticked KYE quadrants; a reply without the list raises, see ``_strict``."""
+        return self._strict_ids("kye/get-kye", "visited")
 
     def delete_visit(self, visit_id: int, region: int, *, allow_trip_owned: bool = False) -> Visit:
         """Delete one visit record by id.
@@ -860,10 +898,10 @@ class NomadMania:
         so a changed total is not necessarily this call's doing. Reads the
         ticked list back and raises if the id is still in it.
         """
-        if int(qid) not in self._kye_strict():
+        if int(qid) not in self.kye_ticked():
             raise PrecisionLoss(f"KYE quadrant {qid} is not ticked — nothing to un-tick")
         resp = self.t.webapi("kye/set-kye", qid=int(qid), visited=0)
-        if int(qid) in self._readback("kye/set-kye", self._kye_strict):
+        if int(qid) in self._readback("kye/set-kye", self.kye_ticked):
             raise VerificationFailed(
                 "kye/set-kye", f"server answered {resp!r} but quadrant {qid} is still ticked", resp
             )
@@ -925,7 +963,7 @@ class NomadMania:
         """
         def one(mega: int) -> list[dict]:
             action = "quickEnter/get-regions"
-            reply = self.t.webapi(action, megaregion=mega)
+            reply = self._read(action, lambda: self.t.webapi(action, megaregion=mega))
             data = reply.get("data") if isinstance(reply, dict) else None
             rows = data.get("tcc") if isinstance(data, dict) else None
             if not isinstance(rows, list):
@@ -936,6 +974,7 @@ class NomadMania:
                 raise VerificationFailed(
                     action, f"megaregion {mega} has a TCC row with no 0/1 'visited'", reply
                 )
+            _ids(action, (r.get("id") for r in rows))
             return rows
 
         out: dict[int, dict] = {}
@@ -1188,11 +1227,19 @@ class NomadMania:
             "V2/", action="getData", type="seriesSingle", id=series_id, lang=self.t.lang
         )
 
+    def series_ticked(self, series_id: int) -> set[int]:
+        """The ticked ids of one series; a reply without the list raises, see ``_strict``."""
+        action = f"V2/ series {series_id}"
+        data = self._read(action, lambda: self.series(series_id))
+        return _ids(action, self._list_in(action, data, "visited"))
+
     def tick_series_item(self, series_id: int, item_id: int) -> bool:
         """Tick one object. Answers with the literal string "OK".
 
         Never sends state=0. An object may belong to several series at once, so
-        expect other series' scores to move as a side effect.
+        expect other series' scores to move as a side effect. The endpoint is a
+        toggle, and a repeat may undo the tick: ``apply`` reads
+        :meth:`series_ticked` first and does not call this for an id in it.
         """
         res = self.t.ajax_text(
             "my_series/", action="toggle", item=item_id, state=1, series=series_id
@@ -1204,22 +1251,26 @@ class NomadMania:
     def snapshot(self, regions: Iterable[int] | None = None, *, tcc: bool = False) -> dict:
         """Everything needed to tell later whether a write did what was intended.
 
-        Taken before any apply. If this fails, the apply must not start.
+        Taken before any apply. If this fails, the apply must not start. The lists
+        are read strictly: one that is missing raises :class:`VerificationFailed`,
+        because read as an empty profile by planning and applying alike it makes
+        drift pass. ``regions=None`` reads every visited region's visits, an empty
+        ``regions`` none.
 
         ``tcc=True`` adds the ticked TCC ids, 29 more reads, for a plan that
         writes them. It is opt-in so that plans without TCC keep their fingerprint.
         """
-        ids = self.visited_region_ids()
+        ids = self.visited_region_ids(strict=True)
         targets = sorted(set(regions) if regions is not None else ids)
         snap = {
             "account": self.account_id(),
             "taken_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "visited_regions": sorted(ids),
-            "visited_dare": sorted(self.visited_dare_ids()),
+            "visited_dare": sorted(self._dare_strict()),
             "visits": {
                 str(r): [v.__dict__ | {"date_from": _iso(v.date_from),
                                        "date_to": _iso(v.date_to)}
-                         for v in self.visits_for_region(r)]
+                         for v in self._visits_strict(r)]
                 for r in targets
             },
         }
