@@ -5350,3 +5350,72 @@ def test_what_a_run_leaves_behind_is_never_committed(name):
 
     ignored = pathlib.Path(__file__).parents[1].joinpath(".gitignore").read_text().split("\n")
     assert any(fnmatch.fnmatch(name, pattern) for pattern in ignored if pattern)
+
+
+# region 658 on the live profile: two standalone visits read like this
+YEAR_ZERO = {"year_from": 0, "month_from": None, "day_from": None,
+             "year_to": 0, "month_to": None, "day_to": None}
+
+
+def _ends(year, month, day):
+    return {f"{unit}_{side}": v for side in ("from", "to")
+            for unit, v in (("year", year), ("month", month), ("day", day))}
+
+
+@pytest.mark.parametrize("parts", [(0, None, None), ("0", None, None), (0, 0, 0), ("0", "0", "0"),
+                                   (None, 0, 0), (0, None, 0)], ids=str)
+def test_a_year_of_zero_is_a_visit_with_no_date(tmp_path, parts):
+    """The strict reader refused a real region, and with it every plan that touches one.
+
+    Nothing but zeroes and nulls has nothing in it to lose; plans fingerprinted
+    when it read as no date still match (the number was made by 255e0a8).
+    """
+    from wanderfill.plan.apply import apply_plan
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    row = WHOLE_ROW | {"trip_id": None} | _ends(*parts)
+    c, _ = client(STATE | {REGIONS_READ: {"ids": [658]}, READ: visits(row)})
+    (strict,), (lenient,) = c._visits_strict(658), c.visits_for_region(658)
+    assert strict == lenient and (strict.date_from, strict.date_to) == (None, None)
+    basis = fingerprint(basis_of(c.snapshot([658]), [658]))
+    assert basis == "4f25a6313e82eb66a379ad68946d4157"
+    # One end alone is judged alone.
+    half = row | {k: v for k, v in WHOLE_ROW.items() if k.endswith("_to")}
+    assert Visit.from_api(half, 658) == NomadMania(
+        token="fake", transport=FakeTransport({READ: visits(half)}))._visits_strict(658)[0]
+    # An old plan beside such a visit applies.
+    plan = Plan(account=7, ops=[_jan_add(region=658)], basis={"fingerprint": basis})
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 1
+
+
+@pytest.mark.parametrize("parts", [(0, 5, None), (0, None, 6), (0, 5, 6), ("0", 5, 6), (2024, 0, 0),
+                                   (2024, 0, 5), (2024, 5, 0), (None, 5, 0)], ids=str)
+def test_a_zero_beside_a_real_part_is_still_unreadable(parts):
+    """The lenient reader drops the whole date, so reading it would lose what is there."""
+    row = WHOLE_ROW | _ends(*parts)
+    assert Visit.from_api(row, 11).date_from is None
+    c, _ = client({READ: visits(row)})
+    with pytest.raises(VerificationFailed, match="from date"):
+        c._visits_strict(11)
+
+
+@pytest.mark.parametrize("given", [{}, JAN_DAYS, {"date_from": "2013", "date_to": "2013"},
+                                   {"date_from": "2026-01-01"}], ids=str)
+def test_updating_a_year_zero_visit_posts_no_zero_and_invents_no_date(tmp_path, given):
+    """update-visit replaces the record: an end the op leaves out goes as empty fields,
+    which is what an undated visit has always been sent back as."""
+    from wanderfill.plan.apply import apply_plan
+
+    op = _vop("update_visit", region=658, visit_id=1, quality=2, **given)
+    plan, c, t = _rebuilt(op, rows=[_stored(**YEAR_ZERO, trip_id=None, quality=3)],
+                          replies={REGIONS_READ: {"ids": [658]}})
+    report = apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    ((_, sent),) = writes(t, "quickEnter/update-visit")
+    assert sent["quality"] == 3, "and the stored quality is kept"
+    for side in ("from", "to"):
+        end = given.get(f"date_{side}")
+        want = [int(p) for p in end.split("-")] if end else []
+        got = [sent[f"{unit}_{side}"] for unit in ("year", "month", "day")]
+        assert got == want + [""] * (3 - len(want))
+    if not given:
+        assert report.verified["mismatches"] == [] and report.verified["unproven"] == []

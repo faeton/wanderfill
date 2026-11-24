@@ -117,6 +117,9 @@ Year-only is also the *right* representation for "some time in 2013": YES reads
 only the year, so a remembered year scores exactly what a manufactured day would,
 without claiming a day.
 
+*Added 2026-11-24.* There is a fourth: 2 of 946 rows have a year of `0` and a null
+month and day at both ends. It reads as no date.
+
 ---
 
 ## 6. KYE was unclaimed, and its geometry is the cleanest on the site

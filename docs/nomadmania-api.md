@@ -129,11 +129,25 @@ answer was not recorded, except where the table says. The client takes any other
 answer to these six as an unknown outcome, unless it is `"result":"ERROR"`; when
 it un-marks through `updateMQP` or `set-kye`, the read-back settles it instead.
 
-A visit row always carried the same keys (108 rows, 44 regions): the six date
-parts, `hidden`, `id`, `quality` and `trip_id`; `id` and `quality` are numbers, the
-date parts and `trip_id` a number or `null`. Strict reads refuse a row that lacks
-one of them (`hidden` aside), or holds anything but numbers, their digits, or `null`
-where a `null` was seen.
+A visit row always carries the same 12 keys. All 946 rows of one profile
+(2026-11-24): the six date parts, `date_from`, `date_to`, `hidden`, `id`, `quality`
+and `trip_id`; `id` and `quality` are numbers, the date parts and `trip_id` a number
+or `null`. By date parts, the same at both ends:
+
+| rows | year | month and day | read as |
+|---:|---|---|---|
+| 823 | a year | numbers | a full date |
+| 108 | `null` | `null` | no date |
+| 13 | a year | `null` | a year only (`YearOnly`) |
+| 2 | `0` | `null` | no date (both standalone, quality 3) |
+
+Quality: 931 rows at 3, 13 at 1, one at 5, one at 2. A first sample of 108 rows missed
+the year of 0. Strict reads refuse a row that lacks one of the keys (`hidden`, `date_from` and
+`date_to` aside, which the client does not read), holds anything but numbers, their digits, or `null` where a `null` was seen, or has an
+end with something in it that makes no date (`2024-0-0`, `0-5-6`). An end of nothing but
+nulls and zeroes is no date. `update-visit` is sent an undated end as three empty
+fields, so a stored 0 is never posted back; what it stores for them was not measured
+on such a visit.
 
 ### Geocoding
 

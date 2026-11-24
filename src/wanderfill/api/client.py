@@ -136,10 +136,12 @@ def _parts(day: When | None, side: str) -> dict[str, Any]:
 def _date_parts(raw: dict, side: str) -> When | None:
     """``year_from``/``month_from``/``day_from`` -> a date, a year, or None.
 
-    Three shapes come back and all three are real: fully dated, year-only, and
-    nothing at all. Returning ``None`` for the year-only shape — which is what
-    an ``all()`` check does — is worse than it looks: a read-modify-write would
-    then see no date, and writing that back **erases a year the user recorded**.
+    Four shapes come back and all four are real: fully dated, year-only, nothing
+    at all, and a year of 0 with no month or day, which is nothing at all too
+    (``YearOnly`` refuses the 0). Returning ``None`` for the year-only shape —
+    which is what an ``all()`` check does — is worse than it looks: a
+    read-modify-write would then see no date, and writing that back **erases a
+    year the user recorded**.
     """
     parts = [raw.get(f"{unit}_{side}") for unit in ("year", "month", "day")]
     if parts[0] is None or parts[0] == "":
@@ -181,7 +183,7 @@ class Visit:
 
     @classmethod
     def from_api(cls, raw: dict, region: int) -> Visit:
-        """Build a visit from one API row, in all three of its date shapes.
+        """Build a visit from one API row, in all four of its date shapes.
 
         **A visit can have no dates at all.** Every date component comes back
         ``null`` for a region that was simply clicked as visited, which is how
@@ -189,6 +191,10 @@ class Visit:
         them. Parsing those with ``int()`` raises ``TypeError`` on the first
         one, which is invisible until something reads *every* region's visits
         rather than the handful it just wrote.
+
+        **Or a year of 0**, with a null month and day: two of 946 rows on one
+        profile. That is no date either, and it goes back out as one: empty
+        fields, never the 0.
 
         **And a visit can carry a year with no month or day**, which arrives as
         :class:`YearOnly`. Treating that as undated is the quieter and more
@@ -248,7 +254,12 @@ def _row_problem(raw: object) -> str | None:
             return f"its {f} is {str(raw[f])[:30]!r}"
     for side in ("from", "to"):
         parts = [raw[f"{unit}_{side}"] for unit in ("year", "month", "day")]
-        if parts != [None] * 3 and _date_parts(raw, side) is None:
+        # An end with nothing in it but nulls and zeroes is no date, as it is for
+        # `_date_parts`. A year of 0 is how the server has some undated visits; a
+        # 0 for the month or day was never seen, and beside a 0 or null year it
+        # drops nothing either. Beside anything real it would: `_date_parts` reads
+        # 2024-0-0 and 0-5-6 as no date, so those are refused, not made vaguer.
+        if any(_whole(p) for p in parts) and _date_parts(raw, side) is None:
             return f"its {side} date is {parts}"
     return None
 
@@ -655,6 +666,9 @@ class NomadMania:
 
         Widening precision is always allowed: a bare year becoming a real date
         is the whole point of filling a profile in.
+
+        An end passed as ``None`` goes as three empty fields. On a visit stored
+        with a year of 0 that is no loss, 0 being no date, and the 0 is not sent.
         """
         if quality is None:
             raise ValueError("quality is required: update-visit replaces the whole record")
