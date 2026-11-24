@@ -353,6 +353,14 @@ own camera with a clock that can be the local one. It is not a visit: only the p
 and the owner know those. Every other photo proves nothing and may still stand between
 two days.
 
+**Flight days.** One day beside a run, at each end at most, is in it if it has a photo at
+speed or beside an impossible jump strictly inside the region, and nothing was seen
+elsewhere in between: the airport. It can be a day too many, after a night flight with a
+position that is still the old one, so the page names the day and the owner can leave it
+out. Whether a flight day was a day there is the owner's alone: do not answer it, do not
+press "Leave this day out", and do not pass `--no-flight-days` unless they ask. Read out
+how many runs have one. Leaving one out releases nothing that holds a run.
+
 What holds a run, and what releases it:
 
 | reason | what it means | released by |

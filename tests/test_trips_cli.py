@@ -393,6 +393,98 @@ def test_a_day_border_photo_by_another_continents_clock_proves_no_date(site):
     assert (by_region(m)[FAR].first, m.left_out["clock"]) == (day(8), 0)
 
 
+# -- flight days --------------------------------------------------------------------------
+
+
+def flown(n, region, hour, **kw):
+    """Two photos in a region twelve minutes apart, at the speed of an aircraft."""
+    return [cam(n, region, hour, off=-0.2, **kw), cam(n, region, hour + 0.2, off=0.2, **kw)]
+
+
+# 1 to 4 May in Aldmoor, at the airport on the 5th, and in Berrow the same evening.
+AIRPORT = [*days(HOME, -9, -4), *days(1, 1, 4), *flown(5, 1, 8), cam(5, 2, 21),
+           *days(2, 6, 7), *days(HOME, 10, 11)]
+
+
+def test_photos_at_the_airport_on_the_last_day_are_a_flight_day(site, capsys):
+    photos(*AIRPORT)
+    m, _ = listed()
+    r = by_region(m)[1]
+    assert (r.first, r.last, r.days[-1], r.flight) == (day(1), day(5), day(4), (day(5),))
+    assert status(m)[1] == ("offered", []) and r.flight_photos == ((2, 0),)
+    assert m.params["flight_days"] is True
+    assert "1 run with a flight day at an end" in capsys.readouterr().out
+    assert do_plan({1: "3", 2: "3"}) == 0
+    assert "not answered whether" in capsys.readouterr().out  # the flight between them
+    assert do_plan({1: "3", 2: "3"}, cuts={(1, 2): "same"}) == 0
+    plan = Plan.load("plan-trips.json")
+    (op,) = plan.ops
+    assert (op.date_from, op.date_to) == (str(day(1)), str(day(7)))
+    assert (op.regions[0]["day_from"], op.regions[0]["day_to"]) == (1, 5)
+    assert "flight day 2031-05-05: 2 photos taken at speed in the region" in op.proof[0]["detail"]
+    assert plan.params["flight_days"] is True and validate(plan) == []
+
+
+def test_a_flight_day_left_out_is_not_in_the_plan(site):
+    photos(*AIRPORT)
+    m, path = listed()
+    r, q = by_region(m)[1], by_region(m)[2]
+    raw = {"format": 1, "account": 1, "manifest": m.sha256, "cuts": {}, "runs": {
+        r.id: {"a": "3", "out": [str(day(5))]}, q.id: {"a": "no"}}}
+    raw["cuts"] = {b.id: "cut" for b in m.boundaries if b.suggestions}
+    Path("a.json").write_text(json.dumps(raw))
+    assert run_cli("trips", "plan", path, "a.json") == 0
+    (op,) = Plan.load("plan-trips.json").ops
+    assert (op.date_from, op.date_to) == (str(day(1)), str(day(4)))
+    assert op.regions[0]["day_to"] == 4
+    assert "left out by the owner" in op.proof[0]["detail"]
+    assert any("flight day left out by the owner: 2031-05-05" in e for e in op.evidence)
+
+
+@pytest.mark.parametrize("first, last, want", [
+    (5, 6, ("fixed", ["overlap"])), (1, 5, ("there", ["there"])),
+    (1, 4, ("fixed", ["overlap"])),
+])
+def test_a_visit_on_the_flight_day_is_never_written_again(site, first, last, want):
+    photos(*AIRPORT)
+    site.visit(1, day(first), day(last))
+    m, _ = listed()
+    assert status(m)[1] == want
+    quality = {2: "3"} | ({1: "no"} if want[0] == "fixed" else {})
+    assert do_plan(quality) == 0
+    assert rows(Plan.load("plan-trips.json")) == [[(2, 3)]]
+    if want[0] == "fixed":
+        assert do_plan({1: "3", 2: "3"}, "--plan", "b.json") == 1
+
+
+def test_the_rule_can_be_turned_off_for_a_list(site, capsys):
+    photos(*AIRPORT)
+    on, _ = listed()
+    off, _ = listed("--no-flight-days", out="off")
+    assert off.params["flight_days"] is False and off.sha256 != on.sha256
+    assert by_region(off)[1].last == day(4) and all(not r.flight for r in off.runs)
+    assert "flight days are not used" in capsys.readouterr().out
+    # The table too, and what is read.
+    site.visit(1, day(1), day(5))
+    on, off = listed(out="c")[0], listed("--no-flight-days", out="d")[0]
+    assert [r.held for r in off.sweep] == [r.held + 1 for r in on.sweep]
+    site.sent.clear()
+    argv = ("trips", "review", "--since", day(5), "--library", "../lib", "--no-track", "--out")
+    assert run_cli(*argv, "e", "--no-flight-days") == 0
+    asked = [int(f["region"]) for f in site.read("quickEnter/get-visits-to-region")]
+    assert 1 not in asked and 2 in asked
+    assert run_cli(*argv, "f") == 0
+    assert status(made("f")[0])[1] == ("there", ["there"])
+
+
+def test_an_impossible_jump_at_the_landing_is_a_flight_day_too(site):
+    """A phone that still has Aldmoor when it is two thousand kilometres away."""
+    photos(*days(HOME, -9, -4), *days(1, 1, 4), cam(5, 1, 9, off=0.1), cam(5, HOME, 9.1),
+           *days(HOME, 6, 7), *days(2, 10, 11))
+    m, _ = listed()
+    assert by_region(m)[1].last == day(5) and by_region(m)[1].flight_photos == ((0, 1),)
+
+
 # -- review: what is read ----------------------------------------------------------------
 
 
@@ -426,6 +518,7 @@ def test_review_says_what_it_did_in_the_list(site, tmp_path):
     m, _ = listed("--until", day(20), "--spans", spans, "--gap-days", "3", "--fast-kmh", "120.5")
     assert m.account == 1 and dt.datetime.fromisoformat(m.created).tzinfo
     assert m.params == {"since": str(day(1)), "until": str(day(20)), "gap_days": 3, "spans": True,
+                        "flight_days": True,
                         "speeds": default_speeds() | {"fast_kmh": 120.5}}
     assert by_region(m)[5].days == (day(13), day(14)) and m.left_out["span_none"] == 2
     assert m.left_out["other_origin"] == 1  # of these dates

@@ -551,10 +551,19 @@ A made-up journey, as the page shows it:
 | Elstow | 12 to 14 May | |
 | Grayport | 16 to 17 May | **held**: no later photo elsewhere, so it may not be over |
 
-You give a quality to each of the five, write in your own words why Cray Islands was
-another visit, and leave Grayport blank. That is one trip of five regions, 1 to 14 May,
+You give a quality to each of the five, write what you remember about Cray Islands, in
+your own words, and leave Grayport blank. That is one trip of five regions, 1 to 14 May,
 each region with its own days. With no words for Cray Islands it would be no trip at all:
 what is not answered is never guessed, and half a journey is not planned.
+
+**Flight days.** At the airport on the first or last day a phone often has only photos
+taken at speed, or keeps its last position through the flight, and those prove no day. So
+one day beside a run, at each end at most, is in it if it has such a photo strictly inside
+the region, with nothing seen elsewhere between that photo and the run, and only silent
+days between. A region with photos in flight only is never a run. The limit: after a
+night flight a phone can still say the old place the next morning, so this can be a day
+too many. The page names the day and its photos and has a button, "Leave this day out",
+which you can take back. `--no-flight-days` turns the rule off.
 
 A run that may be one that is on the profile already, or the second half of a stay, is
 held. Some reasons are released by your own words (`open`, `brief`, `layover?`,
@@ -576,6 +585,7 @@ Until you do, the trip is not made, and the page says which two stays it is abou
 | `--track FILE...` or `--no-track` | one of them is needed. A row of a track proves no day; on a day with no photo, in another region, it ends a run |
 | `--gap-days N` | with 1, every day with no photo ends a run; with 2, one such day does not; with N, up to N-1 in a row do not. 2 unless you say. A table shows the other settings |
 | `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
+| `--no-flight-days` | a run begins and ends on a day with a photo on the ground |
 | `--spans FILE` | stretches that prove nothing, as for `series` |
 | `--library`, `--out` | another Photos library, another directory |
 

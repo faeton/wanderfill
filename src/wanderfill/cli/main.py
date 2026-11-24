@@ -1401,11 +1401,12 @@ def _trips_review(args) -> int:
 
     gaps = sorted({*SWEEP_GAPS, args.gap_days})
     when = {"since": args.since, "until": args.until, "track": track}
-    regions = regions_to_read(obs, gaps=gaps, **when)
+    flights = {"flight_days": not args.no_flight_days}
+    regions = regions_to_read(obs, gaps=gaps, **when, **flights)
     print(f"reading the visits of {len(regions)} region(s)...", file=sys.stderr)
     snapshot = c.snapshot(regions)
     visits = visits_in(snapshot)
-    runs = judge(find_runs(obs, gap_days=args.gap_days, track=track), obs, visits,
+    runs = judge(find_runs(obs, gap_days=args.gap_days, track=track, **flights), obs, visits,
                  assets=mine, **when)
     fast = speeds["fast_kmh"]
     trip_list = build_list(
@@ -1414,14 +1415,14 @@ def _trips_review(args) -> int:
         names={r: _region_name(row, r) for r, row in catalogue.items()},
         visits=visits, trips=trips_listed(c, runs),
         params={"since": args.since, "until": args.until, "gap_days": args.gap_days,
-                "speeds": speeds, "spans": bool(args.spans)},
+                "speeds": speeds, "spans": bool(args.spans), **flights},
         sources=_trip_sources(args, library, mine.values(), tracks, spans),
         no_track=args.no_track,
         coverage={"tiles_read": len(tiles.asked - tiles.unread),
                   "tiles_unread": len(tiles.unread),
                   "unread_photos": sum(o.place.state == "unread" for o in obs)},
         left_out=left_out(obs, since=args.since, until=args.until, other_origin=other),
-        sweep=sweep(obs, visits, gaps=gaps, fast_kmh=fast, **when), assets=mine)
+        sweep=sweep(obs, visits, gaps=gaps, fast_kmh=fast, **when, **flights), assets=mine)
     paths = _write_pair(Path(args.out), "trips", trip_list, render_page(trip_list))
     _print_trips(trip_list)
     skipped = [(path, t.skipped) for path, t in tracks if t.skipped]
@@ -1536,6 +1537,8 @@ def _print_trips(m) -> None:
             kinds = [kind for r in of for kind in {kind_of(x) for x in r.reasons} - {"there"}]
             for kind in sorted(set(kinds)):
                 print(f"         {kinds.count(kind):>5} {kind}")
+        print(f"  {_n(sum(bool(r.flight) for r in m.runs), 'run')} with a flight day at an end"
+              if p["flight_days"] else "  flight days are not used, as you said")
     else:
         print("\nNothing is on this list: no photo of these dates is proof of a day in a region.")
     print("\nthe same photos at other gaps, in days:")
@@ -2291,6 +2294,10 @@ def _trips_parser(sub) -> None:
                         "not; with N, up to N-1 in a row do not (default: 2)")
     r.add_argument("--fast-kmh", type=_kmh_arg, metavar="N",
                    help="over this a photo is in the air (default: 150)")
+    r.add_argument("--no-flight-days", action="store_true",
+                   help="a stay ends on its last day with a photo on the ground; without this, "
+                        "one day beside it with photos at the airport, at speed, is in it, and "
+                        "you can leave it out on the page")
     r.add_argument("--spans", metavar="FILE",
                    help="JSON list of your own: dates and boxes whose photos prove nothing "
                         "(use none) or only an airport (use airports)")

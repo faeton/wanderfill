@@ -152,8 +152,10 @@ def _op(draft: TripDraft, trip_list: TripList, answers: Answers) -> Op:
     evidence = [f"The owner answered on list {trip_list.sha256[:12]}:"]
     for row in draft.rows:
         marks = "" if row.quality >= MARKS_REGION_FROM else ", which does not mark the region"
-        evidence.append(f"{_named(row.run)}, {row.run.first} to {row.run.last}: "
-                        f"{row.quality} {QUALITY[row.quality]}{marks}")
+        left = [d for d in row.run.flight if not row.first <= d <= row.last]
+        out = f"; flight day left out by the owner: {_days(left)}" if left else ""
+        evidence.append(f"{_named(row.run)}, {row.first} to {row.last}: "
+                        f"{row.quality} {QUALITY[row.quality]}{marks}{out}")
     ids = [r.id for r in trip_list.runs]
     inside = trip_list.runs[ids.index(draft.rows[0].run.id):ids.index(draft.rows[-1].run.id)]
     for run in inside:
@@ -169,7 +171,7 @@ def _op(draft: TripDraft, trip_list: TripList, answers: Answers) -> Op:
 
 def _region(row: TripRow) -> dict:
     ends = ((side, part, getattr(when, part))
-            for side, when in (("from", row.run.first), ("to", row.run.last))
+            for side, when in (("from", row.first), ("to", row.last))
             for part in ("year", "month", "day"))
     return {"id": row.run.region, "quality": row.quality,
             **{f"{part}_{side}": n for side, part, n in ends}}
@@ -200,6 +202,17 @@ def _days(days: Iterable[dt.date]) -> str:
     return ", ".join(map(str, days))
 
 
+def _flights(row: TripRow) -> list[str]:
+    out = []
+    for day, (fast, conflict) in zip(row.run.flight, row.run.flight_photos, strict=True):
+        kinds = [text for n, text in (
+            (fast, f"{_count(fast, 'photo')} taken at speed"),
+            (conflict, f"{_count(conflict, 'photo')} beside an impossible jump")) if n]
+        kept = "" if row.first <= day <= row.last else ", left out by the owner"
+        out.append(f"flight day {day}: {' and '.join(kinds)} in the region{kept}")
+    return out
+
+
 def _proof(row: TripRow, trip_list: TripList) -> list[dict]:
     """What the page showed of one run, and the owner's own words if it has any."""
     run = row.run
@@ -210,6 +223,7 @@ def _proof(row: TripRow, trip_list: TripList) -> list[dict]:
         + (f", none on {_days(run.silent)}" if run.silent else ""),
         f"{_count(run.photos, 'photo')}, from {_clock(run.first_photo)} to "
         f"{_clock(run.last_photo)}",
+        *_flights(row),
         f"evidence: {run.evidence}",
         *run.flags, *run.reasons,
         f"on the profile: {_count(len(known), 'visit')} of this region"

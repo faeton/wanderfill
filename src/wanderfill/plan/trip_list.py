@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from importlib.resources import files
@@ -47,6 +48,7 @@ from .trips import (
     RunAnswer,
     Status,
     SweepRow,
+    _are_flight_days,
     _cuts_itself_off,
     _ends,
     _in_order,
@@ -66,7 +68,7 @@ _FLAGS = frozenset({"conflict", "evidence thin", "fast near", "track"})
 _SUGGESTIONS = frozenset({"fast", "gap", "profile"})
 _KINDS = _REASONS | _FLAGS | _SUGGESTIONS
 
-_PARAMS = ("since", "until", "gap_days", "speeds", "spans")
+_PARAMS = ("since", "until", "gap_days", "speeds", "spans", "flight_days")
 _SOURCES = ("photos", "track", "spans")
 _COVERAGE = ("tiles_read", "tiles_unread", "unread_photos")
 _LEFT_OUT = ("other_origin", "no_utc", "span_none", "conflict", "fast", "span_airports",
@@ -99,7 +101,8 @@ class ListedRun:
 
     ``photos`` counts its proof. ``start`` and ``end`` are the first and the last of it in
     UTC, which is the order of the list, and ``first_photo`` and ``last_photo`` the same two
-    by their own clocks. ``evidence`` is the grade that ``wanderfill evidence`` would give.
+    by their own clocks. ``flight`` and ``flight_photos`` are the run's. ``evidence`` is the
+    grade that ``wanderfill evidence`` would give.
     """
 
     region: int
@@ -117,6 +120,8 @@ class ListedRun:
     flags: tuple[str, ...]
     reasons: tuple[str, ...]
     status: Status
+    flight: tuple[dt.date, ...] = ()
+    flight_photos: tuple[tuple[int, int], ...] = ()
 
     @property
     def id(self) -> str:
@@ -131,12 +136,13 @@ class TripList:
     but ``created``: a list rebuilt with nothing changed is the same list.
 
     ``params`` has ``since``, ``until`` (a date or ``None``), ``gap_days``, ``speeds``, the
-    arguments of :func:`~wanderfill.plan.review.grade_shots` by name, and ``spans``, whether
-    a spans file was given. ``sources`` has the photos once, every track and the spans file,
-    each with ``kind``, ``label`` (no directory), ``sha256`` or ``None``, ``first``, ``last``
-    and ``count``; ``no_track`` is the owner's word that there is no track for these dates,
-    and is true exactly when there is none. ``coverage`` has ``tiles_read``,
-    ``tiles_unread`` and ``unread_photos``. ``left_out`` is what :func:`left_out` returns.
+    arguments of :func:`~wanderfill.plan.review.grade_shots` by name, ``spans``, whether
+    a spans file was given, and ``flight_days``, whether a run may have them. ``sources`` has
+    the photos once, every track and the spans file, each with ``kind``, ``label`` (no
+    directory), ``sha256`` or ``None``, ``first``, ``last`` and ``count``; ``no_track`` is the
+    owner's word that there is no track for these dates, and is true exactly when there is
+    none. ``coverage`` has ``tiles_read``, ``tiles_unread`` and ``unread_photos``.
+    ``left_out`` is what :func:`left_out` returns.
     ``visits`` has every visit of every region on the list, as :func:`visits_rows` has them,
     and ``trips`` the trips over the same days, as :func:`trips_rows` has them.
 
@@ -182,7 +188,7 @@ class TripList:
             clean["trips"] = _trips_of(self.trips, runs)
             _check_sources(clean)
             _check_sweep(clean["sweep"])
-            _check_runs(runs)
+            _check_runs(runs, clean["params"])
             _check_boundaries(runs, clean["boundaries"], clean["params"]["gap_days"])
         except ValueError as exc:
             raise PlanInvalid(str(exc)) from None
@@ -343,13 +349,24 @@ def _run_of(raw: object, what: str) -> ListedRun:
         last_photo=_photo_time(raw["last_photo"], f"{what}.last_photo"),
         start=_utc(raw["start"], f"{what}.start"), end=_utc(raw["end"], f"{what}.end"),
         evidence=grade, flags=_texts(raw["flags"], _FLAGS, f"{what}.flags"),
-        reasons=_texts(raw["reasons"], _REASONS, f"{what}.reasons"), status=raw["status"])
-    if not run.days or (run.days[0], run.days[-1]) != (run.first, run.last):
+        reasons=_texts(raw["reasons"], _REASONS, f"{what}.reasons"), status=raw["status"],
+        flight=_days(raw["flight"], f"{what}.flight"),
+        flight_photos=_flight_photos(raw["flight_photos"], f"{what}.flight_photos"))
+    if not run.days or (min(run.days + run.flight), max(run.days + run.flight)) != (
+            run.first, run.last):
         raise ValueError(f"{what}.days must be from first to last")
+    before = [d for d in run.flight if d < run.days[0]]
+    after = [d for d in run.flight if d > run.days[-1]]
+    if max(len(before), len(after)) > 1 or before + after != list(run.flight):
+        raise ValueError(f"{what}.flight must be one day beside the days at each end, at most")
+    if len(run.flight_photos) != len(run.flight):
+        raise ValueError(f"{what}.flight_photos must be of each flight day")
     if run.photos < len(run.days):
         raise ValueError(f"{what}.photos: {run.photos} photos on {len(run.days)} days")
     if any(d in run.days or not run.first < d < run.last for d in run.silent):
         raise ValueError(f"{what}.silent must be days between, with no photo")
+    if any(d not in run.silent for d in _beyond(run)):
+        raise ValueError(f"{what}.flight must have silent days only between it and the days")
     for photo, name in ((run.first_photo, "first_photo"), (run.last_photo, "last_photo")):
         if photo.at.date() not in run.days:
             raise ValueError(f"{what}.{name} is on none of its days")
@@ -363,6 +380,22 @@ def _run_of(raw: object, what: str) -> ListedRun:
     if ("evidence thin" in run.flags) is not (grade in ("thin", "none")):
         raise ValueError(f"{what}.evidence: {grade} and the flag 'evidence thin' do not agree")
     return run
+
+
+def _beyond(run: ListedRun) -> list[dt.date]:
+    """The days between a flight day and the proof."""
+    ends = (run.first, run.days[0]), (run.days[-1], run.last)
+    return [a + dt.timedelta(n) for a, b in ends for n in range(1, (b - a).days)]
+
+
+def _flight_photos(value: object, what: str) -> tuple[tuple[int, int], ...]:
+    out = []
+    for pair in _listed(value, what):
+        if len(_listed(pair, what)) != 2 or sum(_whole(n, what, low=0) for n in pair) < 1:
+            raise ValueError(f"{what}: {_r(pair)} is not how many photos at speed and beside a "
+                             "jump there are on a day")
+        out.append((pair[0], pair[1]))
+    return tuple(out)
 
 
 def _boundary_of(raw: object, what: str) -> Boundary:
@@ -388,6 +421,7 @@ def _params_of(raw: object) -> dict:
         "gap_days": _whole(raw["gap_days"], "params.gap_days", low=1),
         "speeds": {k: _number(speeds[k], f"params.speeds.{k}") for k in _SPEEDS},
         "spans": _flag(raw["spans"], "params.spans"),
+        "flight_days": _flag(raw["flight_days"], "params.flight_days"),
     }
 
 
@@ -432,9 +466,14 @@ def _check_sweep(rows: Sequence[SweepRow]) -> None:
         raise ValueError("sweep: the gaps must be in order and each of them once")
 
 
-def _check_runs(runs: Sequence[ListedRun]) -> None:
+def _check_runs(runs: Sequence[ListedRun], params: Mapping) -> None:
     seen: set[str] = set()
     for run in runs:
+        if run.flight and not params["flight_days"]:
+            raise ValueError(f"runs: {run.id} has a flight day, and the list says there are none")
+        if any(n >= params["gap_days"] for n in Counter(
+                d < run.days[0] for d in _beyond(run)).values()):
+            raise ValueError(f"runs: {run.id} has a flight day too far from its days")
         if run.id in seen:  # one answer would stand for two questions
             raise ValueError(f"runs: {run.id} is there twice")
         seen.add(run.id)
@@ -665,7 +704,7 @@ def _listed_run(run: Run, name: str, grade: evidence.Grade) -> ListedRun:
     utc = dt.timezone.utc
     return ListedRun(run.region, name, run.first, run.last, run.days, run.silent, len(run.shots),
                      first, last, run.start.astimezone(utc), run.end.astimezone(utc), grade,
-                     run.flags, run.reasons, run.status)
+                     run.flags, run.reasons, run.status, run.flight, run.flight_photos)
 
 
 # -- the page, and what came back from it ----------------------------------------------------
@@ -759,7 +798,7 @@ def _read_each(
 
 
 def _run_answer(run: ListedRun, row: object, what: str) -> RunAnswer:
-    _fields(row, (), what, ("a", "words"))
+    _fields(row, (), what, ("a", "words", "out"))
     takes = _TAKES[run.status]
     if not row:
         raise ValueError(f"{what} says nothing; an answer that was not given is not there")
@@ -774,6 +813,10 @@ def _run_answer(run: ListedRun, row: object, what: str) -> RunAnswer:
             raise ValueError(f"{what}: the words are not text")
         if problem := words_problem(row["words"]):
             raise ValueError(f"{what}: the words cannot be taken: {problem}")
+    if "out" in row and (run.status not in ("offered", "held")
+                         or not _are_flight_days(row["out"], run)):
+        raise ValueError(f"{what}: out must be some of its flight days, in order, where it takes "
+                         f"a quality, not {_r(row['out'])}")
     return dict(row)  # type: ignore[return-value]
 
 

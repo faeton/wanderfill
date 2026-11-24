@@ -512,6 +512,267 @@ def settled(*more):
     return [*stay(Q, 2, 4), *stay(R, 10, 14), *stay(Q, 20, 22), *more]
 
 
+# -- 16: flight days -------------------------------------------------------------------
+
+
+def flown(d, region=R, hour=12.0, kind="fast", **kw):
+    return ob(d, region, hour, kind=kind, **kw)
+
+
+def ends_of(obs, region=R, **kw):
+    return [(r.first.day, r.last.day) for r in find_runs(obs, **kw) if r.region == region]
+
+
+BEFORE = [*stay(Q, 2, 4)]
+FOUR = [*BEFORE, *stay(R, 10, 14), *stay(Q, 20, 22)]
+
+
+@pytest.mark.parametrize("more, want", [
+    ((), (10, 14)),
+    ((flown(15),), (10, 15)), ((flown(15, kind="conflict"),), (10, 15)),
+    ((flown(9),), (9, 14)), ((flown(9), flown(15)), (9, 15)),
+    ((flown(16),), (10, 16)),                                  # one silent day between
+    ((flown(17),), (10, 14)), ((flown(8),), (8, 14)), ((flown(7),), (10, 14)),
+    ((flown(16), ob(15, R, state="edge")), (10, 14)),          # not silent
+    ((flown(16), ob(15, state="nowhere")), (10, 14)),
+    ((flown(16), flown(15, Q)), (10, 14)),
+    ((flown(15), flown(16)), (10, 15)),                        # one at each end, the nearest
+    ((flown(15, hour=8), flown(15, kind="conflict", hour=9)), (10, 15)),
+    ((flown(15, state="edge"),), (10, 14)), ((flown(15, state="nearest"),), (10, 14)),
+    ((flown(15, use="airports"),), (10, 14)), ((flown(15, use="none"),), (10, 14)),
+    ((flown(15, origin="airdrop"),), (10, 14)), ((flown(15, recorded=False),), (10, 14)),
+    ((flown(15, zone=0, lon=150.0),), (10, 14)), ((ob(15, timed=False),), (10, 14)),
+    ((flown(15, Q),), (10, 14)), ((ob(15, kind="fast", state="unread"),), (10, 14)),
+    ((ob(15, Q, 8), flown(15, hour=12)), (10, 14)),            # proof elsewhere between
+    ((ob(15, Q, 12), flown(15, hour=12)), (10, 14)),           # at that very instant
+    ((ob(15, Q, 18), flown(15, hour=12)), (10, 15)),           # the next region that evening
+    ((ob(14, Q, 23), flown(15, hour=12)), (10, 14)),
+    ((ob(15, Q, 8, state="edge"), flown(15, hour=12)), (10, 15)),
+    ((ob(15, Q, 10), flown(15, hour=8), flown(15, hour=12)), (10, 15)),  # one is enough
+    ((ob(9, Q, 15), flown(9, hour=12)), (10, 14)), ((ob(9, Q, 8), flown(9, hour=12)), (9, 14)),
+    ((ob(9, Q, 12), flown(9, hour=12)), (10, 14)),
+    ((ob(12, Q, 13), flown(9)), (9, 14)),                      # a day trip is not between
+    ((flown(12, kind="conflict"),), (10, 14)),                 # a day that it has
+], ids=lambda v: str(v)[-50:])
+def test_a_flight_day_beside_a_run_is_in_it(more, want):
+    obs = [*FOUR, *more]
+    for given in (obs, obs[::-1]):
+        assert ends_of(given) == [want]
+    assert ends_of(obs, flight_days=False) == [(10, 14)]
+
+
+def test_a_flight_day_changes_nothing_but_the_ends():
+    obs = [*FOUR, flown(9, hour=7), flown(16, hour=8), flown(16, hour=9, kind="conflict"),
+           flown(16, hour=10)]
+    (plain,), (wide,) = ([r for r in find_runs(obs, flight_days=f) if r.region == R]
+                         for f in (False, True))
+    assert wide == dataclasses.replace(
+        plain, first=day(9), last=day(16), silent=(day(15),), flight=(day(9), day(16)),
+        flight_photos=((1, 0), (2, 1)))
+    assert (wide.start, wide.end, wide.days) == (plain.start, plain.end, plain.days)
+    assert wide.id == "1:2026-05-09:2026-05-16" and plain.flight == plain.flight_photos == ()
+
+
+def test_only_photos_that_qualify_are_counted():
+    obs = [*FOUR, flown(15, hour=8), flown(15, hour=9, state="edge"), ob(15, Q, 10),
+           flown(15, hour=12), flown(15, hour=13, kind="conflict")]
+    (wide,) = [r for r in find_runs(obs) if r.region == R]
+    assert wide.flight_photos == ((1, 0),)
+
+
+def test_flight_photos_alone_are_never_a_run():
+    assert find_runs([flown(d, kind=k) for d in (5, 6) for k in ("fast", "conflict")]) == []
+    assert ends_of([*FOUR, flown(8, S), flown(9, S)], S) == []
+
+
+@pytest.mark.parametrize("gap, want", [(1, (10, 15)), (2, (10, 15)), (3, (10, 15))])
+def test_the_gap_decides_how_far_off_a_flight_day_is(gap, want):
+    assert ends_of([*FOUR, flown(15)], gap_days=gap) == [want]
+    for off in range(1, 5):
+        wide = (10, 14 + off) if off <= gap else (10, 14)
+        assert ends_of([*FOUR, flown(14 + off)], gap_days=gap) == [wide], (gap, off)
+
+
+def test_a_track_row_elsewhere_between_is_a_barrier_to_a_flight_day_too():
+    obs = [*FOUR, flown(16)]
+    for row, want in ((R, (10, 16)), (Q, (10, 14)), (None, (10, 14))):
+        assert ends_of(obs, track=[(day(15), row)]) == [want]
+    assert ends_of([*FOUR, flown(15)], track=[(day(15), Q)]) == [(10, 15)]  # on the day itself
+
+
+def test_a_day_that_two_runs_could_have_is_neithers():
+    obs = [*BEFORE, *stay(R, 10, 12), flown(13), *stay(R, 14, 16), *stay(Q, 20, 22)]
+    assert ends_of(obs) == [(10, 12), (14, 16)]
+    # And each has its own where there are two of them.
+    obs = [*BEFORE, *stay(R, 10, 12), flown(13), flown(14), *stay(R, 15, 16), *stay(Q, 20, 22)]
+    assert ends_of(obs) == [(10, 13), (14, 16)]
+    # Two regions can both have a day: they left one and came to the other.
+    obs = [*stay(R, 10, 12), flown(13, hour=8), flown(13, Q, 20), *stay(Q, 14, 15)]
+    assert ends_of(obs) == [(10, 13)] and ends_of(obs, Q) == [(13, 15)]
+
+
+def test_a_flight_day_that_is_a_day_of_another_run_is_not_one():
+    """Two clocks: what is the next day here is a day of the other stay there."""
+    east, west = {"zone": 13, "lon": 178.0}, {"zone": -10, "lon": -155.0}
+    obs = [*stay(R, 10, 12, **west), ob(13, Q, 1, **west), ob(14, R, 9, **east),
+           ob(14, R, 18, **east)]
+    runs = [r for r in find_runs([*obs, flown(14, hour=23, **east)]) if r.region == R]
+    assert all(r.flight == () for r in runs)
+
+
+def test_a_flight_day_over_the_date_line_goes_by_its_own_clock():
+    east, west = {"zone": 13, "lon": 178.0}, {"zone": -10, "lon": -155.0}
+    # Later in UTC, and a day earlier by its own clock: no day is added.
+    obs = [*BEFORE, *stay(R, 10, 14, **east), flown(14, hour=9, **west)]
+    assert ends_of(obs) == [(10, 14)]
+    obs = [*BEFORE, *stay(R, 10, 14, **west), flown(15, hour=23, **east)]
+    assert ends_of(obs) == [(10, 15)]
+    # Earlier in UTC than the last proof, and dated after it: that is not after it.
+    obs = [*BEFORE, *stay(R, 10, 14, **west), flown(15, hour=2, **east)]
+    assert ends_of(obs) == [(10, 14)]
+    assert ends_of([*obs, flown(16, hour=12, **east)]) == [(10, 14)]  # nor past that day
+
+
+def test_an_overnight_flight_can_give_a_day_too_many():
+    """The limit that the page says: a phone that still has the old place the next morning."""
+    obs = [*FOUR, flown(15, hour=5, kind="conflict"), ob(15, Q, 9)]
+    assert ends_of(obs) == [(10, 15)]
+
+
+def test_a_visit_is_held_against_the_wider_run():
+    obs = [*FOUR, flown(15)]
+    assert one(obs).status == "offered"
+    assert held_by(visit(10, 15), obs) == ("there", {"there"})
+    assert held_by(visit(15, 16), obs) == ("fixed", {"overlap"})
+    assert held_by(visit(10, 14), obs) == ("fixed", {"overlap"})
+    assert held_by(visit(16, 17), obs) == ("fixed", {"continuation"})
+    assert held_by(visit(15, None), obs) == ("fixed", {"overlap"})
+    assert held_by(visit(16, None), obs) == ("fixed", {"continuation"})
+    # Between the run and the visit there has to be a photo elsewhere after the flight day.
+    obs = [*BEFORE, *stay(R, 10, 14), flown(15, hour=8), ob(15, Q, 18), *stay(Q, 20, 22)]
+    assert held_by(visit(17, 18), obs) == ("offered", set())
+    early = [*BEFORE, *stay(R, 10, 14), flown(9, hour=12), ob(9, Q, 8), *stay(Q, 20, 22)]
+    assert held_by(visit(6, 7), early)[0] == "offered"
+    assert held_by(visit(6, 7), [*BEFORE, *stay(R, 10, 14), flown(9), *stay(Q, 20, 22)])[1] \
+        == {"continuation"}
+
+
+def test_finished_is_after_the_flight_day():
+    obs = [*BEFORE, *stay(R, 10, 14), flown(15, hour=8)]
+    assert kinds(one([*obs, ob(15, Q, 18)])) == {"open"}
+    assert kinds(one([*obs, ob(15, Q, 18), ob(16, Q, 8)])) == set()
+
+
+def test_brief_and_layover_and_grade_are_of_the_proof_only():
+    obs = [*BEFORE, ob(10, hour=12), flown(9), flown(11), *stay(Q, 20, 22)]
+    run = one(obs)
+    assert (run.first, run.last) == (day(9), day(11)) and kinds(run) == {"brief"}
+    obs = [*BEFORE, ob(10, hour=8), ob(10, hour=12), flown(10, hour=4), flown(11, hour=0.5),
+           flown(10, hour=16), *stay(Q, 20, 22)]
+    assert kinds(one(obs)) == {"layover?"} and one(obs).last == day(11)
+    assert kinds(one([*BEFORE, ob(10, hour=8), ob(10, hour=12), flown(9), flown(11, hour=20),
+                      *stay(Q, 20, 22)])) == set()
+
+
+def test_the_other_reasons_are_of_the_wider_run():
+    obs = [*FOUR, flown(9), flown(15)]
+    assert kinds(one(obs, since=day(10))) == {"across"} == kinds(one(obs, until=day(14)))
+    assert kinds(one(obs, since=day(9), until=day(15))) == set()
+    for n in (8, 16):
+        assert kinds(one([*obs, ob(n, state="unread")])) == {"not read"}
+        assert kinds(one([*obs, ob(n, state="stale")])) == {"stale map"}
+    assert one([*FOUR, ob(16, state="unread")]).status == "offered"
+    assert "track" in flags(one(obs, track=[(day(15), Q)]))
+    # It is on the list where only its flight day is in the dates, and held.
+    assert kinds(one(obs, since=day(15))) == {"across"}
+    assert regions_to_read(obs, since=day(15), until=day(15)) == {R}
+    assert regions_to_read(obs, since=day(15), until=day(15), flight_days=False) == set()
+
+
+def test_the_gap_between_two_runs_is_from_flight_day_to_flight_day():
+    obs = [*stay(R, 1, 3), flown(4), flown(6, Q), *stay(Q, 7, 8), *stay(S, 10, 11)]
+    runs = judged(obs)
+    (b, *_) = boundaries(runs, gap_days=2, obs=obs)
+    assert [kind_of(s) for s in b.suggestions] == ["fast"]  # 4 to 6; the flight is still asked
+
+
+def test_the_sweep_has_flight_days_or_not():
+    obs = [*FOUR, flown(15), ob(15, Q, 20)]
+    visits = {R: [visit(10, 15)], Q: []}
+    on, off = (sweep(obs, visits, since=None, until=None, gaps=[2], flight_days=f)[0]
+               for f in (True, False))
+    assert on.held == off.held - 1  # there, and not an overlap
+
+
+def test_a_part_dated_visit_that_can_have_the_flight_day_is_undated():
+    """The one case where what nothing released is released by words: without the flight day
+    nothing showed that they left between, and with it the visit may be this one."""
+    obs = [ob(1, R, 9, zone=0), ob(1, R, 18), ob(2, R), ob(dt.date(2026, 4, 30), kind="fast"),
+           *stay(Q, 9, 10)]
+    shift = lambda o: dataclasses.replace(o, shot=dataclasses.replace(  # noqa: E731
+        o.shot, taken=o.shot.taken - dt.timedelta(120), taken_utc=o.shot.taken_utc
+        - dt.timedelta(120)))
+    obs = [shift(o) for o in obs]  # the flight day is 31 December
+    rows = {R: [visit(2025, 2025)]}
+    runs = {f: find_runs(obs, flight_days=f) for f in (False, True)}
+    off, on = (next(r for r in judge(runs[f], obs, {Q: []} | rows, since=None, until=None)
+                    if r.region == R) for f in (False, True))
+    assert (off.status, kinds(off)) == ("fixed", {"continuation"})
+    assert (on.first, on.status, kinds(on)) == (dt.date(2025, 12, 31), "held", {"undated"})
+
+
+def test_a_wider_run_is_never_freer():
+    """With flight days and without. No run that was held is offered by them; what else may
+    change is here: a visit of just these days is there, and a part-dated one that can have
+    the flight day is undated where it was a continuation."""
+    rng = random.Random(16)
+    ends = [None, 2025, 2026, 2027, *range(1, 32)]
+    seen = set()
+    for _ in range(4000):
+        zone = rng.choice((0, 0, 9))
+        obs = [ob(d, rng.choice((Q, Q, S)), rng.choice((1, 12, 23)))
+               for d in rng.sample(range(1, 31), rng.randrange(4))]
+        first = rng.randrange(3, 24)
+        obs += stay(R, first, first + rng.randrange(3), zone=zone)
+        obs += [flown(first + off, hour=rng.choice((1, 12, 23)), zone=zone,
+                      kind=rng.choice(("fast", "conflict")))
+                for off in rng.sample(range(-3, 7), rng.randrange(1, 4))]
+        rows = []
+        for n in range(rng.randrange(3)):
+            a, b = rng.choice(ends), rng.choice(ends)
+            if isinstance(a, int) and isinstance(b, int) and (a > 31) is (b > 31):
+                a, b = sorted((a, b))
+            rows.append(visit(a, b, id=n))
+        since, until = rng.choice(((None, None), (None, None), (day(8), day(20))))
+        both = []
+        for on in (False, True):
+            runs = find_runs(obs, flight_days=on)
+            read = {r.region: [] for r in runs} | {R: rows}
+            got = judge(runs, obs, read, since=since, until=until)
+            both.append(({(r.region, r.days): r for r in got},
+                         boundaries(got, gap_days=2, obs=obs)))
+        (off, cuts_off), (on, cuts_on) = both
+        assert set(off) <= set(on)
+        for key, wide in on.items():
+            was = off.get(key)
+            if was is None:
+                assert "across" in kinds(wide)
+                continue
+            change = (was.status, wide.status)
+            if was.status != wide.status:
+                assert wide.flight
+                seen.add(change)
+            assert change in {(a, b) for a in ("offered", "held", "fixed", "there")
+                              for b in ("held", "fixed", "there")} | {("offered", "offered")}
+            if was.status == "fixed" and wide.status == "held":
+                assert "continuation" in kinds(was) and "undated" in kinds(wide)
+        if len(off) == len(on):  # every place where a cut was asked, it still is
+            for a, b in zip(cuts_off, cuts_on, strict=True):
+                assert not a.suggestions or b.suggestions
+    assert seen >= {("offered", "held"), ("offered", "fixed"), ("fixed", "there"),
+                    ("there", "fixed")}
+
+
 def held_by(v, obs=None):
     run = one(settled() if obs is None else obs, {R: v if isinstance(v, list) else [v]})
     return run.status, kinds(run)
@@ -893,7 +1154,8 @@ def test_flags_hold_nothing():
 def test_conflict_is_of_its_days_and_its_region():
     assert "conflict" in flags(one(settled(ob(14, kind="conflict", state="nearest"))))
     assert "conflict" not in flags(one(settled(ob(14, Q, kind="conflict"))))
-    assert "conflict" not in flags(one(settled(ob(15, R, kind="conflict"))))
+    assert "conflict" not in flags(one(settled(ob(17, R, kind="conflict"))))
+    assert "conflict" in flags(one(settled(ob(15, R, kind="conflict"))))  # a flight day
 
 
 def test_fast_near_is_within_six_hours():
@@ -1264,7 +1526,8 @@ def test_nothing_here_speaks_to_the_server_or_to_a_clock():
 
 def test_the_shape_of_a_run():
     assert list(Run.__dataclass_fields__) == [
-        "region", "first", "last", "days", "silent", "shots", "reasons", "flags", "status"]
+        "region", "first", "last", "days", "silent", "shots", "reasons", "flags", "status",
+        "flight", "flight_photos"]
 
 
 # -- the list: what the owner was shown -----------------------------------------------------
@@ -1273,7 +1536,7 @@ HOSTILE = ("</script><script>boom()</script><!--\"'&amp;"
            "  ‮ 東京 \U0001f5fc $& \\u003c")
 NAMES = {R: "Aldmoor", Q: "Berrow", S: "Cray Islands", 4: "Dunvale", 8: "Elstow", 9: "Fenmark"}
 PARAMS = {"since": "2026-04-20", "until": "2026-05-30", "gap_days": 2,
-          "speeds": default_speeds(), "spans": False}
+          "speeds": default_speeds(), "spans": False, "flight_days": True}
 PHOTOS = {"kind": "photos", "label": "Photos library", "sha256": None, "first": "2019-03-02",
           "last": "2026-06-20", "count": 4321}
 TRACK = {"kind": "track", "label": "days.csv", "sha256": "a" * 64, "first": "2012-01-01",
@@ -1321,7 +1584,7 @@ def test_a_list_comes_back_from_disk_as_it_was(tmp_path):
 
 def test_the_hash_of_a_trip_list_is_what_it_was():
     """Answers on disk name it. Another hash for the same list is another list to them."""
-    assert small().sha256 == "3084d90c53c6b41e161242da89ed02baf38032846d75dc56decfa006e45c476a"
+    assert small().sha256 == "80d4ef7bd603cf0f8704f093937eae32b7b2444d1892f8cc94ff9da15bdc7451"
 
 
 def test_what_the_list_says_of_a_run():
@@ -1348,7 +1611,8 @@ def test_the_list_has_no_coordinates_and_no_photos(tmp_path):
         assert "12.345" not in text and "SECRET" not in text
     assert set(m._stored()["runs"][0]) == {
         "region", "name", "first", "last", "days", "silent", "photos", "first_photo",
-        "last_photo", "start", "end", "evidence", "flags", "reasons", "status"}
+        "last_photo", "start", "end", "evidence", "flags", "reasons", "status", "flight",
+        "flight_photos"}
 
 
 def test_the_list_grades_the_photos_as_the_dossier_does():
@@ -1754,6 +2018,134 @@ def answers_file(tmp_path, raw):
     return path
 
 
+# Aldmoor with a flight day after it, Berrow with one before it and a silent day between.
+FLOWN = [*stay(R, 1, 3), flown(4, hour=7), flown(4, hour=8), flown(6, Q, kind="conflict"),
+         *stay(Q, 8, 9), *stay(S, 10, 11), ob(40, 8)]
+RF, QF = "1:2026-05-01:2026-05-04", "2:2026-05-06:2026-05-09"
+OUT_R, OUT_Q = {"out": ["2026-05-04"]}, {"out": ["2026-05-06"]}
+
+
+def test_the_list_has_flight_days_and_they_come_back(tmp_path):
+    m = listed(FLOWN)
+    r, q, s = m.runs
+    assert (r.id, q.id) == (RF, QF) and s.flight == s.flight_photos == ()
+    assert (r.days, r.flight, r.flight_photos) == ((day(1), day(2), day(3)), (day(4),), ((2, 0),))
+    assert (q.silent, q.flight, q.flight_photos) == ((day(7),), (day(6),), ((0, 1),))
+    assert TripList.load(m.save(tmp_path / "m.json")) == m
+    back = reload(tmp_path, rehashed(put(json.loads(m.to_json()), "runs.0.flight_photos",
+                                         [[1, 1]])))
+    assert back.sha256 != m.sha256
+
+
+@pytest.mark.parametrize("path, value", [
+    ("params.flight_days", False), ("params.flight_days", 1), ("params.flight_days", GONE),
+    ("runs.0.flight", []), ("runs.0.flight", ["2026-05-05"]), ("runs.0.flight", None),
+    ("runs.0.flight", ["2026-05-03"]), ("runs.0.flight", ["2026-05-04", "2026-05-04"]),
+    ("runs.0.flight", GONE), ("runs.0.flight", "2026-05-04"),
+    ("runs.0.flight_photos", []), ("runs.0.flight_photos", [[0, 0]]),
+    ("runs.0.flight_photos", [[2]]), ("runs.0.flight_photos", [[2, -1]]),
+    ("runs.0.flight_photos", [[True, 0]]), ("runs.0.flight_photos", [[2, 0], [1, 0]]),
+    ("runs.0.flight_photos", None), ("runs.0.flight_photos", GONE), ("runs.0.flight_photos", [2]),
+    ("runs.0.silent", ["2026-05-04"]), ("runs.1.silent", []), ("params.gap_days", 1),
+    ("runs.0.last", "2026-05-03"), ("runs.0.last_photo.at", "2026-05-04T07:00:00"),
+], ids=str)
+def test_flight_days_that_do_not_fit_are_refused(tmp_path, path, value):
+    m = listed(FLOWN)
+    with pytest.raises(PlanInvalid, match=r"m\.json"):
+        reload(tmp_path, rehashed(put(json.loads(m.to_json()), path, value)))
+
+
+def test_two_days_at_one_end_are_not_flight_days(tmp_path):
+    raw = json.loads(listed(FLOWN).to_json())
+    raw["runs"][0].update(last="2026-05-05", flight=["2026-05-04", "2026-05-05"],
+                          flight_photos=[[1, 0], [1, 0]])
+    with pytest.raises(PlanInvalid, match="one day beside"):
+        reload(tmp_path, rehashed(raw))
+    raw = json.loads(listed(FLOWN).to_json())
+    raw["runs"][0].update(days=["2026-05-01", "2026-05-03"], flight=["2026-05-02", "2026-05-04"],
+                          flight_photos=[[1, 0], [1, 0]])
+    with pytest.raises(PlanInvalid, match="one day beside"):  # a day that it has
+        reload(tmp_path, rehashed(raw))
+
+
+@pytest.mark.parametrize("gap, fits", [(1, False), (2, True)])
+def test_a_flight_day_farther_off_than_the_gap_is_refused(tmp_path, gap, fits):
+    raw = json.loads(listed([*stay(R, 1, 3), flown(5)]).to_json())
+    raw["params"]["gap_days"] = gap
+    assert raw["runs"][0]["silent"] == ["2026-05-04"]
+    if fits:
+        assert reload(tmp_path, rehashed(raw))
+    else:
+        with pytest.raises(PlanInvalid, match="too far"):
+            reload(tmp_path, rehashed(raw))
+
+
+@pytest.mark.parametrize("quality, words", [("3", None), (None, None), ("no", None), ("?", None)])
+def test_a_flight_day_can_be_left_out_where_a_quality_is_taken(tmp_path, quality, words):
+    m = listed(FLOWN)
+    row = OUT_R | ({"a": quality} if quality else {})
+    path = answers_file(tmp_path, given(m, {RF: row}))
+    assert load_answers(path, m)["runs"] == {RF: row}
+
+
+@pytest.mark.parametrize("out", [
+    [], ["2026-05-03"], ["2026-05-06"], ["2026-05-04", "2026-05-04"], "2026-05-04", None, {},
+    [20260504], ["2026-5-4"], [None], ["2026-05-04", "2026-05-03"], True,
+], ids=str)
+def test_only_the_flight_days_of_that_run_can_be_left_out(tmp_path, out):
+    m = listed(FLOWN)
+    ans = given(m, {RF: {"a": "3", "out": out}})
+    with pytest.raises(PlanInvalid, match="flight days"):
+        load_answers(answers_file(tmp_path, ans), m)
+    with pytest.raises(PlanInvalid, match="flight days"):
+        group(m.runs, m.boundaries, {"runs": {RF: {"a": "3", "out": out}}, "cuts": {}})
+
+
+def test_out_is_refused_where_no_quality_is_taken(tmp_path):
+    for visits in ({R: [visit(1, 4)]}, {R: [visit(2, 2)]}):
+        m = listed(FLOWN, visits)
+        assert m.runs[0].flight and m.runs[0].status in ("there", "fixed")
+        with pytest.raises(PlanInvalid):
+            load_answers(answers_file(tmp_path, given(m, {RF: OUT_R})), m)
+        with pytest.raises(PlanInvalid):
+            group(m.runs, m.boundaries, {"runs": {RF: OUT_R}, "cuts": {}})
+
+
+def test_out_must_be_in_order(tmp_path):
+    m = listed([*stay(S, -3, -2), flown(0), *FLOWN[:6], *FLOWN[6:]])
+    (r,) = [r for r in m.runs if r.region == R]
+    both = [str(day(0)), "2026-05-04"]
+    assert [str(d) for d in r.flight] == both
+    path = answers_file(tmp_path, given(m, {r.id: {"a": "3", "out": both}}))
+    assert load_answers(path, m)["runs"][r.id]["out"] == both
+    with pytest.raises(PlanInvalid, match="flight days"):
+        load_answers(answers_file(tmp_path, given(m, {r.id: {"out": both[::-1]}})), m)
+
+
+def test_a_day_left_out_is_in_no_row_and_no_header_and_the_silent_day_beside_it_neither():
+    m = listed(FLOWN)
+    cut = {b.id: "cut" for b in m.boundaries if b.suggestions}
+    def rows(**out):
+        ans = {RF: {"a": "3"} | out.get("r", {}), QF: {"a": "3"} | out.get("q", {}),
+               m.runs[2].id: {"a": "3"}}
+        drafts, held = group(m.runs, m.boundaries, {"runs": ans, "cuts": cut})
+        assert held == []
+        return [([(row.first.day, row.last.day) for row in d.rows], d.date_from.day,
+                 d.date_to.day) for d in drafts]
+    assert rows() == [([(1, 4)], 1, 4), ([(6, 9), (10, 11)], 6, 11)]
+    assert rows(r=OUT_R) == [([(1, 3)], 1, 3), ([(6, 9), (10, 11)], 6, 11)]
+    assert rows(q=OUT_Q) == [([(1, 4)], 1, 4), ([(8, 9), (10, 11)], 8, 11)]
+
+
+def test_leaving_a_day_out_releases_nothing():
+    obs = [*stay(R, 1, 3), flown(4), ob(4, Q, 20)]
+    runs, bs = cuts(obs)
+    r, _ = runs
+    assert kinds(r) == {"open"} and r.last == day(4)
+    drafts, (held, *_) = group(runs, bs, {"runs": {r.id: {"a": "3"} | OUT_R}, "cuts": {}})
+    assert drafts == [] and any("needs words" in x for x in held.reasons)
+
+
 R_ID, Q_ID, S_ID = "1:2026-05-01:2026-05-03", "2:2026-05-03:2026-05-05", "3:2026-05-06:2026-05-08"
 FOUR_ID, NINE_ID = "4:2026-05-09:2026-05-10", "9:2026-05-13:2026-05-14"
 CUT_RQ, CUT_QS, CUT_49 = f"{R_ID}|{Q_ID}", f"{Q_ID}|{S_ID}", f"{FOUR_ID}|{NINE_ID}"
@@ -1878,7 +2270,8 @@ def test_a_repeated_answer_and_a_huge_file_are_refused(tmp_path):
 
 def as_text(drafts, not_made):
     """What `group` returned, as the page's `group` returns it."""
-    return {"trips": [{"rows": [[row.run.id, row.quality, row.words] for row in d.rows],
+    return {"trips": [{"rows": [[row.run.id, row.quality, row.words, str(row.first),
+                                 str(row.last)] for row in d.rows],
                        "date_from": str(d.date_from), "date_to": str(d.date_to)} for d in drafts],
             "notMade": [{"runs": list(n.runs), "reasons": list(n.reasons)} for n in not_made]}
 
@@ -1922,21 +2315,25 @@ RULES = [
     (OPEN_INSIDE, {R: "3", Q: "3", S: "3"}, {}, {}, {S: "home the next day"}, 30),
     (TWICE, {R: "3", Q: "3"}, {}, {}, {}, 30),
     (TWICE, {R: "3", Q: "3"}, {(Q, R): "cut"}, {}, {}, 30),
+    (FLOWN, {R: "3", Q: "3", S: "3"}, {(R, Q): "same"}, {}, {}, 30),
+    (FLOWN, {R: "3", Q: "3", S: "3"}, {(R, Q): "same"}, {}, {}, 30, {R: OUT_R, Q: OUT_Q}),
+    (FLOWN, {R: "3", Q: "3", S: "3"}, {(R, Q): "cut"}, {}, {}, 30, {Q: OUT_Q}),
+    (FLOWN, {R: "no", Q: "?", S: "3"}, {(R, Q): "cut"}, {}, {}, 30, {R: OUT_R, Q: OUT_Q}),
 ]
 
 
-def rule_case(obs, by_region, cut, visits, words, until):
+def rule_case(obs, by_region, cut, visits, words, until, out=None):
     m = listed(obs, visits, until=until)
     of = {r.id: r.region for r in m.runs}
     runs = {r.id: {k: src[r.region] for k, src in (("a", by_region), ("words", words))
-                   if r.region in src} for r in m.runs}
+                   if r.region in src} | (out or {}).get(r.region, {}) for r in m.runs}
     pairs = {b.id: cut[key] for b in m.boundaries if (key := (of[b.before], of[b.after])) in cut}
     return m, {"runs": {k: v for k, v in runs.items() if v}, "cuts": pairs}
 
 
 @pytest.mark.parametrize("case", RULES, ids=range(len(RULES)))
 def test_group_is_the_same_on_a_list_that_was_read_back(tmp_path, case):
-    obs, _, _, visits, _, until = case
+    obs, _, _, visits, _, until = case[:6]
     m, ans = rule_case(*case)
     back = TripList.load(m.save(tmp_path / "m.json"))
     runs, bs = cuts(obs, visits, until=day(until))
@@ -1959,10 +2356,16 @@ def any_list(rng):
         last = on = first + dt.timedelta(days=rng.randrange(3))
         a, b = (dt.datetime.combine(d, dt.time(6 + 12 * e, n)) for e, d in enumerate((first, last)))
         region, reasons = rng.choice((R, R, Q, S, 4)), rng.choice(REASONS)
+        step = [rng.choice((0, 0, 1, 2)) for _ in range(2)]
+        wide = first - dt.timedelta(step[0]), last + dt.timedelta(step[1])
+        flight = tuple(d for d, n in zip(wide, step, strict=True) if n)
+        silent = (*([first - dt.timedelta(1)] * (step[0] == 2)),
+                  *([last + dt.timedelta(1)] * (step[1] == 2)))
         runs.append(ListedRun(
-            region, NAMES[region], first, last, tuple(sorted({first, last})), (), 4,
+            region, NAMES[region], *wide, tuple(sorted({first, last})), silent, 4,
             PhotoTime(a, 0), PhotoTime(b, 0), a.replace(tzinfo=UTC), b.replace(tzinfo=UTC),
-            "thin", ("evidence thin",), reasons, status_of(reasons)))
+            "thin", ("evidence thin",), reasons, status_of(reasons), flight,
+            tuple(rng.choice(((1, 0), (0, 2), (1, 1))) for _ in flight)))
     if len({r.id for r in runs}) < len(runs):
         return any_list(rng)
     bs = []
@@ -1983,6 +2386,9 @@ def any_list(rng):
             row["a"] = a
         if r.status == "held" and (words := rng.choice(WORDS)) is not None:
             row["words"] = words
+        out = [str(d) for d in r.flight if rng.random() < 0.4]
+        if out and r.status in ("offered", "held"):
+            row["out"] = out
         if row:
             ans[r.id] = row
     cut = {b.id: c for b in bs if (c := rng.choice((None, "cut", "same", "same")))}
@@ -2853,6 +3259,93 @@ def test_a_run_shows_its_facts(tmp_path):
     assert "No visit" not in first
     boxes = run(tmp_path, m, "return open().runs().map((r) => r.cls('visits').length);")
     assert boxes == [1, 0]
+
+
+@needs_node
+def test_a_flight_day_is_said_and_can_be_left_out_and_taken_back(tmp_path):
+    m = listed(FLOWN)
+    got = run(tmp_path, m, """
+      const p = open();
+      const r = p.run("Aldmoor"), q = p.run("Berrow");
+      const out = [r.cls("flight").map((f) => f.children[0].textContent),
+                   q.cls("flight").map((f) => f.children[0].textContent),
+                   p.run("Cray").cls("flight").length,
+                   r.cls("flight")[0].all((e) => e.tag === "button").map((b) => [
+                     b.textContent, b.getAttribute("aria-pressed")]), p.storage.held.size];
+      const state = () => [p.pressed(r), Object.fromEntries(p.storage.held),
+                           p.byId.preview.cls("trip").map((t) => t.textContent)];
+      p.press(p.betweens()[0], "A new trip starts here");
+      p.press(r, "3 good visit");
+      out.push(state());
+      p.press(r, "Leave this day out");
+      out.push(state());
+      p.byId.download.click();
+      const text = p.blobs[0].text;
+      out.push(open({ storage: p.storage }).pressed(open({ storage: p.storage }).run("Aldmoor")));
+      p.press(r, "Leave this day out");
+      out.push(state());
+      p.byId.download.click();
+      return [...out, text, p.blobs[1].text];
+    """)
+    assert got[0] == ["The last day is a flight day: 2026-05-04, 2 photos taken at speed in the "
+                      "region"]
+    assert got[1] == ["The first day is a flight day: 2026-05-06, 1 photo in the region beside an "
+                      "impossible jump, as when a phone keeps its position through a flight"]
+    assert got[2] == 0 and got[3] == [["Leave this day out", "false"]] and got[4] == 0
+    (key,) = stored(m, f"out:{RF}:2026-05-04")
+    pressed, kept, (trip,) = got[5]
+    assert pressed == ["3 good visit"] and key not in kept
+    assert "2026-05-01 to 2026-05-04: 3 good visit" in trip
+    pressed, kept, (trip,) = got[6]
+    assert pressed == ["Leave this day out", "3 good visit"] and kept[key] == "out"
+    assert "2026-05-01 to 2026-05-03: 3 good visit" in trip
+    assert "Trip: 2026-05-01 to 2026-05-03" in trip
+    assert got[7] == ["Leave this day out", "3 good visit"]
+    assert got[8] == got[5]
+    for text, want in ((got[9], OUT_R | {"a": "3"}), (got[10], {"a": "3"})):
+        assert load_answers(answers_file(tmp_path, text), m)["runs"] == {RF: want}
+
+
+@needs_node
+def test_a_run_that_takes_no_quality_says_its_flight_day_and_has_no_button(tmp_path):
+    for visits in ({R: [visit(1, 4)]}, {R: [visit(2, 2)]}):
+        m = listed(FLOWN, visits)
+        got = run(tmp_path, m, """
+          const s = new Storage();
+          s.setItem(key, "out");
+          const p = open({ storage: s });
+          const r = p.run("Aldmoor");
+          p.byId.show.click();
+          return [r.cls("flight")[0].textContent, p.buttons(r), p.byId.text.value];
+        """, key=stored(m, f"out:{RF}:2026-05-04")[0])
+        assert got[0].startswith("The last day is a flight day") and "Leave this day" not in got[0]
+        assert "Leave this day out" not in got[1] and json.loads(got[2])["runs"] == {}
+
+
+@needs_node
+@pytest.mark.parametrize("junk", ["in", "", "OUT", "2026-05-04"])
+def test_a_stored_flight_answer_that_is_none_is_not_used(tmp_path, junk):
+    m = listed(FLOWN)
+    got = run(tmp_path, m, """
+      const s = new Storage();
+      s.setItem(key, junk);
+      const p = open({ storage: s });
+      p.byId.show.click();
+      return [JSON.parse(p.byId.text.value).runs, p.byId.unused.hidden];
+    """, key=stored(m, f"out:{RF}:2026-05-04")[0], junk=junk)
+    assert got == [{}, False]
+
+
+@needs_node
+def test_both_kinds_of_photo_and_the_rule_itself_are_said(tmp_path):
+    obs = [*FLOWN, flown(4, hour=9, kind="conflict"), flown(4, hour=10, kind="conflict")]
+    read = 'return [open().byId.about.textContent, open().runs()[0].cls("flight")[0].textContent];'
+    about, text = run(tmp_path, listed(obs), read)
+    assert "2 photos taken at speed in the region, and 2 photos in the region beside" in text
+    assert "A day of photos in flight beside a stretch is in it" in about
+    off = listed([*stay(R, 1, 3), ob(40, 8)], params=PARAMS | {"flight_days": False})
+    about = run(tmp_path, off, "return open().byId.about.textContent;")
+    assert "Days of photos in flight are in no stretch" in about
 
 
 READ_PARTS = """

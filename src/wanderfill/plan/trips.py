@@ -26,7 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -207,10 +207,12 @@ def _own(obs: Iterable[Obs]) -> Iterator[Obs]:
 class Run:
     """Days of photos inside one region.
 
-    ``days`` are the days with proof and ``first`` and ``last`` the ends of those, never of
-    anything else. ``silent`` are the days between with no photo at all. ``shots`` is the
-    proof, in UTC order. ``held`` is released by the owner's words and ``fixed`` by nothing;
-    ``there`` is on the profile already, with these dates.
+    ``days`` are the days with proof, and ``flight`` the flight days beside them (16), one at
+    each end at most. ``first`` and ``last`` are the ends of both, never of anything else.
+    ``silent`` are the days between with no photo at all. ``shots`` is the proof, in UTC
+    order. ``held`` is released by the owner's words and ``fixed`` by nothing; ``there`` is on
+    the profile already, with these dates. ``flight_photos`` has, for each flight day, how
+    many of its photos were taken at speed and how many are beside an impossible jump.
     """
 
     region: int
@@ -222,6 +224,8 @@ class Run:
     reasons: tuple[str, ...]
     flags: tuple[str, ...]
     status: Status
+    flight: tuple[dt.date, ...] = ()
+    flight_photos: tuple[tuple[int, int], ...] = ()
 
     @property
     def id(self) -> str:
@@ -248,6 +252,10 @@ class AnyRun(Protocol):
     @property
     def last(self) -> dt.date: ...
     @property
+    def days(self) -> tuple[dt.date, ...]: ...
+    @property
+    def flight(self) -> tuple[dt.date, ...]: ...
+    @property
     def reasons(self) -> tuple[str, ...]: ...
     @property
     def status(self) -> Status: ...
@@ -269,7 +277,8 @@ def _in_order(runs: Iterable[AnyRun]) -> list:
 
 
 def find_runs(
-    obs: Iterable[Obs], *, gap_days: int = GAP_DAYS, track: Iterable[TrackRow] = ()
+    obs: Iterable[Obs], *, gap_days: int = GAP_DAYS, track: Iterable[TrackRow] = (),
+    flight_days: bool = True,
 ) -> list[Run]:
     """The runs of every region, in time order, not judged (3, 3a).
 
@@ -279,15 +288,17 @@ def find_runs(
     ground, not set aside, and placed in this region, on its edge or beside it. Silent: no
     photo at all, and no ``track`` row in another region. Any other day is a barrier. What
     else there is on a proof day does not matter: a day trip and a transfer leave proof of
-    two regions on one day.
+    two regions on one day. With ``flight_days`` a run may begin and end a day wider than its
+    proof; see :func:`_with_flight_days`.
 
     What comes back is ``fixed``, as ``not judged``: :func:`judge` says what each may be.
     """
     if type(gap_days) is not int or gap_days < 1:
         raise ValueError(f"gap_days={gap_days!r} is not a whole number of days of 1 or more")
+    obs = list(_own(obs))
     only: dict[dt.date, int | None] = {}  # the one region of a day's photos, or None
     proof: dict[int, dict[dt.date, list[Obs]]] = defaultdict(lambda: defaultdict(list))
-    for o in _own(obs):
+    for o in obs:
         fit = o.place.region if o.shot.kind == "ground" and o.shot.use == "all" else None
         if only.setdefault(o.day, fit) != fit:
             only[o.day] = None
@@ -297,16 +308,17 @@ def find_runs(
     for day, region in track:
         rows[day].add(region)
 
+    def is_silent(region: int, day: dt.date) -> bool:
+        return day not in only and rows.get(day, {region}) == {region}
+
     def between(region: int, a: dt.date, b: dt.date) -> list[dt.date] | None:
         """The silent days between two proof days that join, or ``None``."""
         silent, in_a_row = [], 0
         for n in range(1, (b - a).days):
             day = a + n * _DAY
-            if day in only:
-                if only[day] != region:
-                    return None
+            if day in only and only[day] == region:
                 in_a_row = 0
-            elif rows.get(day, {region}) != {region}:
+            elif not is_silent(region, day):
                 return None
             else:
                 silent.append(day)
@@ -331,7 +343,68 @@ def find_runs(
             shots = sorted((o for d in stretch for o in by_day[d]), key=_utc)
             out.append(Run(region, stretch[0], stretch[-1], tuple(stretch), tuple(silent),
                            tuple(shots), ("not judged",), (), "fixed"))
-    return _in_order(out)
+    return _in_order(_with_flight_days(out, obs, is_silent, gap_days) if flight_days else out)
+
+
+def _with_flight_days(
+    runs: Sequence[Run],
+    obs: Sequence[Obs],
+    is_silent: Callable[[int, dt.date], bool],
+    gap_days: int,
+) -> list[Run]:
+    """The runs with their flight days (16): one local day beside a run, at either end.
+
+    A photo of it was taken at speed or is beside an impossible jump, as at the airport, and
+    is strictly inside the run's region by a clock that fits. It is after the run's last proof
+    and before any proof in another region, or before the first and after any. Every day
+    between is silent, and they are fewer than ``gap_days``. A day that two runs of the region
+    could have, or that is in another one, is neither's. A region with no proof has no run.
+    """
+    ix = _Index(obs)
+    in_flight: dict[tuple[int, dt.date], list[Obs]] = defaultdict(list)
+    for o in obs:
+        s = o.shot
+        if (s.kind in ("fast", "conflict") and s.use == "all" and s.taken_utc is not None
+                and o.place.state == "inside" and zone_fits(s.zone, s.lon)):
+            in_flight[o.place.region, o.day].append(o)
+
+    def beside(run: Run, step: int) -> tuple[dt.date, list[Obs]] | None:
+        day = run.last if step > 0 else run.first
+        for _ in range(gap_days):
+            day += step * _DAY
+            if photos := in_flight.get((run.region, day)):
+                if photos := [o for o in photos if ix.straight(run, o, step)]:
+                    return day, photos
+                return None
+            if not is_silent(run.region, day):
+                return None
+        return None
+
+    found = [(n, hit) for n, run in enumerate(runs) for step in (-1, 1)
+             if (hit := beside(run, step))]
+    claims = Counter((runs[n].region, day) for n, (day, _) in found)
+    spans: dict[int, list[Run]] = defaultdict(list)
+    for run in runs:
+        spans[run.region].append(run)
+    mine: dict[int, list[tuple[dt.date, list[Obs]]]] = defaultdict(list)
+    for n, (day, photos) in found:
+        region = runs[n].region
+        if claims[region, day] == 1 and not any(
+                r.first <= day <= r.last for r in spans[region]):
+            mine[n].append((day, photos))
+    return [_widened(run, mine[n]) if n in mine else run for n, run in enumerate(runs)]
+
+
+def _widened(run: Run, flights: Sequence[tuple[dt.date, Sequence[Obs]]]) -> Run:
+    flight = tuple(day for day, _ in flights)
+    first, last = min(run.first, *flight), max(run.last, *flight)
+    ends = (*((first, run.first),) * (first in flight), *((run.last, last),) * (last in flight))
+    beyond = {a + n * _DAY for a, b in ends for n in range(1, (b - a).days)}
+    return replace(
+        run, first=first, last=last, silent=tuple(sorted({*run.silent, *beyond})), flight=flight,
+        flight_photos=tuple((sum(o.shot.kind == "fast" for o in photos),
+                             sum(o.shot.kind == "conflict" for o in photos))
+                            for _, photos in flights))
 
 
 # -- what is known of all the photos ---------------------------------------------------
@@ -396,6 +469,16 @@ class _Index:
         """A proof elsewhere strictly between the photos of two runs of one region (5)."""
         i, j = bisect_right(self.utcs, a.end), bisect_left(self.utcs, b.start)
         return any(True for _ in self.elsewhere(a.region, i, j))
+
+    def straight(self, run: Run, o: Obs, step: int) -> bool:
+        """No proof elsewhere between the run's proof and a photo after it, or before it (16).
+
+        At the very instant of either counts as between: nothing says that it is not.
+        """
+        at = o.shot.taken_utc
+        a, b = (run.end, at) if step > 0 else (at, run.start)
+        i, j = bisect_left(self.utcs, a), bisect_right(self.utcs, b)
+        return a < b and not any(True for _ in self.elsewhere(run.region, i, j))
 
     def fast_within(self, start: dt.datetime, end: dt.datetime) -> bool:
         return bisect_left(self.fast, start) < bisect_right(self.fast, end)
@@ -537,9 +620,11 @@ def regions_to_read(
     until: dt.date | None,
     track: Collection[TrackRow] = (),
     gaps: Iterable[int] = SWEEP_GAPS,
+    flight_days: bool = True,
 ) -> set[int]:
     """The regions whose visits :func:`judge` and :func:`sweep` need, at each of ``gaps``."""
-    return {r.region for gap in gaps for r in find_runs(obs, gap_days=gap, track=track)
+    return {r.region for gap in gaps
+            for r in find_runs(obs, gap_days=gap, track=track, flight_days=flight_days)
             if _touches(r, since, until)}
 
 
@@ -734,10 +819,14 @@ def _speed(a: Shot, b: Shot) -> float:
 
 
 class RunAnswer(TypedDict, total=False):
-    """One run's answer: ``a`` is a quality ``"1"`` to ``"6"``, ``"no"`` or ``"?"``."""
+    """One run's answer: ``a`` is a quality ``"1"`` to ``"6"``, ``"no"`` or ``"?"``.
+
+    ``out`` are the flight days of the run that the owner left out, and blank leaves none.
+    """
 
     a: str
     words: str
+    out: list[str]
 
 
 class Answers(TypedDict):
@@ -752,11 +841,16 @@ class Answers(TypedDict):
 
 @dataclass(frozen=True)
 class TripRow:
-    """One region of a trip, with its quality and, for a held run, the owner's own words."""
+    """One region of a trip, with its quality and, for a held run, the owner's own words.
+
+    ``first`` and ``last`` are the run's, without the flight days the owner left out.
+    """
 
     run: AnyRun
     quality: int
     words: str
+    first: dt.date
+    last: dt.date
 
 
 @dataclass(frozen=True)
@@ -797,6 +891,18 @@ def _says(text: str) -> bool:
     return any(not any(low <= ord(ch) <= high for low, high in SAYS_NOTHING) for ch in text)
 
 
+def _are_flight_days(out: object, run: AnyRun) -> bool:
+    """Some of the run's flight days, in order, each of them once, and not none."""
+    flight = [d.isoformat() for d in run.flight]
+    return isinstance(out, list) and out != [] and out == [d for d in flight if d in out]
+
+
+def _row(run: AnyRun, quality: int, words: str, out: Collection[str]) -> TripRow:
+    """Without a flight day, the silent days between it and the proof are not in it either."""
+    kept = [*run.days, *(d for d in run.flight if d.isoformat() not in out)]
+    return TripRow(run, quality, words, min(kept), max(kept))
+
+
 def _check(runs: Sequence[AnyRun], bounds: Sequence[Boundary], answers: Answers) -> None:
     """Nothing in ``answers`` that the page could not have written."""
     if [(a.id, b.id) for a, b in pairwise(runs)] != [(b.before, b.after) for b in bounds]:
@@ -815,6 +921,9 @@ def _check(runs: Sequence[AnyRun], bounds: Sequence[Boundary], answers: Answers)
             raise PlanInvalid(f"runs: {key} takes no words")
         if a in _QUALITIES and status not in ("offered", "held"):
             raise PlanInvalid(f"runs: {key} takes no quality")
+        if "out" in row and (status not in ("offered", "held")
+                             or not _are_flight_days(row["out"], known[key])):
+            raise PlanInvalid(f"runs: {key} has not these flight days to leave out")
     cuts = {b.id for b in bounds}
     for key, cut in answers["cuts"].items():
         if key not in cuts:
@@ -836,8 +945,10 @@ def group(
 
     Runs answered "no" are left out, and the rest is the trip. A run with no answer or
     with "?", a held run with a quality and no words, and a region that is in it twice, each
-    hold the whole trip. A stretch with nothing in it and nothing that holds it is no trip,
-    and is in neither list, and neither is a run that is there.
+    hold the whole trip. A row has the run's days without the flight days that were left out;
+    no reason is judged again without them, so that releases nothing. A stretch with nothing
+    in it and nothing that holds it is no trip, and is in neither list, and neither is a run
+    that is there.
 
     An answer that the page could not have written raises :class:`PlanInvalid`.
     """
@@ -872,7 +983,8 @@ def group(
             elif run.status == "held" and not _says(words.get(run.id, "")):
                 holds.append(f"{run.id} needs words of yours")
             else:
-                rows.append(TripRow(run, int(answer), words.get(run.id, "")))
+                rows.append(_row(run, int(answer), words.get(run.id, ""),
+                                 answers["runs"][run.id].get("out", ())))
         once: dict[int, AnyRun] = {}
         for row in rows:
             first = once.setdefault(row.run.region, row.run)
@@ -883,8 +995,8 @@ def group(
         if holds:
             not_made.append(NotMade(tuple(r.id for r in members), tuple(holds)))
         elif rows:
-            drafts.append(TripDraft(tuple(rows), min(r.run.first for r in rows),
-                                    max(r.run.last for r in rows)))
+            drafts.append(TripDraft(tuple(rows), min(r.first for r in rows),
+                                    max(r.last for r in rows)))
     return drafts, not_made
 
 
@@ -910,6 +1022,7 @@ def sweep(
     track: Collection[TrackRow] = (),
     gaps: Iterable[int] = SWEEP_GAPS,
     fast_kmh: float | None = None,
+    flight_days: bool = True,
 ) -> list[SweepRow]:
     """What the same photos come to at other settings of ``gap_days`` (13).
 
@@ -918,8 +1031,8 @@ def sweep(
     """
     out = []
     for gap in gaps:
-        runs = judge(find_runs(obs, gap_days=gap, track=track), obs, visits,
-                     since=since, until=until, track=track)
+        runs = judge(find_runs(obs, gap_days=gap, track=track, flight_days=flight_days), obs,
+                     visits, since=since, until=until, track=track)
         cuts = boundaries(runs, gap_days=gap, obs=obs, fast_kmh=fast_kmh)
         out.append(SweepRow(gap, len(runs),
                             sum(bool(b.suggestions) and not b.forced for b in cuts),
