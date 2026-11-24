@@ -126,6 +126,57 @@ def test_the_radius_is_two_kilometres_unless_said_and_is_inclusive():
     assert not offered([at], objects, radius_km=math.nextafter(edge, 0))
 
 
+TILE = (9, 256, 184)
+
+
+def decoded(tmp_path, *down):
+    """The points of a real tile, at these pixels from its west edge and its top."""
+    mvt = pytest.importorskip("mapbox_vector_tile")
+    from wanderfill.geo.tiles import TileReader
+
+    features = [{"geometry": f"POINT ({px} {py})",
+                 "properties": {"id": n, "series_id": 22, "name": "x"}}
+                for n, (px, py) in enumerate(down)]
+    data = mvt.encode([{"name": "series2", "features": features}],
+                      default_options={"y_coord_down": True})
+    z, x, y = TILE
+    path = tmp_path / "series2" / str(z) / str(x) / f"{y}.pbf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)  # on disk, so nothing is fetched
+    return list(TileReader(cache_dir=tmp_path).series_points(*TILE))
+
+
+def mercator_lat(y):
+    """The latitude of a fractional tile row at zoom 9."""
+    return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / 512))))
+
+
+def test_a_tile_point_is_at_the_exact_mercator_latitude(tmp_path):
+    """Read as a straight line from edge to edge, the middle of this tile was 60 m off."""
+    p, *rest = decoded(tmp_path, (2048, 2048), (0, 0), (4096, 4096), (1000, 100), (9, 4000))
+    assert haversine_km(p.lat, p.lon, mercator_lat(184.5), 0.3515625) < 1e-5  # one centimetre
+    for got, (px, py) in zip(rest, [(0, 0), (4096, 4096), (1000, 100), (9, 4000)], strict=True):
+        want = mercator_lat(184 + py / 4096), px / 4096 * 360 / 512
+        assert haversine_km(got.lat, got.lon, *want) < 1e-5
+
+
+def test_a_tile_point_near_the_top_of_the_tile_is_near_its_north(tmp_path):
+    """Tiles count pixels down and the decoder counts up. The wrong way round is 39 km."""
+    from wanderfill.geo.tiles import tile_bounds
+
+    _, south, _, north = tile_bounds(*TILE[1:], TILE[0])
+    top, bottom = decoded(tmp_path, (2048, 100), (2048, 4000))
+    assert north - 0.02 < top.lat < north and south < bottom.lat < south + 0.02
+
+
+@pytest.mark.parametrize("north", [1, -1])
+def test_the_radius_is_kept_from_the_tile_to_the_candidate(tmp_path, north):
+    (p,) = decoded(tmp_path, (2048, 2048))
+    lat, objects = mercator_lat(184.5), {(p.series_id, p.id): p}
+    assert offered([shot(lat + north * 1.999 * KM, 0.3515625)], objects)
+    assert not offered([shot(lat + north * 2.001 * KM, 0.3515625)], objects)
+
+
 @pytest.mark.parametrize("radius", [-1.0, float("nan"), float("inf")])
 def test_a_radius_that_is_not_a_distance_is_refused(radius):
     """Compared with a NaN every distance is out of range, and the page would be empty."""
@@ -206,6 +257,49 @@ def test_order_is_by_series_distance_and_item_whatever_order_things_came_in():
         rng.shuffle(pairs)
         mixed = rng.sample(shots, len(shots))
         assert offered(mixed, dict(pairs)) == want
+
+
+def test_a_flagged_candidate_comes_after_the_clean_ones_of_its_series():
+    """Nearer is not better when one of its photos cannot be where it says."""
+    clean, bad = obj(10.0, 20.0, item=1), obj(50.0, 20.0, item=2)
+    still = obj(-50.0, 20.0, item=3)
+    shots = [shot(10.0 + 1.5 * KM, 20.0), shot(10.0 + 1.6 * KM, 20.0, day=2),
+             shot(50.0 + 0.1 * KM, 20.0), shot(50.0 + 0.1 * KM, 20.0, kind="conflict"),
+             *(shot(-50.0 + 0.2 * KM, 20.0, day=d) for d in (1, 2))]
+    got = offered(shots, clean | bad | still)
+    assert [(c.item, c.conflict, c.one_spot) for c in got] == [
+        (1, False, False), (2, True, False), (3, False, True)]
+    # Within its series only.
+    other = obj(10.0, 20.0, item=4, series=30)
+    assert [c.item for c in offered(shots, clean | bad | still | other)] == [1, 2, 3, 4]
+
+
+def test_one_spot_is_one_raw_coordinate_on_two_days_or_more():
+    """A spoofed receiver and a stale fix repeat one coordinate, and so does a phone on
+    one desk: a flag for the owner to look at, and still a candidate."""
+    objects = obj(10.0, 20.0)
+
+    def one_spot(*shots, **kw):
+        return [c.one_spot for c in offered(shots, objects, **kw)]
+
+    here = (10.001234, 20.001234)
+    assert one_spot(shot(*here), shot(*here, day=2)) == [True]
+    assert one_spot(*(shot(*here, day=d, minute=m) for d in (1, 2, 9) for m in (0, 5))) == [True]
+    assert one_spot(shot(*here)) == [False]
+    assert one_spot(shot(*here), shot(*here, minute=5), shot(*here, minute=9)) == [False]
+    assert one_spot(shot(*here), shot(*here, day=2), shot(10.001235, 20.001234)) == [False]
+    assert one_spot(shot(*here), shot(10.001234, 20.001235, day=2)) == [False]
+    # A source rounded to three decimals repeats itself by construction, and is flagged.
+    assert one_spot(shot(10.001, 20.001), shot(10.001, 20.001, day=2)) == [True]
+
+
+def test_one_spot_looks_at_the_proof_in_the_radius_only():
+    objects = obj(10.0, 20.0, series=5) | obj(10.0, 20.0, series=22)
+    same = [shot(10.001, 20.0, day=d) for d in (1, 2)]
+    others = [shot(10.0 + 3 * KM, 20.0), shot(10.002, 20.0, kind="fast"),
+              shot(10.003, 20.0, use="none"), shot(10.004, 20.0, use="airports")]
+    got = offered([*same, *others], objects)
+    assert [(c.series, c.one_spot) for c in got] == [(5, False), (22, True)]
 
 
 # ------------------------------------------------------------------ decision 2: origins

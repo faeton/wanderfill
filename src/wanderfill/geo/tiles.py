@@ -46,14 +46,17 @@ def deg2tile(lat: float, lon: float, z: int) -> tuple[int, int]:
     return x, y
 
 
+def _row_lat(y: float, z: int) -> float:
+    """The latitude of a row of tiles, or of a fraction of one, counted from the north."""
+    return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / 2**z))))
+
+
 def tile_bounds(x: int, y: int, z: int) -> tuple[float, float, float, float]:
     """west, south, east, north in degrees."""
     n = 2**z
     west = x / n * 360.0 - 180.0
     east = (x + 1) / n * 360.0 - 180.0
-    north = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
-    south = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
-    return west, south, east, north
+    return west, _row_lat(y + 1, z), east, _row_lat(y, z)
 
 
 def neighbourhood(lat: float, lon: float, z: int, ring: int = 1) -> set[tuple[int, int]]:
@@ -202,6 +205,13 @@ class TileReader:
         """Yield (properties, shapely geometry) for one tile, in lon/lat degrees.
 
         Yields nothing for a tile in :attr:`failed`, as for an absent one.
+
+        Latitude is a straight line from the tile's south edge to its north, which
+        Mercator is not: the middle of a tile comes out nearer the equator than it is, by
+        at most 15 m at z10, and four times that for each zoom coarser. Coordinates are
+        resolved at z10 and cached rounded to three decimals, which is more, and the
+        answers on disk were made with this, so it stays. :meth:`series_points`, from
+        which a radius is measured, is exact.
         """
         from shapely.affinity import affine_transform
         from shapely.geometry import shape
@@ -254,11 +264,15 @@ class TileReader:
         Your Earth, TCC and the rest.
 
         A tile in :attr:`failed` yields nothing: a harvest with any is incomplete.
+
+        The latitude is the exact inverse of the projection. A straight line from edge
+        to edge is up to 60 m off in the middle of a tile at z9, and these points are
+        what the radius of an offer is measured from.
         """
         tile = self.decode("series2", z, x, y)
         if not tile:
             return
-        west, south, east, north = tile_bounds(x, y, z)
+        west, _, east, _ = tile_bounds(x, y, z)
         for lyr in tile.values():
             extent = lyr.get("extent", 4096)
             for f in lyr.get("features", []):
@@ -273,6 +287,7 @@ class TileReader:
                     id=int(p["id"]),
                     series_id=int(p.get("series_id", 0)),
                     name=str(p.get("name", "")),
-                    lat=south + (north - south) * (py / extent),
+                    # The decoder counts up from the south edge, and tiles down.
+                    lat=_row_lat(y + 1 - py / extent, z),
                     lon=west + (east - west) * (px / extent),
                 )

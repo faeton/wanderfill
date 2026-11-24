@@ -449,6 +449,11 @@ class Candidate:
     where those came from. ``fast_near`` counts fast photos in the radius, as a fact
     only. ``conflict`` means a photo of one of those days, here too, cannot be where
     it says. ``thin`` means one photo, or none within a kilometre.
+
+    ``one_spot`` means the ground photos are of two days or more and all carry one
+    identical raw coordinate. A spoofed receiver and a stale fix do that, and so does a
+    phone on one desk, so it is a flag and an order and leaves nothing out. A source
+    that rounds its coordinates repeats them anyway, and is flagged more.
     """
 
     series: int
@@ -465,6 +470,7 @@ class Candidate:
     fast_near: int
     conflict: bool
     thin: bool
+    one_spot: bool
 
 
 def _ids(
@@ -493,7 +499,8 @@ def find_candidates(
 ) -> list[Candidate]:
     """The unticked catalogue objects with a ground photo in the radius.
 
-    Sorted by series, distance and id. An object the catalogue does not list is not
+    Sorted by series, then the ones with no ``conflict`` and no ``one_spot`` before the
+    ones with, then distance and id. An object the catalogue does not list is not
     offered, whatever the tile says: a tick on it could not be read back. A catalogue
     series absent from ``ticked`` is one whose list was not read, and raises
     :class:`PlanInvalid`; a series with nothing ticked has an empty entry.
@@ -519,8 +526,9 @@ def find_candidates(
             fast_near=sum(s.kind == "fast" for _, s in close),
             conflict=any(s.kind == "conflict" and s.taken.date() in days for _, s in close),
             thin=len(proof) == 1 or km > THIN_KM,
+            one_spot=len(days) > 1 and len({(s.lat, s.lon) for _, s in proof}) == 1,
         ))
-    return sorted(out, key=lambda c: (c.series, c.km, c.item))
+    return sorted(out, key=lambda c: (c.series, c.conflict or c.one_spot, c.km, c.item))
 
 
 def count_skipped(
