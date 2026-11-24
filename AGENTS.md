@@ -15,12 +15,13 @@ Symlink `CLAUDE.md` → `AGENTS.md` so Claude Code picks it up automatically.
    so mark the capital". This is a scored competition. An inferred region is a
    fabricated score, and it is the user who gets accused of cheating, not you.
 2. **Never delete anything you did not create in this session.** Not visits, not
-   trips, not ticks. If something looks redundant, report it and stop. The one
-   exception is `wanderfill delete <kind> <id>`, and only when the account owner
-   has named the specific id and said it is wrong. One id per run, `--confirm`
-   from them, and the preview shown first. "This region looks wrong" is not an
-   id, a list of ids is not one id, and a deletion is never a plan op.
-   Beside it there is one named exception, approved by the owner on 2026-11-24:
+   trips, not ticks. If something looks redundant, report it and stop. There are
+   two exceptions, and only these. The first is `wanderfill delete <kind> <id>`,
+   and only when the account owner has named the specific id and said it is
+   wrong. One id per run, `--confirm` from them, and the preview shown first.
+   "This region looks wrong" is not an id, a list of ids is not one id, and a
+   deletion is never a plan op.
+   The second, approved by the owner on 2026-11-24, is
    `wanderfill sync-header <trip_id>`. It widens a trip's own dates to span its
    regions, and to do that the server deletes the trip and its visits and creates
    the same ones again, so every id in it changes. One trip per run, only when the
@@ -232,7 +233,7 @@ extended later reads shorter on the trip than on its region. Nothing edits that
 header in place: `trips/update-trip` *replaces* the trip, so the old one and its
 visits are deleted and the id of the trip and of every visit in it changes. So
 **write a stay only after it is finished.** For one that was not,
-`wanderfill sync-header <trip_id>` is rule 2's named exception (see "Undoing,
+`wanderfill sync-header <trip_id>` is rule 2's second exception (see "Undoing,
 when the owner asks"). It refuses to shorten a header or to send a row whose
 dates are not its visit's, and it is not a plan op. A header that lags is a
 thing to report, not a reason to run it.
@@ -265,7 +266,8 @@ There is one path off the profile, and one command that replaces (the end of
 this section): `wanderfill delete <kind> <id>` with kinds
 `visit` (needs `--region`), `trip` (takes its visits with it), `region`
 (`set-not-visited`: every visit on it, needs `--all-visits`), `dare` and `kye`.
-Each shows a preview, sends nothing without `--confirm --reason "..."`, journals
+Each shows a preview (which says so, and exits 2, if an open or unreadable journal
+entry would refuse it), sends nothing without `--confirm --reason "..."`, journals
 an `open` entry carrying the full record to `deletes-<account>.ndjson` before
 the request, and reads the server back. Prefer `visit` over `region`: the
 narrowest cut that fixes the mistake. A trip-owned visit needs
@@ -285,7 +287,7 @@ journal, and neither do you: do not close one for them.
 None of this is in the plan model, and it must not be: a plan is what the tool
 computed, and a deletion is what the owner decided.
 
-`wanderfill sync-header <trip_id>` is rule 2's named exception. It removes
+`wanderfill sync-header <trip_id>` is rule 2's second exception. It removes
 nothing for good, but the server deletes the trip and its visits and creates new
 ones, so every trip and visit id in it dies and any saved plan naming one has to
 be rebuilt. Raising it with the owner means showing them the preview first, as
@@ -293,12 +295,13 @@ with `delete`: run it without `--confirm`, show what it prints, and stop. It
 shares `delete`'s journal, lock, open-entry block, `--confirm` and `--reason`;
 its `open` entry carries the whole trip and every visit in its regions. The
 preview makes every refusal that reads can find, and the write refuses if the
-trip is not the one that was shown. An `ERROR` closes its entry only if the trip
-then reads as it did before, because the save is a deletion and a creation and
-an error can come from between them. What it prints at the end, old id to new
-id, goes into the record. If it could not prove the save, show the owner the
-replacement candidates and the journal path it printed: it is not run again, and
-nothing is written to repair it.
+trip is not the one that was shown. A refusal, `ERROR`, 403 or any other, closes
+its entry only if the trip, its visits and the listing of its years then read as
+they did before, because the save is a deletion and a creation and a refusal can
+come from between them; any other trip that changed leaves it open too. What it
+prints at the end, old id to new id, goes into the record. If it could not prove
+the save, show the owner the replacement candidates and the journal path it
+printed: it is not run again, and nothing is written to repair it.
 
 ### Trip segmentation is ill-posed — say so
 

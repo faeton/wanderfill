@@ -2682,7 +2682,7 @@ def _posts(t):
 def test_trip_header_lags_update_visit_and_is_resynced_like_the_site():
     """Society Islands trip 501536 read 31 Oct - 2 Nov around a 31 Oct - 12 Nov visit."""
     c, t = _sync([_trip(7, "2026-10-31", "2026-11-02"), _trip(7, *FIXED)],
-                 [OLD, OLD], [_listing(STALE)])
+                 [OLD, OLD], [_listing(STALE), _listing((7, *FIXED, [1266]))])
     out = c.sync_trip_header(7)
     (fields,) = _posts(t)
     assert fields["trip_id"] == 7
@@ -2979,8 +2979,9 @@ def test_update_trip_two_regions_span_min_to_max():
     v1232 = _visits((201, 7, 3, "2026-10-25", "2026-10-27"))
     c, t = _sync([_trip(7, "2026-10-27", "2026-10-29", rows=rows),
                   _trip(7, "2026-10-25", "2026-10-30", rows=rows)],
-                 [v1390, v1232, v1390, v1232], [_listing((7, "2026-10-27", "2026-10-29",
-                                                          [1390, 1232]))])
+                 [v1390, v1232, v1390, v1232],
+                 [_listing((7, "2026-10-27", "2026-10-29", [1390, 1232])),
+                  _listing((7, "2026-10-25", "2026-10-30", [1390, 1232]))])
     c.sync_trip_header(7)
     (fields,) = _posts(t)
     assert (fields["date_from"], fields["date_to"]) == ("2026-10-25", "2026-10-30")
@@ -3007,7 +3008,11 @@ class TripServer(FakeTransport):
                     r["date_to"] or "2026-11-12")
             other = (50 + n, None, 3, "2025-10-22", "2025-10-30")
             self.visits[r["id"]] = _visits(mine, other)["data"]
+        self.trips[3] = _trip(3, "2026-03-01", "2026-03-04", rows=[_row(4)])["trip"]
         self.on_save, self.on_read = on_save, on_read
+        self.only_in = {}  # trip -> the years it is listed under; every year if absent
+        self.listing_lags = False
+        self.stale = None
 
     def webapi(self, action, **fields):
         if action == "user/status-quick":
@@ -3024,8 +3029,11 @@ class TripServer(FakeTransport):
         if action == "quickEnter/get-visits-to-region":
             return {"result": "OK", "data": [dict(v) for v in self.visits[fields["region"]]]}
         assert action == "trips/get-trips-for-year-app", action
-        return _listing(*((t["id"], t["date_from"], t["date_to"], [r["id"] for r in t["regions"]])
-                          for t in self.trips.values()))
+        if not self.listing_lags or not self.stale:
+            self.stale = [(t["id"], t["date_from"], t["date_to"], [r["id"] for r in t["regions"]])
+                          for t in self.trips.values()
+                          if fields["year"] in self.only_in.get(t["id"], {fields["year"]})]
+        return _listing(*self.stale)
 
     def replace(self, fields):
         old = self.trips.pop(fields["trip_id"])
@@ -3245,9 +3253,10 @@ def _downgrade(t):
     t.visits[1266][0].update(quality=3)
 
 
-def _blind(t):
+def _blind(t, to=None, answer="Internal error."):
     def on_read(t, action, fields):
-        raise ApiError(action, "Internal error.", {})
+        if to in (None, action):
+            raise ApiError(action, answer, {})
     t.on_read = on_read
 
 
@@ -3298,7 +3307,7 @@ def test_sync_header_interrupted_in_the_save_stays_open(monkeypatch, tmp_path, c
     assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 130
     assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
     said = capsys.readouterr().out
-    assert "not looked for" in said and all(x in said for x in CLOSING)
+    assert all(x in said for x in CLOSING)
     assert len(_posts(t)) == 1
 
 
@@ -3318,45 +3327,267 @@ def test_sync_header_whose_done_line_will_not_go_in_still_prints_the_new_ids(
     assert "not known" not in said and all(x in said for x in CLOSING)
 
 
+def _partial(t, tid=8, header=(FIXED[0], None), rows=()):
+    """A new trip that is not the one asked for: no match on its dates or its regions."""
+    t.trips[tid] = t.trips.get(7, {"description": "kept"}) | {
+        "id": tid, "date_from": header[0], "date_to": header[1], "regions": list(rows)}
+
+
+AS_IT_WAS = (
+    ("nothing", lambda t: None, True),
+    ("another visit's region is not among them", lambda t: t.visits.update({9: []}), True),
+    ("trip gone", lambda t: t.trips.pop(7), False),
+    ("visit gone", lambda t: t.visits[1266].pop(0), False),
+    ("visit outside it gone", lambda t: t.visits[1266].pop(1), False),
+    ("visit outside it changed", lambda t: t.visits[1266][1].update(quality=1), False),
+    ("landed", lambda t: t.replace({"trip_id": 7, "date_from": FIXED[0], "date_to": FIXED[1]}),
+     False),
+    ("twin beside it", lambda t: t.trips.update({8: t.trips[7] | {"id": 8, "date_to": FIXED[1]}}),
+     False),
+    ("new trip, no dates, no regions", _partial, False),
+    ("new trip, other dates", lambda t: _partial(t, 8, ("2026-01-01", "2026-01-02"), [_row()]),
+     False),
+    ("another trip's header", lambda t: t.trips[3].update(date_to="2026-03-09"), False),
+    ("another trip's regions", lambda t: t.trips[3].update(regions=[_row(5)]), False),
+    ("another trip gone", lambda t: t.trips.pop(3), False),
+    ("header", lambda t: t.trips[7].update(date_to="2026-11-03"), False),
+    ("description", lambda t: t.trips[7].update(description=""), False),
+    ("row quality", lambda t: t.trips[7]["regions"][0].update(quality=3), False),
+    ("row date parts", lambda t: t.trips[7]["regions"][0].update(day_to=11), False),
+    ("nothing readable", lambda t: _blind(t), False),
+    ("get-trip says gone, the listing has it",
+     lambda t: _blind(t, "trips/get-trip", "Trip not found."), False),
+    ("trip unread", lambda t: _blind(t, "trips/get-trip"), False),
+    ("listing unread", lambda t: _blind(t, "trips/get-trips-for-year-app"), False),
+    ("visits unread", lambda t: _blind(t, "quickEnter/get-visits-to-region"), False),
+)
+
+
+@pytest.mark.parametrize("answer", ["ERROR", "403", "400"])
+@pytest.mark.parametrize("what, change, same", AS_IT_WAS, ids=[x[0] for x in AS_IT_WAS])
 def test_sync_header_refused_by_the_server_closes_only_if_the_trip_is_still_as_it_was(
-        monkeypatch, tmp_path, capsys):
-    """The save is a deletion and a creation; an ERROR may come from between them."""
+        monkeypatch, tmp_path, capsys, answer, what, change, same):
+    """The save is a deletion and a creation; an answer that is not a yes may come from
+    between them. Only reads that show the trip, its visits and the listing as they were
+    prove it did nothing, and one that fails is not such a read."""
     from wanderfill.api.errors import AuthError, TransportError
 
-    def error(exc, first=lambda t, fields: None):
-        def save(t, fields):
-            first(t, fields)
-            raise exc
-        return save
+    refused = {"ERROR": ApiError("trips/update-trip", "Database error.", {}),
+               "403": AuthError("server rejected the token (403)"),
+               "400": TransportError("refused: 400")}[answer]
 
-    said_error = ApiError("trips/update-trip", "Database error.", {})
-    gone = error(said_error, lambda t, f: t.trips.pop(7))
-    visits_gone = error(said_error, lambda t, f: t.visits[1266].pop(0))
-    other_visits_gone = error(said_error, lambda t, f: t.visits[1266].pop(1))
-    landed = error(said_error, lambda t, f: t.replace(f))
-    both = error(said_error, lambda t, f: t.trips.update(
-        {8: t.trips[7] | {"id": 8, "date_to": FIXED[1]}}))
-    blind = error(said_error, lambda t, f: _blind(t))
-    rejected = AuthError("server rejected the token (403)")
-    for save, phases in (
-        (error(said_error), ["open", "done"]),
-        (error(TransportError("refused: 400")), ["open", "done"]),
-        (error(rejected), ["open", "done"]),
-        (error(rejected, lambda t, f: _blind(t)), ["open", "done"]),
-        (error(rejected, lambda t, f: t.replace(f)), ["open"]),
-        (gone, ["open"]), (visits_gone, ["open"]), (other_visits_gone, ["open"]),
-        (landed, ["open"]), (both, ["open"]), (blind, ["open"]),
+    def save(t, fields):
+        change(t)
+        raise refused
+
+    t = TripServer(on_save=save)
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    said = capsys.readouterr().out
+    lines = _journal_lines(tmp_path)
+    assert [e["phase"] for e in lines] == (["open", "done"] if same else ["open"]), said
+    assert ("nothing changed" in said) == same
+    assert ("replacement" in said) != same
+    assert str(refused) in said and len(_posts(t)) == 1
+    if same:
+        assert "as they were before" in lines[1]["error"] and lines[1]["result"] is None
+    # the class says it too, for a caller that is not this command
+    t = TripServer(on_save=save)
+    with pytest.raises(type(refused) if same else VerificationFailed) as info:
+        NomadMania(token="fake", transport=t).sync_trip_header(7)
+    assert isinstance(info.value, VerificationFailed) != same
+    assert info.value.__cause__ is refused
+
+
+def test_sync_header_names_what_a_refused_save_left_behind(monkeypatch, tmp_path, capsys):
+    def save(t, fields):
+        t.trips.pop(7)
+        t.visits[1266].pop(0)
+        _partial(t)
+        raise ApiError("trips/update-trip", "Database error.", {})
+
+    t = TripServer(on_save=save)
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    said = capsys.readouterr().out
+    for part in ("trip 7 is gone", "2026: new trip 8 2026-10-31..None, regions []",
+                 "region 1266: visit 100 is gone", "replacement: none found"):
+        assert part in said, part
+    assert "not known" not in said
+
+
+@pytest.mark.parametrize("what, extra, names", [
+    ("incomplete", lambda t: _partial(t, 9), "new trip 9"),
+    ("other dates", lambda t: _partial(t, 9, ("2026-01-01", "2026-01-02"), [_row()]), "new trip 9"),
+    ("other regions", lambda t: _partial(t, 9, FIXED, [_row(5)]), "new trip 9"),
+    ("header", lambda t: t.trips[3].update(date_to="2026-03-09"), "trip 3 changed: date_to"),
+    ("regions", lambda t: t.trips[3].update(regions=[]), "trip 3 changed: regions"),
+    ("gone", lambda t: t.trips.pop(3), "trip 3 is gone"),
+])
+def test_sync_header_with_a_good_replacement_still_fails_on_any_other_trip_that_changed(
+        monkeypatch, tmp_path, capsys, what, extra, names):
+    """The proof looked at the replacement alone; a half-made second trip passed beside it."""
+    t = TripServer(on_save=_ok_but(extra))
+    with pytest.raises(VerificationFailed, match=names) as info:
+        NomadMania(token="fake", transport=t).sync_trip_header(7)
+    assert info.value.replacement_candidates == [8]
+    t = TripServer(on_save=_ok_but(extra))
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    said = capsys.readouterr().out
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
+    assert names in said and "trip 7 is gone" in said and "[8]" in said
+    assert "not known" not in said
+
+
+def test_sync_header_saved_in_place_is_held_to_the_listing_too():
+    def in_place(then):
+        def save(t, fields):
+            t.trips[7].update(date_from=fields["date_from"], date_to=fields["date_to"])
+            then(t)
+            return {"result": "OK"}
+        return NomadMania(token="fake", transport=TripServer(on_save=save))
+
+    assert in_place(lambda t: None).sync_trip_header(7)["trip_id"] == 7
+    for then, names in ((lambda t: _partial(t, 9), "new trip 9"),
+                        (lambda t: t.trips.pop(3), "trip 3 is gone")):
+        with pytest.raises(VerificationFailed, match=names):
+            in_place(then).sync_trip_header(7)
+    c = in_place(lambda t: None)
+    c.t.listing_lags = True
+    with pytest.raises(VerificationFailed, match="listing has trip 7 as"):
+        c.sync_trip_header(7)
+
+
+def test_sync_header_compares_the_listing_of_every_year_of_the_span():
+    """An incomplete trip can be in the year the trip was not in."""
+    row = [_row(a="2026-12-28", b="2027-01-05")]
+
+    def save(t, fields):
+        t.replace(fields)
+        t.only_in[9] = {2027}
+        _partial(t, 9, ("2027-01-01", None))
+        return {"result": "OK"}
+
+    for on_save, ok in ((None, True), (save, False)):
+        t = TripServer(row, ("2026-12-28", "2026-12-31"), on_save=on_save)
+        t.only_in = {3: {2026}, 7: {2026}, 8: {2026, 2027}}
+        c = NomadMania(token="fake", transport=t)
+        if ok:
+            assert c.sync_trip_header(7)["trip_id"] == 8
+        else:
+            with pytest.raises(VerificationFailed, match="2027: new trip 9"):
+                c.sync_trip_header(7)
+
+
+def test_sync_header_that_sent_nothing_says_so(monkeypatch, tmp_path, capsys):
+    """"Whether trip 7 is still there is not known" over a request that never went."""
+    from wanderfill.api.errors import UnreadableAnswer
+
+    def second(exc=None, change=None):
+        seen = []
+
+        def on_read(t, action, fields):
+            seen.append(action)
+            if action == "trips/get-trip" and seen.count(action) == 2:
+                if change:
+                    change(t)
+                if exc:
+                    raise exc
+        return on_read
+
+    for on_read, phases, rc in (
+        (second(UnreadableAnswer("a login page")), ["open"], 1),
+        (second(KeyboardInterrupt()), ["open"], 130),
+        (second(change=lambda t: t.visits[1266][0].pop("quality")), ["open"], 1),
+        (second(change=lambda t: t.trips.pop(7)), ["open", "done"], 1),
+        (second(change=lambda t: t.visits[1266][0].update(quality=3)), ["open", "done"], 1),
+        (second(change=lambda t: t.trips[7].update(description="x")), ["open", "done"], 1),
     ):
         for f in tmp_path.glob("deletes-*"):
             f.unlink()
-        t = TripServer(on_save=save)
-        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+        t = TripServer(on_read=on_read)
+        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == rc
         said = capsys.readouterr().out
         lines = _journal_lines(tmp_path)
-        assert [e["phase"] for e in lines] == phases, said
-        assert ("nothing changed" in said) == (phases != ["open"])
-        assert ("replacement" in said) == (phases == ["open"])
-        assert len(_posts(t)) == 1
+        assert [e["phase"] for e in lines] == phases and not _posts(t)
+        assert "othing was sent" in said
+        assert "not known" not in said and "replacement" not in said
+        if phases == ["open"]:
+            assert '"error" set' in said.split("othing was sent")[1]
+        else:
+            assert "nothing was sent" in lines[1]["error"] and lines[1]["result"] is None
+        for e in lines:  # the label is on the done line too, and is what was asked for
+            assert e["label"].startswith("asked to widen trip 7")
+
+
+def test_sync_header_interrupted_says_where_to_look(monkeypatch, tmp_path, capsys):
+    def after_it_landed(t, fields):
+        t.replace(fields)
+        t.on_read = lambda *a: (_ for _ in ()).throw(KeyboardInterrupt())
+        return {"result": "OK"}
+
+    def in_the_save(t, fields):
+        raise KeyboardInterrupt
+
+    for save in (in_the_save, after_it_landed):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        t = TripServer(on_save=save)
+        assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 130
+        said = capsys.readouterr().out
+        for part in ("Whether trip 7 was replaced is not known", "the trips of 2026",
+                     "2026-10-31..2026-11-12", "1266", "wanderfill export --full",
+                     "saved copy", "snapshot", str(tmp_path / "deletes-79597.ndjson")):
+            assert part in said, part
+        assert all(x in said for x in CLOSING) and len(_posts(t)) == 1
+
+
+def test_sync_header_unanswered_but_unchanged_is_not_called_unknown_or_safe(
+        monkeypatch, tmp_path, capsys):
+    """Reads say the trip is as it was; a save that got no answer may still land."""
+    t = TripServer(on_save=_lost_after(land=False))
+    assert _sync_cli(monkeypatch, tmp_path, t, *SYNC) == 1
+    said = capsys.readouterr().out
+    assert "trip 7 reads as it did before" in said and "may still land" in said
+    assert "not known" not in said and "nothing changed" not in said
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
+
+
+BLOCKED = {
+    "open": lambda d: _open_line(d / "journal-79597-aaaaaaaaaaaa.ndjson"),
+    "open delete": lambda d: _open_line(d / "deletes-79597.ndjson", "delete_visit:1:2"),
+    "corrupt": lambda d: (d / "deletes-79597.ndjson").write_text("{torn"),
+}
+
+
+@pytest.mark.parametrize("how", BLOCKED)
+def test_a_dry_run_says_what_would_block_the_confirm(monkeypatch, tmp_path, capsys, how):
+    """It invited a --confirm that an open or torn journal entry then refused."""
+    default, work = tmp_path / "default", tmp_path / "work"
+    default.mkdir()
+    monkeypatch.setattr("wanderfill.cli.main.DEFAULT_WORKDIR", default)
+    visit = SequencedTransport({READ: [visits(ROW)] * 9, "trips/get-trip": [TRIP] * 9,
+                                "kye/get-kye": [{"visited": [570]}] * 9},
+                               {**DELETE_STATE})
+    c = NomadMania(token="fake", transport=visit)
+    kinds = (("visit", "13450095", "--region", "791"), ("trip", "305716"),
+             ("region", "791", "--all-visits"), ("dare", "1142"), ("kye", "570"))
+
+    def everything():
+        for argv in kinds:
+            yield _run_delete(monkeypatch, work, c, *argv), capsys.readouterr()
+        yield _sync_cli(monkeypatch, work, TripServer()), capsys.readouterr()
+
+    for rc, said in everything():
+        assert rc == 0 and "Re-run with --confirm" in said.out
+    BLOCKED[how](default)
+    for rc, said in everything():
+        assert rc == 2 and "Re-run with --confirm" not in said.out
+        assert "Nothing was sent" in said.out and str(default) in said.out
+    assert not work.exists() and not list(default.glob(".lock-*")), "a dry run creates nothing"
+    assert not [a for a, _ in visit.sent if Transport._is_write(a)]
+    for path in default.iterdir():
+        path.rename(path.with_name(path.name.replace("79597", "7")))
+    for rc, _ in everything():
+        assert rc == 0, "another account's journal does not block"
 
 
 def test_sync_header_holds_the_account_lock_and_meets_an_open_apply(monkeypatch, tmp_path, capsys):
@@ -3406,14 +3637,16 @@ def test_rule_2_names_the_sync_header_exception_and_its_limits():
                  "One trip per run", "trip id", "preview", "never as a plan op",
                  "never in a loop", "deletes the trip and its visits"):
         assert part in rule, part
-    # the rest of it says what it said
+    # the rest of it says what it said, and counts them right
     assert rule.startswith(
         "**Never delete anything you did not create in this session.** Not visits, not trips, "
-        "not ticks. If something looks redundant, report it and stop. The one exception is "
-        "`wanderfill delete <kind> <id>`, and only when the account owner has named the specific "
-        "id and said it is wrong. One id per run, `--confirm` from them, and the preview shown "
+        "not ticks. If something looks redundant, report it and stop. There are two exceptions, "
+        "and only these. The first is `wanderfill delete <kind> <id>`, and only when the account "
+        "owner has named the specific id and said it is wrong. One id per run, `--confirm` "
+        "from them, and the preview shown "
         'first. "This region looks wrong" is not an id, a list of ids is not one id, and a '
-        "deletion is never a plan op.")
+        "deletion is never a plan op. The second")
+    assert "one exception" not in rule and rule.count("exception") == 1
 
 
 def test_sync_trip_header_has_no_caller_but_the_sync_header_command():

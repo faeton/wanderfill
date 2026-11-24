@@ -282,6 +282,45 @@ def _trip_rows(trip: dict) -> list[tuple]:
                    r.get("date_from"), r.get("date_to")) for r in trip["regions"])
 
 
+def _trip_seen(trip: dict) -> tuple:
+    """A trip's header, description and every region row, as sent by the server."""
+    return (trip.get("date_from"), trip.get("date_to"), trip.get("description") or "",
+            sorted(json.dumps(r, sort_keys=True) for r in trip.get("regions") or []))
+
+
+def _listing_changes(
+    was: dict[int, list[dict]], now: dict[int, list[dict]], *, apart: frozenset[int] = frozenset()
+) -> list[str]:
+    """Every difference between two listings of the same years, the trips in ``apart`` left out."""
+    out = []
+    for year in sorted(was):
+        sides: list[dict[int, list[dict]]] = [{}, {}]
+        for side, entries in zip(sides, (was[year], now[year]), strict=True):
+            for t in entries:
+                side.setdefault(_whole(t["id"]) or 0, []).append(t)
+        for tid in sorted((sides[0].keys() | sides[1].keys()) - apart):
+            old, new = (sorted(side.get(tid, []), key=lambda t: json.dumps(t, sort_keys=True))
+                        for side in sides)
+            if old == new:
+                continue
+            if not old:
+                t = new[0]
+                regions = [r.get("id", r.get("region")) if isinstance(r, dict) else r
+                           for r in t.get("regions") or []]
+                what = f"new trip {tid} {t.get('date_from')}..{t.get('date_to')}, regions {regions}"
+            elif not new:
+                what = f"trip {tid} is gone"
+            elif len(old) != len(new):
+                what = f"trip {tid} is listed {len(new)} time(s), was {len(old)}"
+            else:
+                pairs = list(zip(old, new, strict=True))
+                fields = sorted({k for a, b in pairs for k in a.keys() | b.keys()
+                                 if a.get(k) != b.get(k) or (k in a) != (k in b)})
+                what = f"trip {tid} changed: {', '.join(fields)}"
+            out.append(f"{year}: {what}")
+    return out
+
+
 @dataclass(frozen=True)
 class TripResave:
     """What re-saving a trip would send, and everything it would replace. Reads only.
@@ -298,7 +337,7 @@ class TripResave:
     body: list[dict]  # the region rows to send, qualities kept
     visits: dict[int, list[Visit]]  # every visit of every region in it
     owned: dict[int, int]  # region -> the one visit of the trip's there
-    listed: set[int]  # the trips that exist, in every year of the new span
+    listing: dict[int, list[dict]]  # every trip of every year of the new span, as sent
 
     @property
     def expect_rows(self) -> list[tuple]:
@@ -1164,14 +1203,18 @@ class NomadMania:
             regions_json=json.dumps(list(regions)),
         )
 
-    def _trip_listing(self, span: tuple[str, str]) -> list[dict]:
-        """The trips listed in every year of ``span``, some perhaps twice.
+    def _trip_listing(self, span: tuple[str, str]) -> dict[int, list[dict]]:
+        """The trips listed under each year of ``span``, whole, each with a readable id.
 
         Nothing says which of its years a trip is listed under, or that it is
         only one; the new span contains the old header.
         """
-        return [t for year in range(int(span[0][:4]), int(span[1][:4]) + 1)
-                for t in self._strict("trips/get-trips-for-year-app", "trips", year=year)]
+        action = "trips/get-trips-for-year-app"
+        out = {}
+        for year in range(int(span[0][:4]), int(span[1][:4]) + 1):
+            out[year] = self._strict(action, "trips", year=year)
+            strict_ids(action, [t.get("id") if isinstance(t, dict) else t for t in out[year]])
+        return out
 
     def _trip_resave(
         self, trip_id: int, expect_rows: Sequence[tuple] | None = None
@@ -1238,8 +1281,7 @@ class NomadMania:
             "day_from": int(r["day_from"]), "year_to": int(r["year_to"]),
             "month_to": int(r["month_to"]), "day_to": int(r["day_to"]),
         } for r in regions]
-        listed = strict_ids("trips/get-trips-for-year-app", [
-            t.get("id") if isinstance(t, dict) else t for t in self._trip_listing(now)])
+        listing = self._trip_listing(now)
         visits = {r["id"]: self._visits_strict(r["id"]) for r in body}
         mine = {rid: [v.id for v in there if v.trip_id == trip_id]
                 for rid, there in visits.items()}
@@ -1265,7 +1307,7 @@ class NomadMania:
         return TripResave(
             trip_id=trip_id, trip=before, description=description, was=header, now=now,
             body=body, visits=visits, owned={rid: ids[0] for rid, ids in mine.items()},
-            listed=listed)
+            listing=listing)
 
     def preview_trip_header(self, trip_id: int) -> TripResave:
         """What :meth:`sync_trip_header` would do to this trip, or its refusal. Reads only.
@@ -1303,10 +1345,13 @@ class NomadMania:
         replacement must be a trip that did not exist before, with the same
         header, rows (quality, hidden, dates) and description, one visit per
         region with the old visit's dates and quality, and every other visit
-        in those regions exactly as it was. A failed or unanswered write is
-        never resent; the exception carries ``replacement_candidates`` from a
-        read. A read-back that cannot be read is a :class:`VerificationFailed`,
-        like one that disagrees. The returned ``trip_id`` is the one to record;
+        in those regions exactly as it was. The listing of every year of the span
+        must differ by the replacement alone: a trip that is new beside it, of
+        any shape, or another trip that changed, fails too. A failed or
+        unanswered write is never resent; the exception carries what reads then
+        found, as ``known`` (lines) and ``replacement_candidates``. A read-back
+        that cannot be read is a :class:`VerificationFailed`, like one that
+        disagrees. The returned ``trip_id`` is the one to record;
         any id noted for the old trip or its visits is dead.
 
         What the write replaces cannot be put back under its old ids, and the
@@ -1328,19 +1373,31 @@ class NomadMania:
         raised and nothing is sent. An empty sequence matches no trip; only
         ``None`` leaves the check out.
 
-        The save is a deletion and a creation, so an ``ERROR`` may come from
-        between them. It stays a plain refusal only if the trip, its visits and the
-        listing then read as they did before; otherwise, and when a 4xx left a
-        replacement behind, it is a :class:`VerificationFailed`.
+        The save is a deletion and a creation, so an answer that is not a yes may
+        come from between them. An ``ERROR`` body, a 401, a 403 or another 4xx
+        stays the refusal it is only if reads made after it show the trip, every
+        visit of its regions and the listing of every year of its span as they
+        were before. Otherwise, a read that fails included, it is a
+        :class:`VerificationFailed`. An error raised before the request went out
+        has ``nothing_sent`` set.
 
         **One command calls this**, ``wanderfill sync-header``, one trip per run:
         the exception the owner approved on 2026-11-24 (AGENTS.md, rule 2). It is
         not a plan op, and a loop over it is a policy violation.
         """
-        saving = self._trip_resave(trip_id, expect_rows)
+        try:
+            saving = self._trip_resave(trip_id, expect_rows)
+        except BaseException as exc:
+            exc.nothing_sent = True
+            if type(exc) is not ApiError:
+                raise
+            # The journal's done line has only this text.
+            raise ApiError(exc.action, f"{exc.description} — nothing was sent",
+                           exc.payload) from exc
         before, description, body = saving.trip, saving.description, saving.body
         date_from, date_to = saving.now
         ids = set(saving.owned)
+        listed = {_whole(t["id"]) for trips in saving.listing.values() for t in trips}
 
         def as_seen(there: list[Visit]) -> dict[int, tuple]:
             return {v.id: (v.date_from, v.date_to, v.quality, v.trip_id) for v in there}
@@ -1352,30 +1409,17 @@ class NomadMania:
         def readback(fn: Callable[[], T]) -> T:
             return self._readback("trips/update-trip", fn)
 
-        def region_ids(t: dict) -> set[int]:
-            return {int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
+        def listed_as(listing: dict[int, list[dict]], tid: int) -> list[dict]:
+            return [t for trips in listing.values() for t in trips if _whole(t["id"]) == tid]
 
-        def candidates() -> list[int]:
+        def as_asked(t: dict) -> bool:
+            return (t.get("date_from"), t.get("date_to")) == saving.now and ids == {
+                int(r.get("id", r.get("region"))) for r in t.get("regions") or []}
+
+        def candidates(listing: dict[int, list[dict]]) -> list[int]:
             return readback(lambda: sorted({
-                int(t["id"]) for t in self._trip_listing(saving.now)
-                if int(t["id"]) not in saving.listed
-                and (t.get("date_from"), t.get("date_to")) == saving.now
-                and region_ids(t) == ids}))
-
-        def note_candidates(exc: Exception) -> None:
-            """Hand the caller any replacement, so it is not orphaned."""
-            try:
-                exc.replacement_candidates = candidates()
-            except Exception as read_exc:  # the error that brought us here wins
-                exc.replacement_candidates = f"unreadable: {read_exc}"
-
-        def as_before() -> bool:
-            try:
-                again = self._trip_resave(trip_id, saving.expect_rows)
-            except Exception:
-                return False
-            return {r: as_seen(v) for r, v in again.visits.items()} == {
-                r: as_seen(v) for r, v in saving.visits.items()}
+                int(t["id"]) for trips in listing.values() for t in trips
+                if _whole(t["id"]) not in listed and as_asked(t)}))
 
         def read_trip(tid: int) -> tuple[dict, list[tuple]]:
             trip = self.trip(tid)["trip"]
@@ -1390,14 +1434,66 @@ class NomadMania:
                     raise
                 return None
 
+        def look() -> tuple[bool, list[str], list[int] | str]:
+            """After a failure: whether reads prove nothing changed, what they say, and any
+            replacement. Each is made whatever became of the others, and none is a write."""
+            known: list[str] = []
+            same = True
+            gone = False
+            try:
+                found = saved_trip()
+                gone = found is None
+                if found is not None:
+                    same = _trip_seen(found[0]) == _trip_seen(before)
+                    known.append(
+                        f"trip {trip_id} reads as it did before" if same else
+                        f"trip {trip_id} is there and reads differently: "
+                        f"{found[0].get('date_from')}..{found[0].get('date_to')} "
+                        f"{found[0].get('description')!r} {found[1]}")
+            except Exception as exc:
+                same = False
+                known.append(f"trip {trip_id} could not be read: {exc}")
+            try:
+                listing = self._trip_listing(saving.now)
+                changes = _listing_changes(saving.listing, listing)
+                maybe: list[int] | str = candidates(listing)
+                still = bool(listed_as(listing, trip_id))
+                if gone:
+                    known.append(f"get-trip says trip {trip_id} is gone, but it is still listed"
+                                 if still else f"trip {trip_id} is gone")
+                known += [f"listing of {line}" for line in changes]
+                same = same and not changes
+            except Exception as exc:
+                same = False
+                maybe = f"unreadable: {exc}"
+                if gone:
+                    known.append(f"get-trip says trip {trip_id} is gone")
+                known.append(f"the listing could not be read: {exc}")
+            for rid, there in saving.visits.items():
+                was = as_seen(there)
+                try:
+                    now = as_seen(self._visits_strict(rid))
+                except Exception as exc:
+                    same = False
+                    known.append(f"region {rid}: its visits could not be read: {exc}")
+                    continue
+                for vid in sorted(was.keys() | now.keys()):
+                    if was.get(vid) != now.get(vid):
+                        same = False
+                        what = ("is gone" if vid not in now else
+                                "is new" if vid not in was else "changed")
+                        known.append(f"region {rid}: visit {vid} {what}")
+            return same and not gone, known, maybe
+
         def proved() -> tuple[int, dict[int, int]]:
             new_id = trip_id
+            listing = None
             saved = readback(saved_trip)
             if saved is None:
-                if trip_id in readback(
-                        lambda: {int(t["id"]) for t in self._trip_listing(saving.now)}):
+                listing = readback(lambda: self._trip_listing(saving.now))
+                if listed_as(listing, trip_id):
                     raise fail(f"get-trip says {trip_id} is gone but the listing still has it")
-                found = candidates()
+                found = candidates(listing)
                 if len(found) != 1:
                     raise fail(f"trip {trip_id} is gone and {len(found)} NEW trip(s) {found} match "
                                f"{date_from}..{date_to} {sorted(ids)}")
@@ -1429,6 +1525,14 @@ class NomadMania:
                     raise fail(f"region {rid}: visit {owned[0]} reads {now[owned[0]][:3]}, was "
                                f"{was[old_visit][:3]}")
                 visits[rid] = owned[0]
+            if listing is None:
+                listing = readback(lambda: self._trip_listing(saving.now))
+            entries = listed_as(listing, new_id)
+            if not entries or not all(readback(lambda t=t: as_asked(t)) for t in entries):
+                raise fail(f"the listing has trip {new_id} as {entries}")
+            if more := _listing_changes(saving.listing, listing,
+                                        apart=frozenset((trip_id, new_id))):
+                raise fail(f"other trips changed beside trip {new_id}: {'; '.join(more)}")
             return new_id, visits
 
         try:
@@ -1443,25 +1547,29 @@ class NomadMania:
             )
         except Exception as exc:
             # Refused, or no answer at all. Never resend: read what is there.
-            note_candidates(exc)
-            found = exc.replacement_candidates
-            if isinstance(exc, ApiError):
-                contradicted = found != [] or not as_before()
-            else:  # a 4xx is refused before anything ran, unless a new trip says otherwise
-                contradicted = (isinstance(exc, (AuthError, TransportError))
-                                and isinstance(found, list) and found != [])
-            if contradicted:
+            same, exc.known, exc.replacement_candidates = look()
+            if not isinstance(exc, (ApiError, AuthError, TransportError)):
+                if same:
+                    exc.known.append("so do its visits and the listing; a save that got no "
+                                     "answer may still land")
+                raise
+            if not same:
                 worse = VerificationFailed(
                     "trips/update-trip",
-                    f"the server refused it ({exc}), but the trip does not read as it did before "
-                    "— outcome unknown", getattr(exc, "payload", None))
-                worse.replacement_candidates = found
+                    f"the server refused it ({exc}), but reads do not show the trip, its visits "
+                    "and the listing as they were before — outcome unknown",
+                    getattr(exc, "payload", None))
+                worse.known, worse.replacement_candidates = exc.known, exc.replacement_candidates
                 raise worse from exc
-            raise
+            proof = "; the trip, its visits and the listing read as they were before"
+            if isinstance(exc, ApiError):
+                raise ApiError(exc.action, exc.description + proof, exc.payload) from exc
+            raise (AuthError if isinstance(exc, AuthError) else TransportError)(
+                f"{exc}{proof}") from exc
         try:
             new_id, visits = proved()
-        except VerificationFailed as exc:
-            note_candidates(exc)
+        except Exception as exc:
+            _, exc.known, exc.replacement_candidates = look()
             raise
         return {"trip_id": new_id, "old_trip_id": trip_id, "visits": visits,
                 "old_visits": saving.owned, "was": saving.was, "now": saving.now,

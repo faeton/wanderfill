@@ -1179,7 +1179,9 @@ def _undo(
 ) -> int:
     """The shared shape of every ``wanderfill delete`` kind, and of ``sync-header``.
 
-    Print what is about to be removed; stop unless ``--confirm``; write an
+    Print what is about to be removed; stop unless ``--confirm``, with 2 and what
+    blocks it if the account's journals would refuse a ``--confirm`` as they are
+    now (read without the lock, nothing created, and read again under it); write an
     ``open`` journal entry *before* the request, carrying the full ``snapshot``
     of what is about to go so it can be put back; run the one client call,
     which does its own read-back; close the entry.
@@ -1196,8 +1198,8 @@ def _undo(
     an unknown state. The account's lock is held from that check to the last line,
     in ``--workdir`` and the default directory; a third one is not seen.
 
-    ``on_open`` is given the error that left an entry open and returns lines to
-    print below it: what is known about the state it left.
+    ``on_open`` is given the error that left an entry open and the journal's path,
+    and returns lines to print below it: what is known about the state it left.
     """
     from types import SimpleNamespace
 
@@ -1213,7 +1215,20 @@ def _undo(
 
     for line in preview:
         print(line)
+    c = args._client
+    workdir = Path(args.workdir)
+    dirs = (workdir, DEFAULT_WORKDIR)
     if not args.confirm:
+        try:
+            blocks = describe_open(open_entries(dirs, c.account_id()))
+            blocks += [CLOSE_BY_HAND] if blocks else []
+        except (DriftError, JournalCorrupt) as exc:
+            blocks = [str(exc)]
+        if blocks:
+            print("\nDry run. Nothing was sent, and --confirm would be refused:")
+            for line in blocks:
+                print(line)
+            return 2
         print("\nDry run. Nothing was sent. Re-run with --confirm to do it.")
         return 0
 
@@ -1221,13 +1236,10 @@ def _undo(
         print("--confirm needs --reason 'why this is wrong' — it goes into the journal")
         return 2
 
-    c = args._client
-    workdir = Path(args.workdir)
     make_workdir(workdir)
     account = c.account_id()
     journal = Journal(workdir / f"deletes-{account}.ndjson")
     op = SimpleNamespace(key=key, kind=kind, label=f"{label} — reason: {args.reason.strip()}")
-    dirs = (workdir, DEFAULT_WORKDIR)
     with account_lock(dirs, account):
         if stuck := open_entries(dirs, account):
             for line in describe_open(stuck):
@@ -1248,7 +1260,7 @@ def _undo(
         except (Exception, KeyboardInterrupt) as exc:
             if not _settled(journal, key):
                 print(f"journal entry left OPEN: {key} in {journal.path}\n{CLOSE_BY_HAND}")
-                for line in on_open(exc) if on_open else ():
+                for line in on_open(exc, journal.path) if on_open else ():
                     print(line)
             if not isinstance(exc, WanderfillError):
                 raise
@@ -1453,9 +1465,11 @@ def cmd_sync_header(args) -> int:
         print(f"trip {ident}: refused, nothing was sent: {exc}")
         return 2
     names = {int(r["id"]): str(r.get("region_name") or "")[:50] for r in shown.trip["regions"]}
+    began: list[bool] = []
     result: dict = {}
 
     def run_sync():
+        began.append(True)
         out = c.sync_trip_header(ident, expect_rows=shown.expect_rows)
         result.update(
             old_trip_id=ident, trip_id=out["trip_id"],
@@ -1472,20 +1486,36 @@ def cmd_sync_header(args) -> int:
             "Record the new ids: whatever names the old ones is stale.",
         ]
 
-    def what_is_known(exc) -> list[str]:
-        found = getattr(exc, "replacement_candidates", "not looked for")
-        return [
-            *(new_ids() if result else [
-                f"Whether trip {ident} is still there is not known. New trips that could be its "
-                f"replacement: {found or 'none found'}"]),
-            "The trip and every visit of its regions, as they were, are the 'snapshot' of that "
-            "entry. This tool sends nothing again and repairs nothing.",
-        ]
+    def what_is_known(exc, journal) -> list[str]:
+        """Said under an entry left open, and nothing here that reads have not shown."""
+        if not began or getattr(exc, "nothing_sent", False):
+            return [f'Nothing was sent: trip {ident} was not saved. Its "done" line is one with '
+                    '"error" set.']
+        if result:
+            lines = ["The save was read back and proved, only its journal line is missing:",
+                     *new_ids()]
+        elif hasattr(exc, "known"):
+            lines = ["What the server showed afterwards:", *(f"  {x}" for x in exc.known),
+                     "  new trips that could be its replacement: "
+                     f"{exc.replacement_candidates or 'none found'}"]
+        else:
+            lines = [f"Whether trip {ident} was replaced is not known; it was not read back."]
+        if not result:
+            years = "-".join(sorted({d[:4] for d in shown.now}))
+            lines.append(
+                f"To look: the trips of {years} on the site, for one of "
+                f"{shown.now[0]}..{shown.now[1]}; and `wanderfill export --full`, which has the "
+                f"trip_id of every visit, for the visits of region(s) "
+                f"{', '.join(map(str, shown.owned))}.")
+        lines.append(f"The saved copy of the trip and of every visit in its regions is the "
+                     f"'snapshot' of the open entry in {journal}. This tool sends nothing again "
+                     "and repairs nothing.")
+        return lines
 
     rc = _undo(
         args, kind="sync_trip_header", key=f"sync_trip_header:{ident}",
-        label=f"trip {ident} {shown.was[0]}..{shown.was[1]} -> {shown.now[0]}..{shown.now[1]} "
-              f"{len(shown.owned)} region(s)",
+        label=f"asked to widen trip {ident}, {shown.was[0]}..{shown.was[1]}, to "
+              f"{shown.now[0]}..{shown.now[1]}, {len(shown.owned)} region(s)",
         preview=[
             f"trip {ident} '{shown.description}'",
             f"  its dates now:   {shown.was[0]} → {shown.was[1]}",
