@@ -31,7 +31,7 @@ import datetime as dt
 import json
 import math
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import groupby
 from pathlib import Path
@@ -193,6 +193,7 @@ def grade_shots(
     min_leg_km: float = 1.0,
     impossible_kmh: float = 1200.0,
     impossible_km: float = 100.0,
+    burst_minutes: float = 10.0,
 ) -> list[Shot]:
     """Every photo given, in UTC order and the untimed ones last, with its kind and use.
 
@@ -207,17 +208,21 @@ def grade_shots(
     the departure lounge all the way through a flight, and the jump that ends it is
     evidence about every photo of the repeat.
 
-    A place's speed is measured both ways in time, to the nearest place at least
-    ``min_leg_km`` away. Nearer than that is the jitter of two photos seconds apart, but
-    measuring only to the next photo would also call a burst from a window jitter, whose
-    every leg is a few hundred metres. Over ``fast_kmh`` either way is fast. Over
-    ``impossible_kmh`` across at least ``impossible_km`` is a conflict of both places,
-    and so is any such pair with no time between them: one camera was not in both, and
-    nothing says in which. A conflict outranks fast.
+    A place's speed is measured each way in time, to the nearest place at least
+    ``min_leg_km`` away. Nearer than that is the jitter of two photos seconds apart, and
+    is looked past; measuring only to the next photo would call a burst from a window
+    jitter, whose every leg is a few hundred metres. But it is looked past only while all
+    its photos are within ``burst_minutes``. At a nearby photo farther off in time there
+    is no speed that way, or a whole stay would be measured to the flight that ended in
+    it. So after a flight the landing is fast and the minutes after it are, and an hour
+    later in the same place is the ground; before a flight the same. The minutes are
+    counted from the place's last photo forward, and from its first back: a run is graded
+    whole, however long it lasted, by what it was left for and entered from.
 
-    In a stay that never leaves ``min_leg_km`` the photos near the landing, and near the
-    departure, have only the flight to be measured to, and are fast until it is slow on
-    average: hours, and after a long flight days. That errs toward offering less.
+    Over ``fast_kmh`` either way is fast. Over ``impossible_kmh`` across at least
+    ``impossible_km`` is a conflict of both places, and so is any such pair with no time
+    between them: one camera was not in both, and nothing says in which. A conflict
+    outranks fast.
 
     What it cannot see: a gap long enough to hide the flight that is in it. A photo taken
     in the air hours after the one before it and hours before the next is slow both ways.
@@ -238,15 +243,9 @@ def grade_shots(
     # there the question is whether a repeat counts as another photo. Here it is whether
     # the phone was still reporting, and a frozen coordinate can be a rounded one.
     places = [list(g) for _, g in groupby(timed, key=lambda a: (a.lat, a.lon))]
-    at = [(p[0].lat, p[0].lon) for p in places]
-    last = len(places) - 1
-    # (the place measured, earlier, later): once forward in time, and once back.
-    sides = [(n, n, m) for n, m in enumerate(_next_far(at, min_leg_km)) if m is not None]
-    sides += [(last - n, last - m, last - n)
-              for n, m in enumerate(_next_far(at[::-1], min_leg_km)) if m is not None]
     fast: set[int] = set()
     conflict: set[int] = set()
-    for n, earlier, later in sides:
+    for n, earlier, later in _legs(places, min_leg_km, dt.timedelta(minutes=burst_minutes)):
         a, b = places[earlier][-1], places[later][0]
         km = haversine_km(a.lat, a.lon, b.lat, b.lon)
         hours = (b.taken_utc - a.taken_utc).total_seconds() / 3600
@@ -264,61 +263,27 @@ def grade_shots(
     return out
 
 
-def _next_far(at: Sequence[tuple[float, float]], min_km: float) -> list[int | None]:
-    """For each point, the index of the first later one at least ``min_km`` from it.
+def _legs(
+    places: Sequence[Sequence[PhotoAsset]], min_km: float, burst: dt.timedelta
+) -> Iterator[tuple[int, int, int]]:
+    """``(place, earlier, later)`` for each place and each way there is a speed to take.
 
-    A long stay is thousands of points with no such one among them, and looking at each
-    from each is quadratic. So the points are also kept as blocks of 2, 4, 8… in a circle,
-    and a block whose whole circle is too near is stepped over.
+    Only the minutes of a burst are ever looked through, so a long stay costs what its
+    densest minutes do, and not every photo of it for every other.
     """
-    levels: list[list[tuple[float, float, float] | None]] = [[]]  # by k: blocks of 2**k
-    while len(at) >> len(levels):
-        k = len(levels)
-        levels.append([
-            _circle(at[j << k:(j + 1) << k], min_km)
-            # A half that is too wide for a circle makes a block that is.
-            if k == 1 or (levels[-1][2 * j] and levels[-1][2 * j + 1]) else None
-            for j in range(len(at) >> k)
-        ])
-    out: list[int | None] = []
-    for n, (lat, lon) in enumerate(at):
-        i, k, found = n + 1, 1, None
-        while i < len(at):
-            if k:
-                circle = None
-                if k < len(levels) and not i & ((1 << k) - 1) and i >> k < len(levels[k]):
-                    circle = levels[k][i >> k]
-                if circle is None or haversine_km(lat, lon, *circle[:2]) + circle[2] >= min_km:
-                    k -= 1
-                else:
-                    i += 1 << k
-                    k += 1
-            elif haversine_km(lat, lon, *at[i]) >= min_km:
-                found = i
-                break
-            else:
-                i, k = i + 1, 1
-        out.append(found)
-    return out
-
-
-def _circle(points: Sequence[tuple[float, float]], under: float
-            ) -> tuple[float, float, float] | None:
-    """A centre and a radius around all the points; None where that is ``under`` or wider.
-
-    The radius has a little added, so that no rounding puts a point outside.
-    """
-    first = points[0][1]
-    lats = [lat for lat, _ in points]
-    lons = [(lon - first + 180.0) % 360.0 - 180.0 for _, lon in points]  # over the meridian
-    lat = (min(lats) + max(lats)) / 2
-    lon = first + (min(lons) + max(lons)) / 2
-    radius = 0.0
-    for p in points:
-        radius = max(radius, haversine_km(lat, lon, *p) + 1e-6)
-        if radius >= under:
-            return None
-    return lat, lon, radius
+    for n, here in enumerate(places):
+        for step in (1, -1):
+            m = n + step
+            while 0 <= m < len(places):
+                there = places[m]
+                if haversine_km(here[0].lat, here[0].lon, there[0].lat, there[0].lon) >= min_km:
+                    yield n, min(n, m), max(n, m)
+                    break
+                # To its far end: one nearby photo out of reach is enough.
+                end = -1 if step == 1 else 0
+                if abs(there[end].taken_utc - here[end].taken_utc) > burst:
+                    break
+                m += step
 
 
 def _shot(a: PhotoAsset, kind: Kind, spans: Sequence[Span], until: dt.date | None) -> Shot:

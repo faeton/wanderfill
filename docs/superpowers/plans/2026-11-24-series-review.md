@@ -16,8 +16,8 @@
 |---|---|---|
 | 1 | What is offered | Only unticked objects within the radius (default 2 km) of a **ground** photo |
 | 2 | Which photos | `origins={"own-camera"}` by default; `--origin` widens it and every candidate names the origin of its proof |
-| 3 | Fast photos | Speeds over the whole own sequence by `taken_utc`, before any place filter. A run of identical raw coordinates is one place, entered at its first photo and left from its last. Its speed is measured forward and back in time, each to the nearest place at least 1 km away: nearer is jitter, but leg by leg a burst from a window would be jitter too. Over 120 km/h in either direction, every photo of the place is fast. Photos near a landing or departure may be fast with it. A gap long enough to make a flight slow on average hides it, which is why the owner answers |
-| 4 | Impossible photos | Measured as in 3, over 1,200 km/h and at least 100 km means one end is wrong, and so does no time at all between two places at least 1 km apart. Both ends are `conflict`, which outranks fast: never proof alone, offered last and marked |
+| 3 | Fast photos | Speeds over the whole own sequence by `taken_utc`, before any place filter. A run of identical raw coordinates is one place, entered at its first photo and left from its last. Its speed is measured forward and back in time, each to the nearest place at least 1 km away. Nearer places are jitter and are looked past, so that a burst from a window is not, but only while all their photos are within 10 minutes (`burst_minutes`) of the place: from its last photo forward, from its first back. At a nearby photo farther off there is no speed in that direction, so a landing or departure and the minutes around it are fast and the stay is not. Over 120 km/h in either direction, every photo of the place is fast. A gap long enough to make a flight slow on average hides it, which is why the owner answers |
+| 4 | Impossible photos | Measured as in 3 and with the same reach, over 1,200 km/h and at least 100 km means one end is wrong, and so does no time at all between two places at least 1 km apart. Both ends are `conflict`, which outranks fast: never proof alone, offered last and marked |
 | 5 | Owner's spans | `--spans FILE`: JSON list of `{from, to, bbox: [w, s, e, n], why, use}`; `use` is `"none"` (spoofed, not theirs) or `"airports"` (layover: proof for series 5 only) |
 | 6 | Unfinished stay | `--until DATE`, by the photo's own clock |
 | 7 | Answers | `y`, `n`, `q`; nothing preselected; blank is not exported and never means no; `n` never becomes an op |
@@ -52,11 +52,11 @@
 - `Op.proof: list[dict] = []`, not in the key; `validate` accepts only a list of objects with string `kind` in `{"ground_photo", "fast_photo", "document", "memory"}` and string `detail`.
 - `Span(first: date, last: date, west, south, east, north, why: str, use: Literal["none", "airports"])`; `load_spans(path) -> list[Span]`, raising `PlanInvalid` on anything malformed; a box with `west > east` crosses the antimeridian.
 - `Shot(taken, taken_utc, lat, lon, origin, kind: Literal["ground", "fast", "conflict"], use: Literal["all", "airports", "none"])`
-- `grade_shots(assets: Iterable[PhotoAsset], spans: Sequence[Span], *, until: date | None = None, fast_kmh=120.0, min_leg_km=1.0, impossible_kmh=1200.0, impossible_km=100.0) -> list[Shot]`
+- `grade_shots(assets: Iterable[PhotoAsset], spans: Sequence[Span], *, until: date | None = None, fast_kmh=120.0, min_leg_km=1.0, impossible_kmh=1200.0, impossible_km=100.0, burst_minutes=10.0) -> list[Shot]`
 - `Candidate(series, item, series_name, name, lat, lon, km, at, photos, days, origins, fast_near, conflict, thin)`
 - `harvest(shots, reader, *, radius_km, zoom=9, on_progress=None) -> tuple[dict[tuple[int, int], SeriesPoint], int]` (objects by (series, item), count of tiles that could not be read)
 - `find_candidates(shots, objects, catalogue, ticked, *, radius_km=2.0, skip=SKIP_SERIES) -> list[Candidate]`; `SKIP_SERIES = frozenset({-2, 12, 17, 60})`
-- `recall(shots, objects, ticked, radii=(0.2, 0.5, 1.0, 2.0)) -> dict[int, dict]` per series: ticked total, ticked with an object, found per radius, ticked with no photo near.
+- `recall(shots, objects, ticked, radii=(0.2, 0.5, 1.0, 2.0), *, catalogue) -> dict[int, dict]` per series: ticked total, ticked with an object, found per radius, ticked with no photo near. Like `find_candidates`, it raises `PlanInvalid` for a catalogue series with no entry in `ticked`: a list that was not read is not an empty one.
 
 `km` is to the nearest ground shot; `photos` and `days` count ground shots within the radius; `thin` means one photo, or farther than 1 km.
 

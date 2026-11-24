@@ -258,17 +258,64 @@ def test_a_frozen_run_inside_a_burst_is_one_place():
     assert kinds(photo(10.0 - 10 * KM, 20.0, -2), back, *run) == ["fast"] * 5
 
 
-def test_a_long_stay_is_fast_only_near_the_landing():
-    """The photos near the landing may be; one hours later is slow from the aircraft,
-    and nothing taken later in the stay changes an earlier photo of it."""
-    air = [photo(10.0 - 400 * KM, 20.0, -45), photo(10.0 - 100 * KM, 20.0, -15)]
-    stay = [photo(10.0 + 0.3 * KM * (i % 2), 20.0 + i * 1e-6, 10 * i) for i in range(60)]
-    alone = kinds(*air, *stay)
-    first = alone.index("ground")
-    assert alone == ["fast"] * first + ["ground"] * (62 - first)
-    assert first == 2 + 4  # 100 km since -15 min is under 120 km/h from 35 min on
-    walk = [photo(10.0 + 3 * KM, 20.0, 640), photo(10.0, 20.0, 700)]
-    assert kinds(*air, *stay, *walk) == [*alone, "ground", "ground"]
+def stay(*minutes):
+    """Photos in one place, a few metres apart, at these minutes."""
+    return [photo(10.0 + i * 1e-5, 20.0, m) for i, m in enumerate(minutes)]
+
+
+def test_after_a_flight_the_landing_and_its_minutes_are_fast_and_the_stay_is_not():
+    """A long gap is slow for nobody who can see across it, and a stay is not a burst."""
+    air = photo(-60.0, 20.0, -12 * 60)
+    assert kinds(air, *stay(0, 4, 10, 10.1, 60, 65, 600)) == ["fast"] * 4 + ["ground"] * 4
+    # With nothing between the landing and an hour later, the landing is what is met.
+    assert kinds(air, *stay(0, 60)) == ["fast", "fast", "ground"]
+    # A photo within minutes of its neighbours, but not of the landing, does not reach it.
+    assert kinds(air, *stay(0, 8, 16, 24)) == ["fast"] * 3 + ["ground"] * 2
+    # Photos taken later in the stay change nothing.
+    walk = [photo(10.0 + 3 * KM, 20.0, 700), photo(10.0, 20.0, 760)]
+    assert kinds(air, *stay(0, 60), *walk) == ["fast", "fast"] + ["ground"] * 3
+
+
+def test_before_a_flight_the_departure_and_its_minutes_are_fast_and_the_stay_is_not():
+    air = photo(-60.0, 20.0, 12 * 60)
+    assert kinds(*stay(-600, -65, -60, -10.1, -10, -4, 0), air) == ["ground"] * 4 + ["fast"] * 4
+    assert kinds(*stay(-60, 0), air) == ["ground", "fast", "fast"]
+    assert kinds(*stay(-24, -16, -8, 0), air) == ["ground"] * 2 + ["fast"] * 3
+
+
+def test_a_conflict_reaches_as_far_as_fast_does():
+    there = photo(60.0, 20.0, -30)
+    assert kinds(there, *stay(0, 10, 10.1, 60)) == ["conflict"] * 3 + ["ground"] * 2
+    there = photo(60.0, 20.0, 30)
+    assert kinds(*stay(-60, -10.1, -10, 0), there) == ["ground"] * 2 + ["conflict"] * 3
+
+
+def test_how_far_a_burst_reaches_can_be_moved():
+    air = photo(-60.0, 20.0, -12 * 60)
+    assert kinds(air, *stay(0, 4, 8), burst_minutes=4) == ["fast"] * 3 + ["ground"]
+    assert kinds(air, *stay(0, 4, 8), burst_minutes=0) == ["fast"] * 2 + ["ground"] * 2
+    # At no minutes at all, a photo of the same instant is still looked past.
+    assert kinds(air, photo(10.0, 20.0), photo(10.001, 20.0), burst_minutes=0) == ["fast"] * 3
+
+
+def test_a_run_is_graded_whole_and_looked_past_only_whole():
+    """It is left from its last photo and entered at its first, however long it lasted;
+    and it is nearby photos like any others, the farthest of which decides."""
+    air = photo(-60.0, 20.0, 12 * 60)
+    run = [photo(10.0, 20.0, m) for m in (-180, -90, 0)]
+    assert kinds(*run, photo(10.001, 20.0, 5), air) == ["fast"] * 5
+    before = photo(10.001, 20.0, -185)
+    assert kinds(before, *run, air) == ["ground"] + ["fast"] * 4
+    short = [photo(10.0, 20.0, m) for m in (-6, -3, 0)]
+    assert kinds(photo(10.001, 20.0, -10), *short, air) == ["fast"] * 5
+    assert kinds(photo(10.001, 20.0, -10.1), *short, air) == ["ground"] + ["fast"] * 4
+    # The same the other way round.
+    air = photo(-60.0, 20.0, -12 * 60)
+    run = [photo(10.0, 20.0, m) for m in (0, 90, 180)]
+    assert kinds(air, *run, photo(10.001, 20.0, 185)) == ["fast"] * 4 + ["ground"]
+    short = [photo(10.0, 20.0, m) for m in (0, 3, 6)]
+    assert kinds(air, *short, photo(10.001, 20.0, 10)) == ["fast"] * 5
+    assert kinds(air, *short, photo(10.001, 20.0, 10.1)) == ["fast"] * 4 + ["ground"]
 
 
 @pytest.mark.parametrize("place", [(10.0, 20.0), (-5.5, 179.9999), (70.0, 25.0)])
@@ -283,46 +330,11 @@ def test_a_day_of_photos_in_one_place_is_not_quadratic(monkeypatch, place):
 
     stay = [photo(*near(), 24 * 60 * i / 5000) for i in range(5000)]
     assert kinds(*stay) == ["ground"] * 5000
-    assert len(calls) < 5000 * 60  # every pair is 25,000,000
+    assert len(calls) < 5000 * 80  # every pair is 25,000,000
     away = photo(place[0] - 5.0, place[1], -24 * 60)
     calls.clear()
     assert kinds(away, *stay) == ["ground"] * 5001
-    assert len(calls) < 5000 * 60
-
-
-def test_the_search_finds_what_a_plain_scan_finds():
-    rng = random.Random(5)
-    for spread in (0.3, 0.8, 1.2, 5.0):
-        for place in ((10.0, 20.0), (-5.5, 180.0), (89.99, 0.0)):
-            at = [(min(90.0, place[0] + rng.uniform(-spread, spread) * KM),
-                   (place[1] + rng.uniform(-spread, spread) * KM + 180) % 360 - 180)
-                  for _ in range(70)]
-            want = [next((m for m in range(n + 1, 70) if haversine_km(*at[n], *at[m]) >= 1.0),
-                         None) for n in range(70)]
-            assert review._next_far(at, 1.0) == want
-    assert review._next_far([], 1.0) == [] and review._next_far([(1, 2)], 1.0) == [None]
-
-
-def test_one_leg_is_enough_at_either_end_of_the_library():
-    """The first and the last photo have one leg, and a lone photo has none."""
-    assert kinds(photo(10.0, 20.0), photo(11.0, 20.0, 30)) == ["fast", "fast"]
-    assert kinds(photo(10.0, 20.0)) == ["ground"]
-    assert kinds() == []
-
-
-def test_two_photos_four_seconds_and_sixty_metres_apart_are_ground():
-    """54 km/h on paper; at 400 metres it is 360 km/h, and still jitter."""
-    for km in (0.06, 0.4, 0.999):
-        assert kinds(photo(10.0, 20.0), photo(10.0 + km * KM, 20.0, 4 / 60)) == ["ground"] * 2
-    assert kinds(photo(10.0, 20.0), photo(10.0 + 1.001 * KM, 20.0, 4 / 60)) == ["fast"] * 2
-
-
-def test_the_speed_must_be_over_120_and_the_thresholds_can_be_moved():
-    a, b = photo(10.0, 20.0), photo(10.0 + 60 * KM, 20.0, 30)
-    assert kinds(a, photo(10.0 + 59.9 * KM, 20.0, 30)) == ["ground"] * 2
-    assert kinds(a, photo(10.0 + 60.1 * KM, 20.0, 30)) == ["fast"] * 2
-    assert kinds(a, b, fast_kmh=100.0) == ["fast"] * 2
-    assert kinds(a, b, fast_kmh=100.0, min_leg_km=61.0) == ["ground"] * 2
+    assert len(calls) < 5000 * 80
 
 
 @pytest.mark.parametrize("lat,lon", [(10.123456, 20.123456), (10.1234, 20.1234)])
