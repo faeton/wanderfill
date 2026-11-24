@@ -1989,8 +1989,9 @@ def _stored(**over):
     return {**row, **over}
 
 
-def _readback(rows, marked=None):
-    replies = {"quickEnter/get-visits-to-region": {"result": "OK", "data": rows}}
+def _readback(rows, marked=None, header=None):
+    replies = {"quickEnter/get-visits-to-region": {"result": "OK", "data": rows},
+               "trips/get-trip": {"trip": header}}
     if marked is not None:
         replies["maps/get-visited-regions-ids-simple"] = {"result": "OK", "ids": marked}
     return client(replies)[0]
@@ -2048,7 +2049,8 @@ def test_verify_reads_a_created_trip_back():
     clean = {"checked": 1, "mismatches": [], "phantom_trips": [], "not_counted": [],
              "unproven": []}
 
-    assert verify(_readback([_stored()], marked=[7]), [op], made) == clean
+    header = {"date_from": "2024-03-01", "date_to": "2024-03-10"}
+    assert verify(_readback([_stored()], marked=[7], header=header), [op], made) == clean
 
     # a visit that was already there, owned by another trip, is not the new one
     out = verify(_readback([_stored(trip_id=99)], marked=[7]), [op], made)
@@ -3407,3 +3409,554 @@ def test_a_read_answered_with_html_is_a_wanderfill_error(monkeypatch, tmp_path, 
     path = _dare_plan().save(tmp_path / "p.json")
     assert cli.main(["check", str(path), "--workdir", str(tmp_path / "w")]) == 2
     assert "not JSON" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# what landed is read back, however the run ended
+# --------------------------------------------------------------------------
+
+DARE_READ = "maps/get-visited-dare-ids-simple"
+
+
+def _live(t, *, lose=None, error=None, lands=False):
+    """Make the fake server keep the ticks it is sent, and lose one write.
+
+    ``lose`` is the id in the write that raises ``error``, with or without
+    the tick having landed first.
+    """
+    webapi, ajax_text = t.webapi, t.ajax_text
+    lists = {"quickEnter/updateMQP": (DARE_READ, "ids", "region"),
+             "kye/set-kye": ("kye/get-kye", "visited", "qid"),
+             "my_series/": ("V2/", "visited", "item")}
+
+    def write(real, path, fields):
+        read, field, name = lists.get(path, (None, None, "region"))
+        lost = fields.get(name) == lose or path == lose
+        if read and (not lost or lands):
+            t.replies[read][field].append(fields[name])
+        out = real(path, **fields)
+        if lost:
+            raise error
+        return out
+
+    def send(path, /, **fields):
+        return (write(webapi, path, fields) if Transport._is_write(path)
+                else webapi(path, **fields))
+
+    t.webapi = send
+    t.ajax_text = lambda path, /, **fields: write(ajax_text, path, fields)
+
+
+def _four_ticks():
+    return [_vop("mark_dare", region=1, label="a"), _vop("mark_kye", item=2, label="b"),
+            _vop("tick_series", series=1, item=3, label="c"), _vop("mark_kye", item=4, label="d")]
+
+
+def _verify_file(workdir):
+    (path,) = workdir.glob("verify-*.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _run_failing(plan, c, workdir, **kw):
+    """Apply a plan that must raise; what it raised, and its journal."""
+    from wanderfill.plan.apply import Journal, apply_plan
+
+    with pytest.raises(BaseException) as info:
+        apply_plan(c, plan, workdir=workdir, confirm=True, **kw)
+    (path,) = workdir.glob("journal-*.ndjson")
+    return info.value, Journal(path)
+
+
+def _apply_cli(monkeypatch, capsys, plan, c, tmp_path, workdir="cli"):
+    from wanderfill.cli import main as cli
+
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    path = plan.save(tmp_path / "p.json")
+    capsys.readouterr()
+    rc = cli.main(["apply", str(path), "--confirm", "--workdir", str(tmp_path / workdir)])
+    return rc, capsys.readouterr()
+
+
+def _lost(message="answer lost"):
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    return UnknownWriteOutcome(message)
+
+
+@pytest.mark.parametrize("make,left_open,rc", [
+    (lambda: _lost(), True, 2),
+    (lambda: KeyboardInterrupt("ctrl-c"), True, 130),
+    (lambda: RuntimeError("a bug of ours"), True, None),
+    (lambda: ApiError("my_series/", "refused"), False, 2),
+], ids=["lost", "interrupted", "bug", "refused"])
+def test_a_failure_at_op_three_still_verifies_the_first_two(
+        monkeypatch, tmp_path, capsys, make, left_open, rc):
+    """An exception at op N skipped the read-back, so N-1 landed writes went unread."""
+    error = make()
+    args = error.args
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=error)
+    exc, journal = _run_failing(plan, c, tmp_path / "w")
+    assert exc is error and exc.args == args and exc.__cause__ is None
+    assert any(f.name == "send" or f.name == "write" for f in _frames(exc)), "its own traceback"
+    report = exc.report
+    assert (report.attempted, report.succeeded, report.failed) == (3, 2, 1)
+    seen = _verify_file(tmp_path / "w")
+    assert seen == json.loads(json.dumps(report.verified))
+    assert seen["partial"] is True and seen["checked"] == 2
+    assert seen["mismatches"] == [] and seen["unproven"] == []
+    assert (seen["uncertain"] is not None) == left_open
+    assert journal.unresolved() == ({plan.ops[2].key} if left_open else set())
+    assert journal.done_keys() == {op.key for op in plan.ops[:2]}
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=make())
+    if rc is None:
+        with pytest.raises(RuntimeError, match="a bug of ours"):
+            _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+        said = capsys.readouterr()
+    else:
+        got, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+        assert got == rc
+    assert "attempted 3, succeeded 2, failed 1" in said.out
+    assert ("UNCERTAIN" in said.out) == left_open
+    assert (plan.ops[2].key in said.out) == left_open
+
+
+def _frames(exc):
+    import traceback
+
+    return traceback.extract_tb(exc.__traceback__)
+
+
+@pytest.mark.parametrize("lands", [True, False])
+@pytest.mark.parametrize("name", ["series", "kye", "dare"])
+def test_verifying_an_uncertain_op_does_not_close_it(tmp_path, name, lands):
+    """Being in the list now is a fact about the list; a human closes the entry."""
+    op = {"series": _vop("tick_series", series=1, item=3), "kye": _vop("mark_kye", item=3),
+          "dare": _vop("mark_dare", region=3)}[name]
+    plan, c, t = _rebuilt(op, replies=_tick_replies())
+    _live(t, lose=3, error=_lost(), lands=lands)
+    _, journal = _run_failing(plan, c, tmp_path)
+    seen = _verify_file(tmp_path)
+    assert seen["checked"] == 0 and seen["mismatches"] == [], "it is not counted as landed"
+    assert (seen["uncertain"]["key"], seen["uncertain"]["kind"]) == (op.key, op.kind)
+    (line,) = seen["uncertain"]["now"]
+    assert ("is in the list now" if lands else "is not in the list now") in line
+    assert journal.unresolved() == {op.key} and journal.done_keys() == set()
+    assert [json.loads(x)["phase"] for x in journal.path.read_text().splitlines()] == ["open"]
+
+
+@pytest.mark.parametrize("there", [True, False])
+@pytest.mark.parametrize("op,write", [
+    (lambda: _jan_add(), "quickEnter/add-visit"), (lambda: _jan(), "trips/new-trip"),
+    (lambda: _jan({"id": 11, "quality": 3}), "trips/new-trip"),
+], ids=["add_visit", "create_trip", "dates from the header"])
+def test_an_uncertain_visit_is_reported_as_a_hint(
+        monkeypatch, tmp_path, capsys, op, write, there):
+    """A visit with the right dates may be the site's own, made meanwhile by hand."""
+    plan, c, t = _rebuilt(op())
+    _live(t, lose=write, error=_lost())
+    send = t.webapi
+
+    def lands(path, /, **fields):
+        if there and path == write:
+            t.replies[READ] = visits(_stored(**JAN))
+        return send(path, **fields)
+
+    t.webapi = lands
+    exc, journal = _run_failing(plan, c, tmp_path / "w")
+    (line,) = exc.report.verified["uncertain"]["now"]
+    assert f"a visit with these dates is {'there' if there else 'not there'}" in line
+    assert "whether this run made it is not known" in line and "2026-01-01..2026-01-02" in line
+    assert exc.report.verified["phantom_trips"] == []
+    assert journal.unresolved() == {plan.ops[0].key}
+
+    t.replies[READ] = visits()
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 2 and line in said.out and "answer lost" in said.err
+
+
+def test_an_uncertain_update_says_what_the_visit_reads_now(tmp_path):
+    plan, c, t = _rebuilt(_jan_update(quality=4), rows=[_stored(**ELSEWHERE)])
+    _live(t, lose="quickEnter/update-visit", error=_lost())
+    exc, journal = _run_failing(plan, c, tmp_path / "a")
+    (line,) = exc.report.verified["uncertain"]["now"]
+    assert "reads 2026-01-08..2026-01-09 quality 3" in line
+    assert "planned 2026-01-01..2026-01-02 quality 4" in line
+    assert journal.unresolved() == {plan.ops[0].key}
+
+
+def test_an_answer_the_journal_could_not_take_is_in_the_uncertain_report(monkeypatch, tmp_path):
+    """The disk filled up between the server's OK and the ``done`` line."""
+    from wanderfill.plan import apply as ap
+
+    plan, c, _ = _rebuilt(_jan())
+
+    def full(self, op, result, error=""):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ap.Journal, "note", full)
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert isinstance(exc, OSError)
+    assert exc.report.verified["uncertain"]["answer"]["trip_id"] == 901
+    assert journal.unresolved() == {plan.ops[0].key}
+
+
+def test_a_journal_that_will_not_close_does_not_replace_the_refusal(monkeypatch, tmp_path):
+    from wanderfill.plan import apply as ap
+
+    refusal = ApiError("quickEnter/updateMQP", "no")
+    plan, c, t = _rebuilt(_vop("mark_dare", region=1))
+    _live(t, lose=1, error=refusal)
+    monkeypatch.setattr(ap.Journal, "note", lambda *a, **kw: 1 / 0)
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert exc is refusal and journal.unresolved() == {plan.ops[0].key}
+    assert any("ZeroDivisionError" in e for e in exc.report.errors)
+
+
+def test_a_progress_printer_that_fails_does_not_lose_the_run(tmp_path):
+    """A closed pipe (``apply … | head``) is an exception after a write that landed."""
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+
+    def progress(i, total, op, ok):
+        if i == 2:
+            raise BrokenPipeError("gone")
+
+    exc, journal = _run_failing(plan, c, tmp_path / "a", on_progress=progress)
+    assert isinstance(exc, BrokenPipeError)
+    assert exc.report.verified["checked"] == 2 and exc.report.verified["uncertain"] is None
+    assert journal.unresolved() == set()
+
+    # ...and it does not hide the error of a write that failed.
+    error = _lost()
+    plan, c, t = _rebuilt(*_four_ticks()[1:], replies=_tick_replies())
+    _live(t, lose=3, error=error)
+    exc, journal = _run_failing(plan, c, tmp_path / "b", on_progress=progress)
+    assert exc is error and journal.unresolved() == {plan.ops[1].key}
+
+
+def test_an_entry_that_never_reached_the_journal_is_not_uncertain(monkeypatch, tmp_path):
+    """Nothing is sent before the ``open`` line is on the disk."""
+    from wanderfill.plan import apply as ap
+
+    plan, c, t = _rebuilt(*_four_ticks()[:2], replies=_tick_replies())
+    _live(t)
+    real = ap.Journal.opening
+
+    def opening(self, op, snapshot=None):
+        if op is plan.ops[1]:
+            raise OSError("disk full")
+        real(self, op, snapshot)
+
+    monkeypatch.setattr(ap.Journal, "opening", opening)
+    exc, _ = _run_failing(plan, c, tmp_path)
+    assert isinstance(exc, OSError) and _writes(t) == ["quickEnter/updateMQP"]
+    assert exc.report.verified["checked"] == 1 and exc.report.verified["uncertain"] is None
+
+
+def test_an_interrupt_after_the_done_line_is_not_uncertain(monkeypatch, tmp_path):
+    """The journal says what is open, not how far this run's bookkeeping got."""
+    from wanderfill.plan import apply as ap
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    real = ap.Journal.note
+
+    def note(self, op, result, error=""):
+        real(self, op, result, error)
+        if op is plan.ops[1]:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(ap.Journal, "note", note)
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert isinstance(exc, KeyboardInterrupt) and journal.unresolved() == set()
+    assert exc.report.verified["checked"] == 2 and exc.report.verified["uncertain"] is None
+
+
+def test_a_journal_torn_by_the_failure_leaves_the_op_uncertain(monkeypatch, tmp_path):
+    from wanderfill.plan import apply as ap
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    real = ap.Journal.note
+
+    def note(self, op, result, error=""):
+        if op is plan.ops[1]:
+            with self.path.open("a") as fh:
+                fh.write('{"phase": "do')
+            raise KeyboardInterrupt
+        real(self, op, result, error)
+
+    monkeypatch.setattr(ap.Journal, "note", note)
+    exc, _ = _run_failing(plan, c, tmp_path)
+    assert isinstance(exc, KeyboardInterrupt)
+    assert exc.report.verified["checked"] == 1
+    assert exc.report.verified["uncertain"]["key"] == plan.ops[1].key
+    assert any("line 4" in e for e in exc.report.errors)
+
+
+def test_a_partial_read_back_covers_what_was_there_already(tmp_path):
+    """Ticked before, or done in this plan's journal: skipped, and still read back."""
+    from wanderfill.plan.apply import apply_plan
+
+    ops = [_vop("mark_kye", item=570, label="ticked"), *_four_ticks()]
+    plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+    _live(t, lose=3, error=_lost())
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert exc.report.already == ["ticked"] and exc.report.verified["checked"] == 3
+    with journal.path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "done", "key": ops[3].key, "error": "did not land"}))
+    (tmp_path / next(p.name for p in tmp_path.glob("verify-*"))).unlink()
+    # DARE is in the drift basis, so the resume runs against the profile as planned.
+    t.replies[DARE_READ]["ids"].remove(1)
+    t.webapi, t.ajax_text = FakeTransport.webapi.__get__(t), FakeTransport.ajax_text.__get__(t)
+    _live(t, lose=4, error=_lost("again"))
+    with pytest.raises(type(_lost()), match="again") as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    seen = info.value.report.verified
+    assert seen["checked"] == 4 and seen["mismatches"] == ["DARE area 1 did not stick"]
+
+
+@pytest.mark.parametrize("broken", ["verify", "uncertain", "file", "network"])
+def test_a_readback_failure_does_not_replace_the_original_error(
+        monkeypatch, tmp_path, capsys, broken):
+    import pathlib
+
+    from wanderfill.plan import apply as ap
+
+    error = _lost()
+
+    def boom(*a, **kw):
+        raise RuntimeError("the read-back broke")
+
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=error)
+    if broken == "verify":
+        monkeypatch.setattr(ap, "verify", boom)
+    elif broken == "uncertain":
+        monkeypatch.setattr(ap, "_what_is_there_now", boom)
+    elif broken == "file":
+        real = pathlib.Path.write_text
+        monkeypatch.setattr(pathlib.Path, "write_text", lambda self, *a, **kw: (
+            boom() if self.name.startswith("verify-") else real(self, *a, **kw)))
+    else:
+        send = t.webapi
+
+        def dead(path, /, **fields):
+            if any(a == "my_series/" for a, _ in t.sent):
+                raise RuntimeError("the read-back broke")
+            return send(path, **fields)
+
+        t.webapi = dead
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert exc is error and exc.__cause__ is None
+    assert journal.unresolved() == {plan.ops[2].key}
+    said = [exc.report] if broken == "file" else [exc.report, _verify_file(tmp_path)]
+    for where in said:
+        assert "the read-back broke" in str(where)
+    if broken != "file":
+        assert said[1]["partial"] is True and said[1]["uncertain"]["key"] == plan.ops[2].key
+        assert {"checked", "mismatches", "phantom_trips", "not_counted", "unproven"} <= set(said[1])
+
+
+def test_a_second_interrupt_during_the_read_back_keeps_the_journal_and_the_report(
+        monkeypatch, tmp_path, capsys):
+    from wanderfill.plan import apply as ap
+
+    def again(*a, **kw):
+        raise KeyboardInterrupt("again")
+
+    monkeypatch.setattr(ap, "verify", again)
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=KeyboardInterrupt("first"))
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path, "w")
+    assert rc == 130 and "attempted 3, succeeded 2, failed 1" in said.out
+    assert "NOT READ BACK" in said.out
+    (path,) = (tmp_path / "w").glob("journal-*.ndjson")
+    assert ap.Journal(path).unresolved() == {plan.ops[2].key}
+
+
+def test_a_full_run_says_it_is_not_partial(monkeypatch, tmp_path, capsys):
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t)
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 0 and "UNCERTAIN" not in said.out and "NOT READ BACK" not in said.out
+    assert _verify_file(tmp_path / "cli") == {
+        "checked": 4, "mismatches": [], "phantom_trips": [], "not_counted": [], "unproven": [],
+        "partial": False, "uncertain": None}
+
+
+def test_verify_reads_each_series_once():
+    """24 series ticks were 150 reads: the whole list again for every item."""
+    from wanderfill.plan.apply import verify
+
+    ops = [_vop("tick_series", series=s, item=n) for s in (1, 2) for n in (570, 571, 5)]
+    ops += [_vop("mark_kye", item=n) for n in (570, 571, 5)]
+    ops += [_vop("mark_dare", region=n) for n in (570, 571, 5)]
+    c, t = client(_tick_replies() | {REGIONS_READ: {"ids": [11, 12]}, READ: visits(_stored(**JAN))})
+    out = verify(c, ops)
+    assert sorted(a for a, _ in t.sent) == sorted(["V2/", "V2/", "kye/get-kye", DARE_READ])
+    assert out["checked"] == 12
+    assert out["mismatches"] == ["series 1 item 5 did not stick", "series 2 item 5 did not stick",
+                                 "KYE quadrant 5 did not stick", "DARE area 5 did not stick"]
+    t.sent.clear()
+    verify(c, [_jan_add(), _jan_update(visit_id=1), _jan(), _jan(TRIP_REGION | {"id": 12})])
+    assert sorted(a for a, _ in t.sent) == sorted([READ, READ, REGIONS_READ])
+
+
+def test_a_list_that_cannot_be_read_is_asked_for_once(tmp_path):
+    from wanderfill.plan.apply import verify
+
+    c, t = client({"kye/get-kye": {"result": "ERROR", "result_description": "hiccup"}})
+    out = verify(c, [_vop("mark_kye", item=n) for n in (1, 2, 3)])
+    assert len(t.sent) == 1 and len(out["unproven"]) == 3
+    assert all("hiccup" in u for u in out["unproven"]) and out["mismatches"] == []
+
+
+@pytest.mark.parametrize("reply", BAD_LISTS, ids=str)
+@pytest.mark.parametrize("op,action,field", [
+    (lambda: _vop("tick_series", series=1, item=5), "V2/", "visited"),
+    (lambda: _vop("mark_kye", item=5), "kye/get-kye", "visited"),
+    (lambda: _vop("mark_dare", region=5), DARE_READ, "ids"),
+    (lambda: _jan_add(), READ, "data"),
+    (lambda: _jan_update(), READ, "data"),
+    (lambda: _jan(), READ, "data"),
+], ids=["series", "kye", "dare", "add", "update", "trip"])
+def test_verify_calls_a_missing_list_unproven(op, action, field, reply):
+    """Read as empty, it said a write that landed "did not stick"."""
+    from wanderfill.plan.apply import verify
+
+    op = op()
+    c, _ = client({action: _bad(reply, field),
+                   "trips/get-trip": {"trip": {"date_from": "2026-01-01",
+                                               "date_to": "2026-01-02"}}})
+    out = verify(c, [op], {op.key: {"trip_id": 900}})
+    assert out["checked"] == 1 and out["mismatches"] == [] and out["phantom_trips"] == []
+    (line,) = out["unproven"]
+    assert action in line
+
+
+def test_unproven_exits_one(monkeypatch, tmp_path, capsys):
+    """"The read-back could not tell" exited 0, like a run that was proven."""
+    plan, c, t = _rebuilt(_vop("mark_kye", item=5), replies=_tick_replies())
+    _live(t)
+    send = t.webapi
+
+    def forgets(path, /, **fields):
+        if path == "kye/set-kye":
+            t.replies["kye/get-kye"] = {"result": "OK"}
+            return {"result": "OK"}
+        return send(path, **fields)
+
+    t.webapi = forgets
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 1 and "UNPROVEN: KYE quadrant 5" in said.out
+
+
+def test_a_mismatch_exits_one_and_every_one_is_printed(monkeypatch, tmp_path, capsys):
+    ops = [_vop("mark_kye", item=n) for n in range(1, 31)]
+    plan, c, _ = _rebuilt(*ops, replies=_tick_replies())
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 1 and said.out.count("MISMATCH") == 30
+
+
+def test_not_counted_alone_exits_zero(monkeypatch, tmp_path, capsys):
+    plan, c, t = _rebuilt(_jan_add(quality=1))
+    send = t.webapi
+
+    def lands(path, /, **fields):
+        if path == "quickEnter/add-visit":
+            t.replies[READ] = visits(_stored(**JAN, quality=1))
+        return send(path, **fields)
+
+    t.webapi = lands
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert rc == 0 and "not counted: region 11" in said.out
+
+
+def test_verify_reads_a_created_trips_header():
+    """A trip that owns the right visits can still be dated wrong itself."""
+    from wanderfill.plan.apply import verify
+
+    op = _jan(date_to="2026-01-09")
+    made = {op.key: {"trip_id": "900"}}
+
+    def against(header, results=made):
+        c, t = client({READ: visits(_stored(**JAN)), REGIONS_READ: {"ids": [11]},
+                       "trips/get-trip": header})
+        return verify(c, [op], results), [f for a, f in t.sent if a == "trips/get-trip"]
+
+    good = {"date_from": "2026-01-01", "date_to": "2026-01-09"}
+    out, reads = against({"trip": good})
+    assert out["mismatches"] == [] and out["unproven"] == [] and reads == [{"trip_id": 900}]
+    out, _ = against({"trip": good | {"date_to": "2026-01-02"}})
+    (line,) = out["mismatches"]
+    assert "2026-01-01..2026-01-02" in line and "2026-01-01..2026-01-09" in line
+    for bad in ({"result": "OK"}, {"trip": None}, {"trip": {}}, [], None, {"trip": "x"},
+                {"trip": good | {"date_to": None}}, {"trip": good | {"date_to": "2026"}},
+                {"trip": good | {"date_from": 20260101}},
+                {"result": "ERROR", "result_description": "Unauthorised."}):
+        out, _ = against(bad)
+        assert out["mismatches"] == [], bad
+        (line,) = out["unproven"]
+        assert "header" in line
+    out, reads = against({"trip": good}, {})
+    assert reads == [] and "could predate it" in out["unproven"][0]
+
+
+def test_one_unreadable_region_does_not_discard_the_report(tmp_path):
+    """One bad reply raised out of verify, and the other 149 checks went with it."""
+    from wanderfill.api.errors import TransportError
+    from wanderfill.plan.apply import verify
+
+    ops = [_jan_add(), _jan_add(region=12), _jan_update(region=13, visit_id=1),
+           _jan(TRIP_REGION | {"id": 14}, TRIP_REGION | {"id": 12}, TRIP_REGION | {"id": 15}),
+           _vop("mark_kye", item=570), _vop("mark_kye", item=5)]
+    for error in (TransportError("dead"), ApiError(READ, "hiccup"), AttributeError("shape"),
+                  TypeError("shape"), KeyError("shape"), ValueError("shape")):
+        c, t = client(_tick_replies() | {READ: visits(_stored(**JAN)),
+                                         REGIONS_READ: {"ids": [11, 12, 13, 14, 15]},
+                                         "trips/get-trip": {"trip": JAN_DAYS}})
+        send = t.webapi
+
+        def broken(path, /, send=send, error=error, **fields):
+            if fields.get("region") == 12:
+                raise error
+            return send(path, **fields)
+
+        t.webapi = broken
+        out = verify(c, ops, {ops[3].key: {"trip_id": 900}})
+        assert out["checked"] == 6
+        assert out["mismatches"] == ["KYE quadrant 5 did not stick"]
+        assert len(out["unproven"]) == 2 and all("region 12" in u for u in out["unproven"])
+        assert [p["region"] for p in out["phantom_trips"]] == [11]
+
+
+def test_an_unreadable_visited_list_is_unproven_whatever_broke():
+    from wanderfill.api.errors import TransportError
+    from wanderfill.plan.apply import verify
+
+    for error in (TransportError("dead"), KeyError("ids")):
+        c, t = client({READ: visits(_stored(**JAN))})
+        send = t.webapi
+
+        def broken(path, /, send=send, error=error, **fields):
+            if path == REGIONS_READ:
+                raise error
+            return send(path, **fields)
+
+        t.webapi = broken
+        out = verify(c, [_jan_add(), _jan_add(region=12)])
+        assert out["mismatches"] == [] and out["not_counted"] == []
+        assert len(out["unproven"]) == 1 and "could not be read back" in out["unproven"][0]
+
+
+def test_an_op_verify_cannot_check_is_unproven_and_the_rest_are_checked():
+    from wanderfill.plan.apply import verify
+
+    c, _ = client(_tick_replies())
+    out = verify(c, [_jan({"quality": 3}), _vop("mark_kye", item=5)])
+    assert out["mismatches"] == ["KYE quadrant 5 did not stick"]
+    assert any("KeyError" in u for u in out["unproven"])

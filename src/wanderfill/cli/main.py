@@ -32,6 +32,7 @@ it if they asked".
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -1013,7 +1014,43 @@ def cmd_share(args) -> int:
     return 0
 
 
+def _print_apply_report(report) -> None:
+    print(
+        f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
+        f"failed {report.failed}, skipped {report.skipped}"
+    )
+    for label in report.already:
+        print(f"  already ticked, not sent: {label}")
+    for e in report.errors:
+        print(f"  error: {e}")
+    # Read back from the server, not from the responses. Printed, because a
+    # verify file nobody opens is the habit that lapses.
+    seen = report.verified
+    if not seen:
+        print("  NOT READ BACK: the read-back did not finish, so what landed is not verified")
+    for m in seen.get("mismatches", []):
+        print(f"  MISMATCH: {m}")
+    for n in seen.get("not_counted", []):
+        print(f"  not counted: region {n['region']} — {n['why']} (quality {n['quality']})")
+    for u in seen.get("unproven", []):
+        print(f"  UNPROVEN: {u}")
+    if lost := seen.get("uncertain"):
+        print(f"  UNCERTAIN: {lost['kind']} {lost['label']!r} (key {lost['key']}): its journal "
+              "entry stays open until a human closes it. Read now:")
+        if lost["answer"] is not None:
+            print(f"    the server answered {lost['answer']}")
+        for line in lost["now"]:
+            print(f"    {line}")
+
+
 def cmd_apply(args) -> int:
+    """Run a plan and print what the server shows afterwards.
+
+    Exits 1 if anything failed, came out different or could not be proven; a
+    transit that does not mark its region is expected and is not among those. If
+    the run is cut short, the report of what landed is printed before the error,
+    which sets the exit code in :func:`main` (2, or 130 for Ctrl-C).
+    """
     from ..plan.apply import apply_plan
     from ..plan.model import Plan, validate
 
@@ -1038,31 +1075,25 @@ def cmd_apply(args) -> int:
         mark = "ok " if ok else "ERR"
         print(f"  [{i:4}/{total}] {mark} {op.kind:13} {op.label[:56]}")
 
-    report = apply_plan(
-        c, plan,
-        workdir=Path(args.workdir),
-        confirm=True,
-        max_writes=args.max_writes,
-        on_progress=progress,
-        also=(DEFAULT_WORKDIR,),
-    )
-    print(
-        f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
-        f"failed {report.failed}, skipped {report.skipped}"
-    )
-    for label in report.already:
-        print(f"  already ticked, not sent: {label}")
-    for e in report.errors[:20]:
-        print(f"  error: {e}")
-    # Read back from the server, not from the responses. Printed, because a
-    # verify file nobody opens is the habit that lapses.
-    for m in report.verified.get("mismatches", [])[:20]:
-        print(f"  MISMATCH: {m}")
-    for n in report.verified.get("not_counted", []):
-        print(f"  not counted: region {n['region']} — {n['why']} (quality {n['quality']})")
-    for u in report.verified.get("unproven", []):
-        print(f"  UNPROVEN: {u}")
-    return 1 if report.failed or report.verified.get("mismatches") else 0
+    try:
+        report = apply_plan(
+            c, plan,
+            workdir=Path(args.workdir),
+            confirm=True,
+            max_writes=args.max_writes,
+            on_progress=progress,
+            also=(DEFAULT_WORKDIR,),
+        )
+    except (Exception, KeyboardInterrupt) as exc:
+        if hasattr(exc, "report"):  # the run had started; a refusal has none
+            # A closed or odd stdout must not replace the error that ended the run.
+            with contextlib.suppress(OSError, ValueError):
+                _print_apply_report(exc.report)
+        raise
+    _print_apply_report(report)
+    seen = report.verified
+    return 1 if (report.failed or report.errors or seen.get("mismatches")
+                 or seen.get("unproven")) else 0
 
 
 def _visit_snapshot(v) -> dict:

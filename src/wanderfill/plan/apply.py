@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..api.client import MARKS_REGION_FROM, NomadMania, YearOnly, strict_ids
+from ..api.client import MARKS_REGION_FROM, NomadMania, Visit, YearOnly, strict_ids
 from ..api.errors import (
     AccountMismatch,
     ApiError,
@@ -32,6 +32,7 @@ from ..api.errors import (
     TransportError,
     UnknownWriteOutcome,
     VerificationFailed,
+    WanderfillError,
 )
 from .model import (
     TRIP_REGION_FIELDS,
@@ -378,11 +379,12 @@ class ApplyReport:
     # Labels of the ops skipped because the item was ticked already. Nothing was
     # sent or journalled for them; they are in `skipped` too.
     already: list[str] = field(default_factory=list)
-    # Filled by `verify()` after the writes: what the server actually says now.
+    # What the server actually says now: `verify()`'s report, plus "partial" and
+    # "uncertain" as in the verify file. Empty only if the read-back was interrupted.
     verified: dict = field(default_factory=dict)
 
 
-def _proves_nothing_changed(exc: Exception) -> bool:
+def _proves_nothing_changed(exc: BaseException) -> bool:
     """Whether a failed op may be journalled as closed, and so be sent again.
 
     Only a refusal counts: ours before sending, or the server's own. An answer
@@ -442,6 +444,15 @@ def apply_plan(
         journalled for it, its label goes in ``ApplyReport.already``, and
         ``on_progress`` is told ``True``. The series and KYE lists go into the
         snapshot file, which is where to look to undo the ticks.
+
+    Whatever ends the loop, what landed is read back (:func:`verify`) and
+    ``verify-<stamp>.json`` written. After an exception or Ctrl-C the file says
+    ``"partial": true``, covers the ops that are done or ticked already, and
+    has under ``"uncertain"`` what the server shows for the op whose journal entry
+    is still open, or null if none is. That is for the human who closes the
+    entry; nothing here does. The exception is then raised as it was, with the
+    :class:`ApplyReport` as its ``report``. A read-back that fails is recorded
+    in the report and raises nothing.
     """
     report = ApplyReport()
     ops = plan.to_apply()
@@ -549,55 +560,215 @@ def _apply_locked(
     # trip id a create_trip was given: without it a visit that was already
     # there is indistinguishable from the one the trip was meant to create.
     results: dict[str, Any] = {}
-    for i, op in enumerate(ops, 1):
-        if op.key in done:
-            report.skipped += 1
-            continue
+
+    def landed(op: Op) -> bool:
         tick = tick_of(op)
-        if tick and tick[1] in ticked[tick[0]]:
-            report.skipped += 1
-            report.already.append(op.label or f"{op.kind} {tick[1]}")
-            if on_progress:
-                on_progress(i, len(ops), op, True)
-            continue
-        report.attempted += 1
-        ok = False
-        journal.opening(op)
+        return op.key in done or (tick is not None and tick[1] in ticked.get(tick[0], ()))
+
+    def read_back(which: Sequence[Op], *, partial: bool, uncertain: Op | None = None) -> None:
+        """Fill ``report.verified`` and write the file. Raises nothing but an interrupt."""
+        reads = _Reads(client)
         try:
-            result = _execute(client, op)
-            ok = True
-            results[op.key] = result
-            journal.note(op, result)
-            done.add(op.key)
-            if tick:  # a plan can spell one tick two ways, under two keys
-                ticked[tick[0]].add(tick[1])
-            report.succeeded += 1
+            seen = verify(client, which, results, reads)
         except Exception as exc:
+            seen = _blank()
+            seen["unproven"].append(f"the read-back itself failed ({exc!r})")
+        seen |= {"partial": partial, "uncertain": None}
+        if uncertain:
+            try:
+                now = _what_is_there_now(reads, uncertain)
+            except Exception as exc:
+                now = [f"could not be read back ({exc!r}); whether it landed is not known"]
+            seen["uncertain"] = {
+                "key": uncertain.key, "kind": uncertain.kind, "label": uncertain.label,
+                "answer": results.get(uncertain.key), "now": now,
+            }
+        report.verified = seen
+        path = workdir / f"verify-{stamp}.json"
+        try:
+            path.write_text(json.dumps(seen, indent=1, default=str), encoding="utf-8")
+        except Exception as exc:
+            report.errors.append(f"{path} could not be written ({exc!r})")
+
+    try:
+        try:
+            for i, op in enumerate(ops, 1):
+                if op.key in done:
+                    report.skipped += 1
+                    continue
+                tick = tick_of(op)
+                if tick and tick[1] in ticked[tick[0]]:
+                    report.skipped += 1
+                    report.already.append(op.label or f"{op.kind} {tick[1]}")
+                else:
+                    _send(client, op, i, len(ops), journal, report, results, on_progress)
+                    done.add(op.key)
+                    if tick:  # a plan can spell one tick two ways, under two keys
+                        ticked[tick[0]].add(tick[1])
+                if on_progress:
+                    on_progress(i, len(ops), op, True)
+        except (Exception, KeyboardInterrupt):
+            # What is done and what is open comes from the journal: an interrupt
+            # can fall between its line and this run's bookkeeping.
+            try:
+                done |= journal.done_keys()
+                left_open = journal.unresolved()
+            except Exception as unreadable:
+                report.errors.append(f"journal: {unreadable}")
+                left_open = {op.key} - done
+            read_back(
+                [o for o in ops if landed(o)],
+                partial=True,
+                uncertain=next((o for o in ops if o.key in left_open), None),
+            )
+            raise
+        read_back(ops, partial=False)
+    except (Exception, KeyboardInterrupt) as exc:
+        exc.report = report  # type: ignore[union-attr]
+        raise
+    return report
+
+
+def _send(
+    client: NomadMania,
+    op: Op,
+    i: int,
+    total: int,
+    journal: Journal,
+    report: ApplyReport,
+    results: dict[str, Any],
+    on_progress: Callable[[int, int, Op, bool], None] | None,
+) -> None:
+    """One op, between its ``open`` and ``done`` lines. Raises what ended it, unchanged."""
+    report.attempted += 1
+    try:
+        journal.opening(op)
+        results[op.key] = _execute(client, op)
+        journal.note(op, results[op.key])
+        report.succeeded += 1
+    except (Exception, KeyboardInterrupt) as exc:
+        report.failed += 1
+        report.errors.append(f"{op.kind} {op.label}: {str(exc) or repr(exc)}")
+        try:
             # Anything that does not prove the write was refused is deliberately
             # NOT journalled as done. The entry stays open, which is what blocks
             # the next run from retrying a write that may have landed.
             if _proves_nothing_changed(exc):
                 journal.note(op, None, error=str(exc))
-            report.failed += 1
-            report.errors.append(f"{op.kind} {op.label}: {exc}")
-            # Stop on the first failure of any kind. Continuing runs later ops
-            # against a profile that is no longer in the state the plan assumed,
-            # and the ops after a failure are the least reviewed of the batch.
             if on_progress:
-                on_progress(i, len(ops), op, False)
-            raise
-        if on_progress:
-            on_progress(i, len(ops), op, ok)
+                on_progress(i, total, op, False)
+        except Exception as also:  # the error of the write is the one to raise
+            report.errors.append(f"and then: {also!r}")
+        # Stop on the first failure of any kind. Continuing runs later ops
+        # against a profile that is no longer in the state the plan assumed,
+        # and the ops after a failure are the least reviewed of the batch.
+        raise
 
-    report.verified = verify(client, ops, results)
-    (workdir / f"verify-{stamp}.json").write_text(
-        json.dumps(report.verified, indent=1, default=str), encoding="utf-8"
-    )
-    return report
+
+class _Reads:
+    """What the server says after the writes: each thing read once, and only if asked for.
+
+    Every read happens after every write, so one answer serves all the ops. A read
+    that fails, in whatever way, is a :class:`VerificationFailed` for each op that
+    needs it and is not tried again.
+    """
+
+    def __init__(self, client: NomadMania):
+        self._client = client
+        self._seen: dict[tuple, Any] = {}
+
+    def _once(self, key: tuple, read: Callable[[], Any]) -> Any:
+        if key not in self._seen:
+            try:
+                self._seen[key] = read()
+            except VerificationFailed as exc:
+                self._seen[key] = exc
+            except Exception as exc:
+                why = str(exc) if isinstance(exc, WanderfillError) else repr(exc)
+                self._seen[key] = VerificationFailed("read-back", why)
+        got = self._seen[key]
+        if isinstance(got, VerificationFailed):
+            raise got
+        return got
+
+    def visits(self, region: int) -> list[Visit]:
+        return self._once(("visits", region), lambda: self._client._visits_strict(region))
+
+    def marked(self) -> set[int]:
+        return self._once(("marked",), lambda: self._client.visited_region_ids(strict=True))
+
+    def ticked(self, op: Op) -> set[int]:
+        """The list a tick op ticks; TCC is 29 requests."""
+        where, _ = tick_of(op)  # type: ignore[misc]
+        return self._once(where, lambda: ticked_before(self._client, [op])[where])
+
+    def header(self, trip_id: int) -> tuple[str, str]:
+        def read() -> tuple[str, str]:
+            trip = self._client.trip(trip_id)["trip"]
+            if days := _full_days(trip["date_from"], trip["date_to"]):
+                return days
+            raise VerificationFailed(
+                "trips/get-trip",
+                f"dates {str(trip['date_from'])[:30]!r}..{str(trip['date_to'])[:30]!r} "
+                "cannot be read",
+            )
+        return self._once(("trip", trip_id), read)
+
+
+def _blank() -> dict[str, Any]:
+    return {
+        "checked": 0, "mismatches": [], "phantom_trips": [], "not_counted": [], "unproven": [],
+    }
+
+
+def _tick_name(op: Op) -> str:
+    _, n = tick_of(op)  # type: ignore[misc]
+    return {"mark_kye": "KYE quadrant", "mark_tcc": "TCC destination", "mark_dare": "DARE area",
+            }.get(op.kind, f"series {op.series} item") + f" {n}"
+
+
+def _what_is_there_now(reads: _Reads, op: Op) -> list[str]:
+    """What the server shows where ``op`` would have written, for the human who closes it.
+
+    Worded as what is there, never as whether ``op`` landed. A visit found by its
+    dates may have been put there by somebody else, and one not found yet may
+    still appear.
+    """
+    def by_dates(region: int, days: tuple[str | None, str | None]) -> str:
+        what = f"region {region}, {days[0]}..{days[1]}"
+        try:
+            visits = reads.visits(region)
+        except VerificationFailed as exc:
+            return f"{what}: the visits could not be read back ({exc})"
+        there = any(_dates(v) == days for v in visits)
+        return (f"{what}: a visit with these dates is {'there' if there else 'not there'}; "
+                "whether this run made it is not known")
+
+    header = (op.date_from, op.date_to)
+    if op.kind == "add_visit":
+        return [by_dates(op.region, header)]
+    if op.kind == "create_trip":
+        return [by_dates(int(r["id"]), _region_span(r) or header) for r in op.regions]
+    if op.kind == "update_visit":
+        what = f"visit {op.visit_id} in region {op.region}"
+        try:
+            live = next((v for v in reads.visits(op.region) if v.id == op.visit_id), None)
+        except VerificationFailed as exc:
+            return [f"{what}: the visits could not be read back ({exc})"]
+        if live is None:
+            return [f"{what}: not there"]
+        return [f"{what}: reads {_iso_of(live.date_from)}..{_iso_of(live.date_to)} quality "
+                f"{live.quality}; planned {op.date_from}..{op.date_to} quality {op.quality}"]
+    try:
+        held = tick_of(op)[1] in reads.ticked(op)  # type: ignore[index]
+    except VerificationFailed as exc:
+        return [f"{_tick_name(op)}: the list could not be read back ({exc})"]
+    return [f"{_tick_name(op)} is {'' if held else 'not '}in the list now"]
 
 
 def verify(
-    client: NomadMania, ops: Sequence[Op], results: dict[str, Any] | None = None
+    client: NomadMania, ops: Sequence[Op], results: dict[str, Any] | None = None,
+    reads: _Reads | None = None,
 ) -> dict:
     """Re-read what the plan touched and compare it with what the plan intended.
 
@@ -617,27 +788,27 @@ def verify(
     there; without it that question goes under ``unproven`` rather than being
     answered by resemblance. ``unproven`` is for anything the read-back could
     not establish either way. It is not a pass.
+
+    Every list, region and trip header is read once, after all the writes, and
+    strictly: a reply without its list, a list with something else in it and a
+    read that fails are ``unproven`` for the ops that need them, and the other
+    ops are still checked. ``reads`` shares what has been read already.
     """
-    tcc_ticked: set[int] | None = None
-    tcc_unread: str | None = None
-    out: dict[str, Any] = {
-        "checked": 0, "mismatches": [], "phantom_trips": [], "not_counted": [], "unproven": [],
-    }
+    out = _blank()
     results = results or {}
-    marked: list[set[int] | None] = []  # read once, and only if an op needs it
+    reads = reads or _Reads(client)
 
     def counted(region: int, stored: Sequence[int], what: str) -> None:
         """A stored visit either marks its region, or is a transit that does not."""
-        if not marked:
-            try:
-                marked.append(client.visited_region_ids(strict=True))
-            except VerificationFailed as exc:
-                marked.append(None)
-                out["unproven"].append(
-                    f"the visited list could not be read back ({exc}), so whether the "
-                    "regions written now count is not known"
-                )
-        if marked[0] is None or region in marked[0]:
+        try:
+            marked = reads.marked()
+        except VerificationFailed as exc:
+            line = (f"the visited list could not be read back ({exc}), so whether the "
+                    "regions written now count is not known")
+            if line not in out["unproven"]:
+                out["unproven"].append(line)
+            return
+        if region in marked:
             return
         best = max(stored)
         if best < MARKS_REGION_FROM:
@@ -651,16 +822,23 @@ def verify(
                 "but the region is not in the visited list"
             )
 
-    for op in ops:
+    def visits(region: int, what: str) -> list[Visit] | None:
+        try:
+            return reads.visits(region)
+        except VerificationFailed as exc:
+            out["unproven"].append(f"{what}: the visits could not be read back ({exc})")
+            return None
+
+    def check(op: Op) -> None:
         if op.kind == "update_visit":
-            out["checked"] += 1
-            live = next(
-                (v for v in client.visits_for_region(op.region) if v.id == op.visit_id), None
-            )
+            stored = visits(op.region, f"visit {op.visit_id} in region {op.region}")
+            if stored is None:
+                return
+            live = next((v for v in stored if v.id == op.visit_id), None)
             if live is None:
                 out["mismatches"].append(f"visit {op.visit_id} is gone from region {op.region}")
-                continue
-            if _iso_of(live.date_from) != op.date_from or _iso_of(live.date_to) != op.date_to:
+                return
+            if _dates(live) != (op.date_from, op.date_to):
                 out["mismatches"].append(
                     f"visit {op.visit_id}: wanted {op.date_from}..{op.date_to}, "
                     f"server has {_iso_of(live.date_from)}..{_iso_of(live.date_to)}"
@@ -672,9 +850,10 @@ def verify(
                 )
 
         elif op.kind == "add_visit":
-            out["checked"] += 1
-            live = [v for v in client.visits_for_region(op.region)
-                    if _iso_of(v.date_from) == op.date_from and _iso_of(v.date_to) == op.date_to]
+            stored = visits(op.region, f"region {op.region}, {op.date_from}..{op.date_to}")
+            if stored is None:
+                return
+            live = [v for v in stored if _dates(v) == (op.date_from, op.date_to)]
             if not live:
                 out["mismatches"].append(
                     f"region {op.region}: no visit found for {op.date_from}..{op.date_to}"
@@ -703,102 +882,101 @@ def verify(
                 counted(op.region, [v.quality for v in live], f"region {op.region}")
 
         elif op.kind == "create_trip":
-            # One trip, and each region in it carrying exactly one visit. With
-            # the trip id the server answered, the visit is found by ownership,
-            # so one that was already there cannot stand in for it. Without the
-            # id it can only be found by its dates, and that is said out loud.
-            out["checked"] += 1
-            trip = f"trip {op.date_from}..{op.date_to}"
-            trip_id = _trip_id(results.get(op.key))
-            owners: set[int | None] = set()
-            for r in op.regions:
-                region = int(r["id"])
-                visits = client.visits_for_region(region)
-                span = _region_span(r)
+            check_trip(op)
 
-                def dates(v) -> tuple[str | None, str | None]:
-                    return _iso_of(v.date_from), _iso_of(v.date_to)
-
-                if trip_id is not None:
-                    mine = [v for v in visits if v.trip_id == trip_id]
-                    found_by = f"owned by trip {trip_id}"
-                else:
-                    want = span or (op.date_from, op.date_to)
-                    mine = [v for v in visits if dates(v) == want]
-                    found_by = f"for {want[0]}..{want[1]}"
-                if not mine:
-                    out["mismatches"].append(f"{trip}: region {region} has no visit {found_by}")
-                    continue
-                if span and any(dates(v) != span for v in mine):
-                    out["mismatches"].append(
-                        f"{trip}: region {region} stored {[dates(v) for v in mine]}, "
-                        f"planned {span[0]}..{span[1]}"
-                    )
-                same = [v for v in visits if dates(v) == dates(mine[0])]
-                if len(same) > 1 or len(mine) > 1:
-                    out["mismatches"].append(
-                        f"{trip}: region {region} now has {max(len(same), len(mine))} visits "
-                        f"for {dates(mine[0])[0]}..{dates(mine[0])[1]} — a duplicate"
-                    )
-                want_quality = r.get("quality")
-                if want_quality is not None and any(v.quality != want_quality for v in mine):
-                    out["mismatches"].append(
-                        f"{trip}: region {region} quality is "
-                        f"{[v.quality for v in mine]}, planned {want_quality}"
-                    )
-                owners |= {v.trip_id for v in mine}
-                counted(region, [v.quality for v in mine], f"{trip}: region {region}")
-            if trip_id is None:
-                if len(owners) > 1 or None in owners:
-                    out["mismatches"].append(
-                        f"{trip}: its visits are not all owned by one trip "
-                        f"(owners: {sorted(owners, key=str)})"
-                    )
+        elif tick := tick_of(op):
+            try:
+                held = reads.ticked(op)
+            except VerificationFailed as exc:
                 out["unproven"].append(
-                    f"{trip}: the id the server gave it is not known to this run, so the "
-                    "visits found were matched by date and could predate it"
+                    f"{_tick_name(op)}: the list could not be read back ({exc})"
+                )
+            else:
+                if tick[1] not in held:
+                    out["mismatches"].append(f"{_tick_name(op)} did not stick")
+
+    def check_trip(op: Op) -> None:
+        # One trip with the planned dates, and each region in it carrying exactly
+        # one visit. With the trip id the server answered, the visit is found by
+        # ownership, so one that was already there cannot stand in for it. Without
+        # the id it can only be found by its dates, and that is said out loud.
+        trip = f"trip {op.date_from}..{op.date_to}"
+        trip_id = _trip_id(results.get(op.key))
+        owners: set[int | None] = set()
+        for r in op.regions:
+            region = int(r["id"])
+            stored = visits(region, f"{trip}: region {region}")
+            if stored is None:
+                continue
+            span = _region_span(r)
+            if trip_id is not None:
+                mine = [v for v in stored if v.trip_id == trip_id]
+                found_by = f"owned by trip {trip_id}"
+            else:
+                want = span or (op.date_from, op.date_to)
+                mine = [v for v in stored if _dates(v) == want]
+                found_by = f"for {want[0]}..{want[1]}"
+            if not mine:
+                out["mismatches"].append(f"{trip}: region {region} has no visit {found_by}")
+                continue
+            if span and any(_dates(v) != span for v in mine):
+                out["mismatches"].append(
+                    f"{trip}: region {region} stored {[_dates(v) for v in mine]}, "
+                    f"planned {span[0]}..{span[1]}"
+                )
+            same = [v for v in stored if _dates(v) == _dates(mine[0])]
+            if len(same) > 1 or len(mine) > 1:
+                out["mismatches"].append(
+                    f"{trip}: region {region} now has {max(len(same), len(mine))} visits "
+                    f"for {_dates(mine[0])[0]}..{_dates(mine[0])[1]} — a duplicate"
+                )
+            want_quality = r.get("quality")
+            if want_quality is not None and any(v.quality != want_quality for v in mine):
+                out["mismatches"].append(
+                    f"{trip}: region {region} quality is "
+                    f"{[v.quality for v in mine]}, planned {want_quality}"
+                )
+            owners |= {v.trip_id for v in mine}
+            counted(region, [v.quality for v in mine], f"{trip}: region {region}")
+        if trip_id is None:
+            if len(owners) > 1 or None in owners:
+                out["mismatches"].append(
+                    f"{trip}: its visits are not all owned by one trip "
+                    f"(owners: {sorted(owners, key=str)})"
+                )
+            out["unproven"].append(
+                f"{trip}: the id the server gave it is not known to this run, so the "
+                "visits found were matched by date and could predate it"
+            )
+            return
+        try:
+            header = reads.header(trip_id)
+        except VerificationFailed as exc:
+            out["unproven"].append(
+                f"{trip}: the header of trip {trip_id} could not be read back ({exc})"
+            )
+        else:
+            if header != (op.date_from, op.date_to):
+                out["mismatches"].append(
+                    f"{trip}: the header of trip {trip_id} reads {header[0]}..{header[1]}"
                 )
 
-        elif op.kind == "mark_kye":
-            out["checked"] += 1
-            if not _holds(client.kye().get("visited", []), op.item):
-                out["mismatches"].append(f"KYE quadrant {op.item} did not stick")
-
-        elif op.kind == "mark_tcc":
-            out["checked"] += 1
-            # 29 requests, so once per verify. Every write has run by now.
-            if tcc_ticked is None and tcc_unread is None:
-                try:
-                    tcc_ticked = client.visited_tcc_ids()
-                except VerificationFailed as exc:
-                    tcc_unread = str(exc)
-            if tcc_ticked is None:
-                out["unproven"].append(
-                    f"TCC destination {op.item}: the list could not be read back ({tcc_unread})"
-                )
-            elif op.item not in tcc_ticked:
-                out["mismatches"].append(f"TCC destination {op.item} did not stick")
-
-        elif op.kind == "mark_dare":
-            out["checked"] += 1
-            if not _holds(client.visited_dare_ids(), op.region):
-                out["mismatches"].append(f"DARE area {op.region} did not stick")
-
-        elif op.kind == "tick_series":
-            out["checked"] += 1
-            if not _holds(client.series(op.series).get("visited", []), op.item):
-                out["mismatches"].append(f"series {op.series} item {op.item} did not stick")
+    for op in ops:
+        out["checked"] += 1
+        try:
+            check(op)
+        except Exception as exc:
+            out["unproven"].append(f"{op.kind} {op.label!r}: could not be checked ({exc!r})")
 
     return out
 
 
-def _holds(ids: Iterable[object], wanted: int) -> bool:
-    """Whether a server's id list holds an id; some lists spell theirs as text."""
-    return str(wanted) in {str(i) for i in ids}
-
-
 def _iso_of(day) -> str | None:
     return day.isoformat() if day else None
+
+
+def _dates(v: Visit) -> tuple[str | None, str | None]:
+    return _iso_of(v.date_from), _iso_of(v.date_to)
 
 
 def _trip_id(result: object) -> int | None:
