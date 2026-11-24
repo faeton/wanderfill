@@ -60,8 +60,8 @@
 
 `km` is to the nearest ground shot; `photos` and `days` count ground shots within the radius; `thin` means one photo, or farther than 1 km.
 
-- [ ] **Tests:** one per rule in Decisions 1-6 and 10; plus: `taken_utc` missing means the photo cannot be shown to be slow, so it is not ground; two photos 4 s and 60 m apart are ground; a frozen run before a jump is fast, every photo of it; a shot exactly at `--until` counts, the next day does not; a date-line flight is ordered by UTC; antimeridian span and radius; an object ticked under a string id is not offered; a skipped series is not offered and is counted; an object with only fast or conflict shots is not offered; the same item id in two series are two candidates; a failed tile is counted and the rest still offered; order is stable.
-- [ ] RED, implement, GREEN, ruff, commit `series: candidates from photos on the ground`.
+- [x] **Tests:** one per rule in Decisions 1-6 and 10; plus: `taken_utc` missing means the photo cannot be shown to be slow, so it is not ground; two photos 4 s and 60 m apart are ground; a frozen run before a jump is fast, every photo of it; a shot exactly at `--until` counts, the next day does not; a date-line flight is ordered by UTC; antimeridian span and radius; an object ticked under a string id is not offered; a skipped series is not offered and is counted; an object with only fast or conflict shots is not offered; the same item id in two series are two candidates; a failed tile is counted and the rest still offered; order is stable.
+- [x] RED, implement, GREEN, ruff, commit `series: candidates from photos on the ground`.
 
 ## Task 10b: the page and the answers
 
@@ -74,8 +74,8 @@
 
 The page: candidates grouped by day and region-free place (series, then distance), filters by series, distance and answered; per item three buttons and the facts (distance, local time, photos, days, origin, `thin`, `conflict`, fast photos near); a header with account, dates, radius, what was left out and why, unread tiles, and recall per series; counts of y / n / q / blank; download and copy of the answers file. Plain English. A Content-Security-Policy meta of `default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'`. Keyboard operable, light and dark. State in `localStorage` under the manifest hash, and a working page if storage is unavailable. Data goes in as JSON with `<`, `>`, `&`, U+2028 and U+2029 escaped, and is written with `textContent`.
 
-- [ ] **Tests:** nothing preselected; hostile names inert; no `http`, `//`, `fetch`, `import`, `src=`, `href=` in the rendered page outside the data; the CSP present; hash independent of `created` and of candidate dict order, dependent on every other field; load refuses an altered candidate; answers refuse: other hash, other account, other format, unknown item, duplicate key in the JSON, a value other than y/n/q, not an object; blank items are absent; unread tiles and left-out counts appear. If `node` is available a test runs the page's own export function; otherwise it is skipped, and the export logic is also covered by a pure-Python check of the embedded data.
-- [ ] RED, implement, GREEN, ruff, commit `series: a page to answer, and answers bound to it`.
+- [x] **Tests:** nothing preselected; hostile names inert; no `http`, `//`, `fetch`, `import`, `src=`, `href=` in the rendered page outside the data; the CSP present; hash independent of `created` and of candidate dict order, dependent on every other field; load refuses an altered candidate; answers refuse: other hash, other account, other format, unknown item, duplicate key in the JSON, a value other than y/n/q, not an object; blank items are absent; unread tiles and left-out counts appear. If `node` is available a test runs the page's own export function; otherwise it is skipped, and the export logic is also covered by a pure-Python check of the embedded data.
+- [x] RED, implement, GREEN, ruff, commit `series: a page to answer, and answers bound to it`.
 
 ## Task 10c: the commands and the plan
 
@@ -88,8 +88,8 @@ The page: candidates grouped by day and region-free place (series, then distance
 
 `review` prints recall per series, counts by distance, coverage and what was left out, then the paths; exit 0, or 3 when a tile could not be read (files still written). `plan` re-reads the account and the series strictly, drops items already ticked and names them, refuses an item no longer in the series, writes a plan with `basis` (fingerprint, `series_ticked`, `taken_at`), `sources` (manifest and answers sha256, origins), `params`, `proof` per op, every op in bucket `apply`, and prints "one series; read it with `show -v`, then `check`". `named` matches the exact catalogue name, case- and space-sensitive; no match or more than one refuses without printing any other name.
 
-- [ ] **Tests:** review writes only its two files and sends no write; plan covers exactly the `y` items of one series; another account refused; a series id absent from the manifest refused; an item gone from the live series refused; already ticked dropped and named; `--series` required; fingerprint equals `fingerprint(basis_of(client.snapshot([]), []))`; `validate(plan) == []`; `confidence == 0.0`; `named` refuses near matches and prints no catalogue name; `--said` empty refused; the importer column missing says so and exits 2 instead of writing an empty page; a library path that does not exist is a plain error; no cached client.
-- [ ] RED, implement, GREEN, ruff, docs, commit `series: review, plan and named`.
+- [x] **Tests:** review writes only its two files and sends no write; plan covers exactly the `y` items of one series; another account refused; a series id absent from the manifest refused; an item gone from the live series refused; already ticked dropped and named; `--series` required; fingerprint equals `fingerprint(basis_of(client.snapshot([]), []))`; `validate(plan) == []`; `confidence == 0.0`; `named` refuses near matches and prints no catalogue name; `--said` empty refused; the importer column missing says so and exits 2 instead of writing an empty page; a library path that does not exist is a plain error; no cached client.
+- [x] RED, implement, GREEN, ruff, docs, commit `series: review, plan and named`.
 
 ## Task 11: airports
 
@@ -101,7 +101,7 @@ The page: candidates grouped by day and region-free place (series, then distance
 - `recall` for series 5 is printed first, with ticked airports that have no photo near, so nobody reads the list as complete.
 - `match_series` is unchanged. Its docstring says the 25% was a day-level measurement, that per-photo distance can do better, and that either is recall, not precision.
 
-- [ ] **Tests** for each line above. RED, implement, GREEN, ruff, commit `series: airports by photos on the ground`.
+- [x] **Tests** for each line above. RED, implement, GREEN, ruff, commit `series: airports by photos on the ground`.
 
 ## Task 12: trip planner spec
 
@@ -109,8 +109,8 @@ No code. `docs/superpowers/specs/2026-11-24-trip-planner-design.md`, answering t
 
 ## Gate
 
-- [ ] Suite and ruff on Python 3.10 and the venv's Python; whole-change review by Codex and Grok; findings fixed.
-- [ ] The controller runs `series review` read-only on a real library into a private directory, opens the page, and runs `series plan` and `check` on a synthetic answer without applying. Results stay out of the repository.
+- [x] Suite and ruff on Python 3.10 and the venv's Python; whole-change review by Codex and Grok; findings fixed.
+- [x] The controller runs `series review` read-only on a real library into a private directory, opens the page, and runs `series plan` and `check` on a synthetic answer without applying. Results stay out of the repository.
 - [ ] Fast-forward `main`; push only on the owner's yes.
 
 ## Not building
