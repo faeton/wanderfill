@@ -35,6 +35,9 @@ review-*.json
 review-*.html
 series-answers*.json
 
+# The page of `trips review` saves the answers about your stays under this name.
+trips-answers*.json
+
 # `share` writes cards with your name and face on them. Post them yourself.
 share/
 

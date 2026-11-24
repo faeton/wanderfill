@@ -31,7 +31,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from dataclasses import dataclass, replace
 from functools import cached_property
 from itertools import pairwise
-from typing import Literal, TypedDict
+from typing import Literal, Protocol, TypedDict
 
 from .. import evidence
 from ..api.client import Visit, When, YearOnly
@@ -189,12 +189,33 @@ class Run:
         return self.shots[-1].shot.taken_utc
 
 
+class AnyRun(Protocol):
+    """What :func:`group` asks of a run: a :class:`Run`, or one that a list read back."""
+
+    @property
+    def region(self) -> int: ...
+    @property
+    def first(self) -> dt.date: ...
+    @property
+    def last(self) -> dt.date: ...
+    @property
+    def reasons(self) -> tuple[str, ...]: ...
+    @property
+    def status(self) -> Status: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def start(self) -> dt.datetime: ...
+    @property
+    def end(self) -> dt.datetime: ...
+
+
 def _utc(o: Obs) -> tuple:
     s = o.shot
     return (s.taken_utc, s.lat, s.lon, s.uuid)
 
 
-def _in_order(runs: Iterable[Run]) -> list[Run]:
+def _in_order(runs: Iterable[AnyRun]) -> list:
     return sorted(runs, key=lambda r: (r.start, r.end, r.id))
 
 
@@ -453,6 +474,14 @@ def evidence_grade(run: Run, assets: Mapping[str, PhotoAsset]) -> evidence.Grade
     return evidence.grade(shots)
 
 
+def status_of(reasons: Iterable[str]) -> Status:
+    """What the reasons of a judged run make it."""
+    found = {kind_of(s) for s in reasons}
+    return ("there" if "there" in found else
+            "offered" if not found else
+            "held" if found <= RELEASED_BY_WORDS else "fixed")
+
+
 def judge(
     runs: Iterable[Run],
     obs: Iterable[Obs],
@@ -505,11 +534,7 @@ def judge(
             reasons += [f"continuation: no photo shows that you left between it and run {r.id}"
                         for r in half_of[run.id]]
             reasons += _own_reasons(ix, run, since, until)
-        found = {kind_of(s) for s in reasons}
-        status: Status = ("there" if "there" in found else
-                          "offered" if not found else
-                          "held" if found <= RELEASED_BY_WORDS else "fixed")
-        out.append(replace(run, reasons=tuple(reasons), status=status,
+        out.append(replace(run, reasons=tuple(reasons), status=status_of(reasons),
                            flags=tuple(_flags(ix, run, rows, assets or {}))))
     return out
 
@@ -585,7 +610,7 @@ class Boundary:
         return f"{self.before}|{self.after}"
 
 
-def _cuts_itself_off(run: Run) -> bool:
+def _cuts_itself_off(run: AnyRun) -> bool:
     """On the profile already, for certain: an overlap can only be left out (8a)."""
     return run.status == "there" or "overlap" in map(kind_of, run.reasons)
 
@@ -655,7 +680,7 @@ class Answers(TypedDict):
 class TripRow:
     """One region of a trip, with its quality and, for a held run, the owner's own words."""
 
-    run: Run
+    run: AnyRun
     quality: int
     words: str
 
@@ -680,11 +705,25 @@ class NotMade:
 _QUALITIES = frozenset("123456")
 
 
+# Characters that show nothing: spaces, controls and formats, what is drawn as blank or not
+# at all, half pairs, private use, and the last three planes. Written down, because the
+# page must read words as this does, and two runtimes know two versions of Unicode.
+SAYS_NOTHING = (
+    (0x0000, 0x0020), (0x007F, 0x00A0), (0x00AD, 0x00AD), (0x034F, 0x034F), (0x0600, 0x0605),
+    (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2),
+    (0x115F, 0x1160), (0x1680, 0x1680), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x2000, 0x200F),
+    (0x2028, 0x202F), (0x205F, 0x206F), (0x2800, 0x2800), (0x3000, 0x3000), (0x3164, 0x3164),
+    (0xD800, 0xF8FF), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFFB),
+    (0xFFFE, 0xFFFF), (0x110BD, 0x110BD), (0x110CD, 0x110CD), (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0x10FFFF),
+)
+
+
 def _says(text: str) -> bool:
-    return any(ch.isprintable() and not ch.isspace() for ch in text)
+    return any(not any(low <= ord(ch) <= high for low, high in SAYS_NOTHING) for ch in text)
 
 
-def _check(runs: Sequence[Run], bounds: Sequence[Boundary], answers: Answers) -> None:
+def _check(runs: Sequence[AnyRun], bounds: Sequence[Boundary], answers: Answers) -> None:
     """Nothing in ``answers`` that the page could not have written."""
     if [(a.id, b.id) for a, b in pairwise(runs)] != [(b.before, b.after) for b in bounds]:
         raise PlanInvalid("these are not the boundaries of these runs")
@@ -711,11 +750,12 @@ def _check(runs: Sequence[Run], bounds: Sequence[Boundary], answers: Answers) ->
 
 
 def group(
-    runs: Iterable[Run], boundaries: Sequence[Boundary], answers: Answers
+    runs: Iterable[AnyRun], boundaries: Sequence[Boundary], answers: Answers
 ) -> tuple[list[TripDraft], list[NotMade]]:
     """The trips that the answers make, and the runs that make none, with why (8-10).
 
-    ``runs`` and ``boundaries`` are the judged runs and all their boundaries. A trip is
+    ``runs`` and ``boundaries`` are the judged runs and all their boundaries, or those of a
+    :class:`~wanderfill.plan.trip_list.TripList`, which come to the same. A trip is
     what is between two cuts. There is a cut where one is forced, where the owner cut, and
     before an open run that the owner put no words to. A boundary with a suggestion and no
     answer is no cut and holds what is on both sides of it.
@@ -731,7 +771,7 @@ def group(
     _check(runs, boundaries, answers)
     words = {key: row.get("words", "") for key, row in answers["runs"].items()}
 
-    stretches: list[tuple[list[Run], list[str]]] = []
+    stretches: list[tuple[list[AnyRun], list[str]]] = []
     for n, run in enumerate(runs):
         open_end = "open" in map(kind_of, run.reasons) and not _says(words.get(run.id, ""))
         edge = boundaries[n - 1] if n else None
@@ -759,7 +799,7 @@ def group(
                 holds.append(f"{run.id} needs words of yours")
             else:
                 rows.append(TripRow(run, int(answer), words.get(run.id, "")))
-        once: dict[int, Run] = {}
+        once: dict[int, AnyRun] = {}
         for row in rows:
             first = once.setdefault(row.run.region, row.run)
             if first is not row.run:
@@ -815,8 +855,10 @@ __all__ = [
     "GAP_DAYS",
     "NEVER_RELEASED",
     "RELEASED_BY_WORDS",
+    "SAYS_NOTHING",
     "SWEEP_GAPS",
     "Answers",
+    "AnyRun",
     "Boundary",
     "NotMade",
     "Obs",
@@ -834,5 +876,6 @@ __all__ = [
     "kind_of",
     "place",
     "regions_to_read",
+    "status_of",
     "sweep",
 ]
