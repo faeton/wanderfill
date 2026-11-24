@@ -45,8 +45,9 @@ from ..api.cache import VISITS_MAX_AGE
 from ..api.client import QUALITY, NomadMania, YearOnly, _iso
 from ..api.errors import (
     ApiError,
+    DriftError,
     JournalCorrupt,
-    PrecisionLoss,
+    PlanInvalid,
     VerificationFailed,
     WanderfillError,
 )
@@ -837,9 +838,12 @@ def cmd_show(args) -> int:
 def cmd_check(args) -> int:
     """Read-only: does this plan still match the profile it was built against?"""
     from ..plan.apply import (
+        CLOSE_BY_HAND,
+        GONE_IS_NOT_DONE,
         Journal,
         describe_open,
         doubles,
+        gone,
         open_entries,
         tick_of,
         ticked_before,
@@ -861,6 +865,7 @@ def cmd_check(args) -> int:
     c = _client(args)
     ops = plan.to_apply()
     problems = []
+    hints = []  # what to do about them, said once
 
     live = c.account_id()
     print(f"account: plan {plan.account}, logged in as {live}"
@@ -888,10 +893,12 @@ def cmd_check(args) -> int:
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
     try:
         stuck = open_entries((workdir, DEFAULT_WORKDIR), plan.account)
-        problems += [f"{line} — reconcile by hand" for line in describe_open(stuck)]
+        if stuck:
+            problems += describe_open(stuck)
+            hints.append(CLOSE_BY_HAND)
         done = journal.done_keys()
         problems += trips_under_old_keys(journal, plan)
-    except JournalCorrupt as exc:
+    except (JournalCorrupt, DriftError) as exc:
         problems.append(str(exc))
         done = set()
     if skipped := sum(op.key in done for op in ops):
@@ -901,10 +908,13 @@ def cmd_check(args) -> int:
         to_send = [op for op in ops if op.key not in done]
         problems += doubles(snap, to_send)
         try:
-            ticked = ticked_before(c, to_send, snap)
+            ticked = ticked_before(c, ops, snap)
         except WanderfillError as exc:
             problems.append(f"a list this plan ticks cannot be read: {exc}")
         else:
+            if lost := gone(snap, ticked, [op for op in ops if op.key in done], journal.path):
+                problems += lost
+                hints.append(GONE_IS_NOT_DONE)
             ticks = [t for op in to_send if (t := tick_of(op))]
             if have := sum(n in ticked[where] for where, n in ticks):
                 print(f"ticks:   {have} op(s) already ticked and would be skipped")
@@ -914,6 +924,8 @@ def cmd_check(args) -> int:
         print("\nBLOCKERS:")
         for p in problems:
             print(f"  ✗ {p}")
+        for h in hints:
+            print(f"  {h}")
         return 1
     print("No blockers. This wrote nothing.")
     return 0
@@ -1035,6 +1047,8 @@ def cmd_share(args) -> int:
 
 
 def _print_apply_report(report) -> None:
+    from ..plan.apply import CLOSE_BY_HAND
+
     print(
         f"\nattempted {report.attempted}, succeeded {report.succeeded}, "
         f"failed {report.failed}, skipped {report.skipped}"
@@ -1056,12 +1070,13 @@ def _print_apply_report(report) -> None:
         print(f"  the visit in region {t['region']} is in trip {t['trip_id']}, "
               "as the server makes one for every visit added")
     if lost := seen.get("uncertain"):
-        print(f"  UNCERTAIN: {lost['kind']} {lost['label']!r} (key {lost['key']}): its journal "
-              "entry stays open until a human closes it. Read now:")
+        print(f"  UNCERTAIN: {lost['kind']} {lost['label']!r} (key {lost['key']}): its entry in "
+              f"{lost['journal']} stays open. Read now:")
         if lost["answer"] is not None:
             print(f"    the server answered {lost['answer']}")
         for line in lost["now"]:
             print(f"    {line}")
+        print(f"    {CLOSE_BY_HAND}")
 
 
 def cmd_apply(args) -> int:
@@ -1070,9 +1085,9 @@ def cmd_apply(args) -> int:
     Exits 1 if a run that finished has a mismatch, an unproven line or a verify
     file that could not be written; a transit that does not mark its region, and
     the trip the server makes around every new visit, are expected and are not
-    among those. A plan that is not valid is 1 too. A failed op is raised again
-    after the report of what landed is printed, and :func:`main` returns 2 for it,
-    or 130 for Ctrl-C.
+    among those. A plan that is not valid, or a file that is not a plan, is 1 too.
+    A failed op is raised again after the report of what landed is printed, and
+    :func:`main` returns 2 for it, or 130 for Ctrl-C.
     """
     from ..plan.apply import apply_plan
     from ..plan.model import Plan, validate
@@ -1098,6 +1113,9 @@ def cmd_apply(args) -> int:
         mark = "ok " if ok else "ERR"
         print(f"  [{i:4}/{total}] {mark} {op.kind:13} {op.label[:56]}")
 
+    def skipped(i, total, op):
+        print(f"  [{i:4}/{total}] skip {op.kind:13} {op.label[:56]} (ticked already, not sent)")
+
     try:
         report = apply_plan(
             c, plan,
@@ -1107,6 +1125,7 @@ def cmd_apply(args) -> int:
             on_progress=progress,
             also=(DEFAULT_WORKDIR,),
             on_read_back=lambda line: print(f"\n{line}", flush=True),
+            on_skip=skipped,
         )
     except (Exception, KeyboardInterrupt) as exc:
         if hasattr(exc, "report"):  # the run had started; a refusal has none
@@ -1147,21 +1166,29 @@ def _undo(
     of what is about to go so it can be put back; run the one client call,
     which does its own read-back; close the entry.
 
-    What closes the entry is deliberately narrow. Only two outcomes prove
-    nothing changed: the client refused before sending (:class:`PrecisionLoss`)
-    and the server answered the write itself with an error (a plain
-    :class:`ApiError` on the write endpoint). Everything else — a lost answer,
-    a read-back that disagrees, a transport failure whose timing we cannot
-    place — leaves the entry open, and **any** open entry in the account's
-    journals, an apply's included, blocks every further write until a human has
-    read the server and closed it by hand. That includes an open entry for a
-    different id: a region cannot be cleared while one of its visits is in an
-    unknown state. The account's lock is held from that check to the last line,
+    What closes the entry is what closes an apply's: an outcome that proves
+    nothing changed (``_proves_nothing_changed``) — the client refused before
+    sending, or the server refused the write itself, with an ``ERROR`` body, a
+    401/403 or another 4xx. Everything else — a lost answer, a read-back that
+    disagrees or died (:class:`VerificationFailed`, whatever it died of), a bug —
+    leaves the entry open and says how to close it, and **any** open entry in the
+    account's journals, an apply's included, blocks every further write until the
+    owner has read the server and closed it by hand. That includes an open entry
+    for a different id: a region cannot be cleared while one of its visits is in
+    an unknown state. The account's lock is held from that check to the last line,
     in ``--workdir`` and the default directory; a third one is not seen.
     """
     from types import SimpleNamespace
 
-    from ..plan.apply import Journal, account_lock, describe_open, open_entries
+    from ..plan.apply import (
+        CLOSE_BY_HAND,
+        Journal,
+        _proves_nothing_changed,
+        account_lock,
+        describe_open,
+        make_workdir,
+        open_entries,
+    )
 
     for line in preview:
         print(line)
@@ -1175,7 +1202,7 @@ def _undo(
 
     c = args._client
     workdir = Path(args.workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
+    make_workdir(workdir)
     account = c.account_id()
     journal = Journal(workdir / f"deletes-{account}.ndjson")
     op = SimpleNamespace(key=key, kind=kind, label=f"{label} — reason: {args.reason.strip()}")
@@ -1184,33 +1211,36 @@ def _undo(
         if stuck := open_entries(dirs, account):
             for line in describe_open(stuck):
                 print(line)
-            print(
-                "Read the server back, then append a 'done' line for each by hand "
-                "(with an 'error' if it did not land) before writing anything else."
-            )
+            print(CLOSE_BY_HAND)
             return 2
-        journal.opening(op, snapshot=snapshot)
         try:
-            removed = run()
-        except PrecisionLoss as exc:
-            journal.note(op, None, error=f"refused before sending: {exc}")
-            print(f"refused: {exc}")
-            return 1
-        except VerificationFailed as exc:
-            print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
-            return 1
-        except ApiError as exc:
-            # The write endpoint itself said no. Nothing changed; safe to close.
-            journal.note(op, None, error=f"server refused: {exc}")
+            journal.opening(op, snapshot=snapshot)
+            try:
+                removed = run()
+            except Exception as exc:
+                if not _proves_nothing_changed(exc):
+                    raise
+                journal.note(op, None, error=str(exc))
+                print(f"refused, nothing changed: {exc}")
+                return 1
+            journal.note(op, removed)
+        except (Exception, KeyboardInterrupt) as exc:
+            if not _settled(journal, key):
+                print(f"journal entry left OPEN: {key} in {journal.path}\n{CLOSE_BY_HAND}")
+            if not isinstance(exc, WanderfillError):
+                raise
             print(f"error: {exc}")
             return 1
-        except WanderfillError as exc:
-            # Lost answer, transport failure, auth failure: we do not know. Open.
-            print(f"error: {exc}\njournal entry left OPEN: {journal.path}")
-            return 1
-        journal.note(op, removed)
         print(f"done; server confirms. journal: {journal.path}")
         return 0
+
+
+def _settled(journal, key: str) -> bool:
+    """Whether ``key`` is known not to be open; a journal that cannot be read does not say."""
+    try:
+        return key not in journal.unresolved()
+    except WanderfillError:
+        return False
 
 
 def cmd_delete(args) -> int:
@@ -1616,6 +1646,9 @@ def main(argv=None) -> int:
     args.argv = list(argv) if argv is not None else sys.argv[1:]
     try:
         return args.func(args)
+    except PlanInvalid as exc:  # a file that is not a plan, or a plan that is not valid
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except WanderfillError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

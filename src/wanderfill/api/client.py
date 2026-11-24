@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from .cache import ReadCache, summary_of
-from .errors import ApiError, PrecisionLoss, VerificationFailed
+from .errors import ApiError, PrecisionLoss, UnknownWriteOutcome, VerificationFailed
 from .transport import Transport
 
 T = TypeVar("T")
@@ -217,6 +217,42 @@ class Visit:
         return (self.region, self.date_from, self.date_to)
 
 
+def _whole(value: object) -> int | None:
+    """An int that is not a bool, or the digits of one; ``None`` for anything else."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and len(value) <= 10 and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+VISIT_DATES = ("year_from", "month_from", "day_from", "year_to", "month_to", "day_to")
+
+
+def _row_problem(raw: object) -> str | None:
+    """Why one visit row cannot be read as proof, or ``None``.
+
+    :meth:`Visit.from_api` fills what is missing: no quality is 3, no dates is
+    an undated visit. That is for display. A row read that way before a write
+    is how a "lived here" goes back as a "good visit" without its dates.
+    """
+    if not isinstance(raw, dict):
+        return "it is not an object"
+    if absent := [f for f in ("id", "quality", "trip_id", *VISIT_DATES) if f not in raw]:
+        return f"it has no {', '.join(absent)}"
+    for f in ("id", "quality"):
+        if _whole(raw[f]) is None:
+            return f"its {f} is {str(raw[f])[:30]!r}"
+    for f in ("trip_id", *VISIT_DATES):
+        if raw[f] is not None and _whole(raw[f]) is None:
+            return f"its {f} is {str(raw[f])[:30]!r}"
+    for side in ("from", "to"):
+        parts = [raw[f"{unit}_{side}"] for unit in ("year", "month", "day")]
+        if parts != [None] * 3 and _date_parts(raw, side) is None:
+            return f"its {side} date is {parts}"
+    return None
+
+
 def strict_ids(action: str, values: object) -> set[int]:
     """The ids of a list read as proof: whole numbers, or the digits of them.
 
@@ -227,12 +263,9 @@ def strict_ids(action: str, values: object) -> set[int]:
         raise VerificationFailed(action, f"{str(values)[:60]!r} is not a list of ids")
     out = set()
     for v in values:
-        if type(v) is int:
-            out.add(v)
-        elif isinstance(v, str) and len(v) <= 10 and v.isascii() and v.isdigit():
-            out.add(int(v))
-        else:
+        if (n := _whole(v)) is None:
             raise VerificationFailed(action, f"the list holds {str(v)[:60]!r}, which is not an id")
+        out.add(n)
     return out
 
 
@@ -552,6 +585,26 @@ class NomadMania:
 
     # -------------------------------------------------------------- writing
 
+    def _write(self, action: str, *, answers: str | None = None, **fields: Any) -> dict:
+        """Send one write of a plan kind and insist on the answer it is known to give.
+
+        All 502 such writes on record were answered ``result: OK``, with the new
+        id where ``answers`` names one. An object that says anything else is not
+        the server saying yes, and not a refusal either (that is ``ERROR``, an
+        :class:`ApiError`), so it is an :class:`UnknownWriteOutcome`. What the
+        undo methods and ``trips/update-trip`` are answered was not recorded,
+        and their read-back settles them, so they do not come through here.
+        """
+        reply = self.t.webapi(action, **fields)
+        ok = isinstance(reply, dict) and reply.get("result") == "OK"
+        if not ok or (answers and (_whole(reply.get(answers)) or 0) <= 0):
+            raise UnknownWriteOutcome(
+                f"{action} sent, the answer was {str(reply)[:200]}, not 'result': 'OK'"
+                + (f" with a {answers}" if answers else "")
+                + ". Read the affected record back before running anything again."
+            )
+        return reply
+
     def add_visit(
         self, region: int, date_from: When, date_to: When, quality: int = 3
     ) -> dict:
@@ -564,8 +617,9 @@ class NomadMania:
         appears so the debris stays reconcilable — see
         :meth:`trips_for_year`.
         """
-        return self.t.webapi(
+        return self._write(
             "quickEnter/add-visit",
+            answers="visit_id",
             region=region,
             quality=quality,
             **_parts(date_from, "from"),
@@ -605,7 +659,13 @@ class NomadMania:
         if quality is None:
             raise ValueError("quality is required: update-visit replaces the whole record")
 
-        current = next((v for v in self.visits_for_region(region) if v.id == visit_id), None)
+        try:
+            live = self._visits_strict(region)
+        except VerificationFailed as exc:  # before the write, so nothing is in doubt
+            raise PrecisionLoss(
+                f"visit {visit_id} cannot be read ({exc}) — refusing to write blind"
+            ) from exc
+        current = next((v for v in live if v.id == visit_id), None)
         if current is None:
             raise PrecisionLoss(
                 f"visit {visit_id} is not on region {region} — refusing to write blind"
@@ -629,7 +689,7 @@ class NomadMania:
                         "Pass allow_vaguer=True if that is deliberate."
                     )
 
-        return self.t.webapi(
+        return self._write(
             "quickEnter/update-visit",
             id=visit_id,
             region=region,
@@ -692,12 +752,12 @@ class NomadMania:
     def _visits_strict(self, region: int) -> list[Visit]:
         action = "quickEnter/get-visits-to-region"
         rows = self._strict(action, "data", region=region)
-        try:
-            return [Visit.from_api(v, region) for v in rows]
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise VerificationFailed(
-                action, f"region {region} has a visit that cannot be read ({exc!r})"
-            ) from exc
+        for row in rows:
+            if why := _row_problem(row):
+                raise VerificationFailed(
+                    action, f"region {region} has a visit that cannot be read: {why}"
+                )
+        return [Visit.from_api(v, region) for v in rows]
 
     def _dare_strict(self) -> set[int]:
         return self._strict_ids("maps/get-visited-dare-ids-simple", "ids")
@@ -940,7 +1000,7 @@ class NomadMania:
         visit: a photo from a plane window sits in a cell as convincingly as a
         week on the ground. Grade candidates before calling this.
         """
-        return self.t.webapi("kye/set-kye", qid=qid, visited=1)
+        return self._write("kye/set-kye", qid=qid, visited=1)
 
     def mark_dare(self, dare_id: int) -> dict:
         """Mark a DARE area visited. Binary, no dates, no counts.
@@ -948,7 +1008,7 @@ class NomadMania:
         Only ever sends 1. Un-marking is a deletion in spirit and lives in
         :meth:`unmark_dare`, one area at a time, never here.
         """
-        return self.t.webapi("quickEnter/updateMQP", region=dare_id, visits=1)
+        return self._write("quickEnter/updateMQP", region=dare_id, visits=1)
 
     # ------------------------------------------------------------------ TCC
 
@@ -1018,7 +1078,7 @@ class NomadMania:
                 f"{tcc_id} is not a hand-entered TCC destination; the {len(self._tcc_ids)} "
                 "that exist are listed by tcc(). A region id here would tick something else."
             )
-        return self.t.webapi("quickEnter/updateTCC", region=int(tcc_id), visits=1)
+        return self._write("quickEnter/updateTCC", region=int(tcc_id), visits=1)
 
     def create_trip(
         self, date_from: dt.date, date_to: dt.date, regions: Sequence[dict], description: str = ""
@@ -1031,8 +1091,9 @@ class NomadMania:
         ``"[object Object],[object Object]"`` — which is what the server has
         come to require. We reproduce the accident deliberately.
         """
-        return self.t.webapi(
+        return self._write(
             "trips/new-trip",
+            answers="trip_id",
             description=description,
             date_from=date_from.isoformat(),
             date_to=date_to.isoformat(),

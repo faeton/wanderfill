@@ -48,6 +48,40 @@ from .model import (
 # The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
 PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
 
+# What to do about an entry that stays open. One text, wherever one is met.
+CLOSE_BY_HAND = (
+    'Read the server back. Then the account owner appends a line to that journal for each key, '
+    '{"phase": "done", "key": "<the key>", "error": ""}, with "error" set if it did not land.'
+)
+
+
+def _sync_dir(path: Path) -> None:
+    """Put a directory's entries on the disk, where the system allows it.
+
+    Windows cannot open a directory and some network filesystems refuse to sync
+    one. The file's own lines are synced either way.
+    """
+    with suppress(OSError):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def make_workdir(path: Path) -> None:
+    """Create the work directory, durably: a journal in it is only as safe as its name."""
+    try:
+        made = [d for d in (path, *path.parents) if not d.exists()]
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DriftError(
+            f"{path} cannot be used as the work directory ({exc.strerror or exc}); "
+            "nothing was sent."
+        ) from None
+    for d in made:
+        _sync_dir(d.parent)
+
 
 @dataclass
 class Journal:
@@ -61,7 +95,7 @@ class Journal:
     path: Path
 
     def _append(self, entry: dict) -> None:
-        """One line, on the disk before this returns.
+        """One line, on the disk before this returns, and so is a new file's name.
 
         A lone surrogate in a server's answer has no UTF-8 form; as an escape
         it is the same JSON, and the ``done`` line of a write that landed is
@@ -70,7 +104,8 @@ class Journal:
         text = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
         line = text.encode("utf-8", "backslashreplace")
         with self.path.open("a+b") as fh:
-            if fh.tell():
+            new = not fh.tell()
+            if not new:
                 # Entries are closed by hand, and an editor may leave out the
                 # last newline. Appending to that line would corrupt both.
                 fh.seek(-1, os.SEEK_END)
@@ -79,6 +114,8 @@ class Journal:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
+        if new:  # its name is in the directory, which has a disk write of its own
+            _sync_dir(self.path.parent)
 
     def _entries(self) -> list[dict]:
         """Every line, or :class:`JournalCorrupt`: a skipped line is a hidden write.
@@ -91,6 +128,8 @@ class Journal:
             raw = self.path.read_bytes()
         except FileNotFoundError:
             return []
+        except OSError as exc:
+            raise _unusable(self.path, "read", exc) from None
         out = []
         for n, line in enumerate(raw.split(b"\n"), 1):
             if not line.strip():
@@ -167,6 +206,13 @@ class Journal:
         return pending
 
 
+def _unusable(path: Path, what: str, exc: OSError) -> DriftError:
+    return DriftError(
+        f"{path} cannot be {what} ({exc.strerror or exc}), so whether another write of this "
+        "account is open or under way is unknown; nothing more is sent."
+    )
+
+
 def _distinct(dirs: Iterable[Path]) -> list[Path]:
     """The directories that exist, each once however it was spelled, in a fixed order."""
     found: dict[tuple[int, int], Path] = {}
@@ -175,6 +221,8 @@ def _distinct(dirs: Iterable[Path]) -> list[Path]:
             st = d.stat()
         except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise _unusable(d, "read", exc) from None
         found.setdefault((st.st_dev, st.st_ino), d)
     return sorted(found.values(), key=lambda d: d.resolve())
 
@@ -191,7 +239,11 @@ def open_entries(dirs: Iterable[Path], account: int) -> dict[Path, set[str]]:
     out = {}
     for d in _distinct(dirs):
         # Not glob(): it answers "nothing" for a directory it may not read.
-        for path in sorted(d.iterdir()):
+        try:
+            paths = sorted(d.iterdir())
+        except OSError as exc:
+            raise _unusable(d, "read", exc) from None
+        for path in paths:
             if path.name != f"deletes-{account}.ndjson" and not (
                 path.name.startswith(f"journal-{account}-") and path.suffix == ".ndjson"
             ):
@@ -332,6 +384,40 @@ def ticked_before(
     return out
 
 
+def gone(
+    snapshot: dict, ticked: dict[tuple[str, int], set[int]], done: Iterable[Op], journal: Path
+) -> list[str]:
+    """One line per op the journal has as done whose result is not on the profile now.
+
+    Skipping it as done would end a run "finished" without it. Somebody took it
+    back since, or it never was there; whether it is wanted again is theirs to
+    say, in a new plan. Judged: ticks, and the visits :func:`_new_visits` has
+    full dates for. An ``update_visit`` leaves nothing of its own to look for,
+    and an undated or year-only visit cannot be told from another one.
+    """
+    stored = snapshot.get("visits", {})
+    out = []
+    for op in done:
+        missing = []
+        if tick := tick_of(op):
+            if tick[1] not in ticked[tick[0]]:
+                missing.append(f"{_tick_name(op)} is not ticked")
+        elif op.kind != "update_visit":
+            missing = [f"region {region} has no visit for {days[0]}..{days[1]}"
+                       for region, days in _new_visits(op, stored)
+                       if not any(_stored_days(v) == days for v in stored.get(str(region), []))]
+        if missing:
+            out.append(f"{journal}: {op.kind} {op.label!r} (key {op.key}) landed earlier, as this "
+                       f"journal has it done, and is gone now: {'; '.join(missing)}")
+    return out
+
+
+GONE_IS_NOT_DONE = (
+    "If it is wanted again, build a new plan with the time it was taken in its basis, so that "
+    "it has a journal of its own."
+)
+
+
 @contextmanager
 def account_lock(dirs: Iterable[Path], account: int) -> Iterator[None]:
     """Hold the right to write to ``account``, or raise :class:`DriftError` at once.
@@ -353,14 +439,16 @@ def account_lock(dirs: Iterable[Path], account: int) -> Iterator[None]:
     try:
         for d in _distinct(dirs) if fcntl else ():
             path = d / f".lock-{account}"
-            held.append(path.open("ab"))
             try:
+                held.append(path.open("ab"))
                 fcntl.flock(held[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise DriftError(
                     f"another run is writing to account {account} (it holds {path}). "
                     "Wait for it to finish; nothing was sent."
                 ) from None
+            except OSError as exc:
+                raise _unusable(path, "locked", exc) from None
         yield
     finally:
         for fh in held:
@@ -406,12 +494,15 @@ def apply_plan(
     on_progress: Callable[[int, int, Op, bool], None] | None = None,
     also: Sequence[Path] = (),
     on_read_back: Callable[[str], None] | None = None,
+    on_skip: Callable[[int, int, Op], None] | None = None,
 ) -> ApplyReport:
     """Run the apply-bucket ops of a plan, after the preconditions pass.
 
     ``also`` is where else this account's journals may be. The lock and the scan
     for open writes cover ``workdir`` and these, and no other directory.
     ``on_read_back`` is given one line to show before the read-back starts.
+    ``on_skip`` is called in place of ``on_progress`` for an op whose item is
+    ticked already.
 
     Preconditions, in order, each of which aborts rather than warns:
 
@@ -438,12 +529,14 @@ def apply_plan(
     10. No visit the plan would add, or move to other dates, may be on the profile,
         or in the plan, already with the same region and full dates
         (:func:`doubles`).
-    11. Every hand-ticked list the plan would tick must be readable
+    11. Every hand-ticked list the plan ticks must be readable
         (:func:`ticked_before`). A series tick is a toggle and a repeat may undo
         it, so an item in its list already is skipped: nothing is sent or
         journalled for it, its label goes in ``ApplyReport.already``, and
-        ``on_progress`` is told ``True``. The series and KYE lists go into the
-        snapshot file, which is where to look to undo the ticks.
+        ``on_skip`` is told, or ``on_progress`` with ``True``. The series and KYE
+        lists go into the snapshot file, which is where to look to undo the ticks.
+    12. Nothing this plan's journal has as done may be gone from the profile
+        (:func:`gone`): a tick, or a visit added with full dates.
 
     Whatever ends the loop, what landed is read back (:func:`verify`) and
     ``verify-<stamp>.json`` written. After an exception or Ctrl-C the file says
@@ -476,18 +569,16 @@ def apply_plan(
             f"plan was built for account {plan.account}, logged in as {live_account}"
         )
 
-    workdir.mkdir(parents=True, exist_ok=True)
+    make_workdir(workdir)
     dirs = (workdir, *also)
     with account_lock(dirs, plan.account):
         if stuck := open_entries(dirs, plan.account):
             raise DriftError(
                 "; ".join(describe_open(stuck)) + ". Whether they reached the server is "
-                "unknown, so sending anything more could duplicate them. Check each key "
-                "against the profile, then append a 'done' line for it by hand (with an "
-                "'error' if it did not land)."
+                "unknown, so sending anything more could duplicate them. " + CLOSE_BY_HAND
             )
         return _apply_locked(client, plan, ops, report, workdir, max_writes, on_progress,
-                             on_read_back)
+                             on_read_back, on_skip)
 
 
 def _apply_locked(
@@ -499,6 +590,7 @@ def _apply_locked(
     max_writes: int,
     on_progress: Callable[[int, int, Op, bool], None] | None,
     on_read_back: Callable[[str], None] | None,
+    on_skip: Callable[[int, int, Op], None] | None,
 ) -> ApplyReport:
     """The part of :func:`apply_plan` that needs the lock, from snapshot to read-back."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -550,7 +642,10 @@ def _apply_locked(
     if twice := doubles(snapshot, to_send):
         raise DriftError("; ".join(twice) + ". Nothing was sent.")
 
-    ticked = ticked_before(client, to_send, snapshot)
+    # Also of the ops that are done: a tick somebody took back is not done any more.
+    ticked = ticked_before(client, ops, snapshot)
+    if lost := gone(snapshot, ticked, [op for op in ops if op.key in done], journal.path):
+        raise DriftError("; ".join(lost) + f". {GONE_IS_NOT_DONE} Nothing was sent.")
     lists: dict[str, Any] = {}
     for (name, n), ids in ticked.items():
         if name == "series":
@@ -617,7 +712,7 @@ def _apply_locked(
                 now = [f"could not be read back ({exc!r}); whether it landed is not known"]
             waiting = {
                 "key": uncertain.key, "kind": uncertain.kind, "label": uncertain.label,
-                "answer": results.get(uncertain.key), "now": now,
+                "journal": str(journal.path), "answer": results.get(uncertain.key), "now": now,
             }
         seen |= {"partial": partial or bool(interrupts), "uncertain": waiting}
         report.verified = seen
@@ -652,6 +747,9 @@ def _apply_locked(
             if tick and tick[1] in ticked[tick[0]]:
                 report.skipped += 1
                 report.already.append(op.label or f"{op.kind} {tick[1]}")
+                if on_skip:
+                    on_skip(i, len(ops), op)
+                    continue
             else:
                 _send(client, op, i, len(ops), journal, report, results, on_progress)
                 done.add(op.key)
@@ -965,39 +1063,34 @@ def verify(
             stored = visits(region, f"{trip}: region {region}")
             if stored is None:
                 continue
-            span = _region_span(r)
+            ends = _region_ends(r)
+            want = (ends[0] or op.date_from, ends[1] or op.date_to)
             if trip_id is not None:
                 mine = [v for v in stored if v.trip_id == trip_id]
                 found_by = f"owned by trip {trip_id}"
             else:
-                want = span or (op.date_from, op.date_to)
                 mine = [v for v in stored if _dates(v) == want]
                 found_by = f"for {want[0]}..{want[1]}"
             if not mine:
                 out["mismatches"].append(f"{trip}: region {region} has no visit {found_by}")
                 continue
-            if span and any(_dates(v) != span for v in mine):
+            # Each end on its own. One the plan gives must be stored as it is; one it
+            # does not give is the trip's, as far as the plan can say.
+            sides = [(got, planned, end) for v in mine for got, planned, end in
+                     zip((v.date_from, v.date_to), want, ends, strict=True)]
+            stored_as = [_dates(v) for v in mine]
+            if any(_iso_of(got) != planned for got, planned, end in sides
+                   if end or isinstance(got, dt.date)):
                 out["mismatches"].append(
-                    f"{trip}: region {region} stored {[_dates(v) for v in mine]}, "
-                    f"planned {span[0]}..{span[1]}"
+                    f"{trip}: region {region} stored {stored_as}, planned {want[0]}..{want[1]}"
+                    + ("" if all(ends) else ", the trip's where it has no date of its own")
                 )
-            elif not _has_own_dates(r):
-                # It takes the trip's dates, as far as the plan can say.
-                stored_as = [_dates(v) for v in mine]
-                sides = [(d, want) for v in mine for d, want in
-                         ((v.date_from, op.date_from), (v.date_to, op.date_to))]
-                full = [(d.isoformat(), want) for d, want in sides if isinstance(d, dt.date)]
-                if any(got != want for got, want in full):
-                    out["mismatches"].append(
-                        f"{trip}: region {region} stored {stored_as}, planned "
-                        f"{op.date_from}..{op.date_to}, the trip's, as it has no dates of its own"
-                    )
-                elif len(full) < len(sides):
-                    out["unproven"].append(
-                        f"{trip}: region {region} has no dates of its own in the plan and is "
-                        f"stored as {stored_as}; what the server stores for such a region has "
-                        "not been measured"
-                    )
+            elif not all(end or isinstance(got, dt.date) for got, _, end in sides):
+                out["unproven"].append(
+                    f"{trip}: region {region} has no dates of its own in the plan and is "
+                    f"stored as {stored_as}; what the server stores for such a region has "
+                    "not been measured"
+                )
             same = [v for v in stored if _dates(v) == _dates(mine[0])]
             if len(same) > 1 or len(mine) > 1:
                 out["mismatches"].append(
@@ -1065,12 +1158,12 @@ def _has_own_dates(r: dict) -> bool:
                if f not in ("id", "quality", "hidden"))
 
 
-def _region_span(r: dict) -> tuple[str, str] | None:
+def _region_ends(r: dict) -> tuple[str | None, str | None]:
     """The dates one trip region was planned with, as ``_iso_of`` would print them.
 
-    ``None`` when the plan gave the region no dates of its own. A year with no
-    month or day is a :class:`YearOnly` on the profile, not 1 January, and the
-    wire carries numbers as strings as often as not.
+    ``None`` for an end the plan does not give. A year with no month or day is a
+    :class:`YearOnly` on the profile, not 1 January, and the wire carries numbers
+    as strings as often as not.
     """
     def side(which: str) -> str | None:
         year, month, day = (r.get(f"{part}_{which}") for part in ("year", "month", "day"))
@@ -1083,7 +1176,11 @@ def _region_span(r: dict) -> tuple[str, str] | None:
         except (TypeError, ValueError):
             return None
 
-    start, end = side("from"), side("to")
+    return side("from"), side("to")
+
+
+def _region_span(r: dict) -> tuple[str, str] | None:
+    start, end = _region_ends(r)
     return (start, end) if start and end else None
 
 

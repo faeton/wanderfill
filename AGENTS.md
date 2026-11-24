@@ -266,7 +266,8 @@ put it back *into* that trip afterwards.
 What the read-back accepts is narrow on purpose. A trip is gone only if
 `get-trip` fails with exactly `Unauthorised.` **and** the year's listing no
 longer carries it; a response with the list field missing is an error, not an
-empty list. If proof fails, or the answer is lost, the journal entry stays open
+empty list. An entry closes by itself on the refusals that close an apply's (§7),
+a 403 on the write included. If proof fails, or the answer is lost, it stays open
 — and **any** open entry, in a delete journal or an apply's, blocks every further
 deletion and apply for that account until a human has read the server and
 closed it by hand, by appending a `done` line with that key (and an `error` if
@@ -637,6 +638,8 @@ the same kind rather than inventing the fields; `regions_touched()` in
 `regions` may carry only `id`, `quality`, `hidden` (0 or 1), and
 `year_from`/`month_from`/`day_from`, `year_to`/`month_to`/`day_to`: any other
 field would be sent without being in the trip's key, so `validate` refuses it.
+The dates are all absent, or both ends at one precision: two full dates or two
+bare years.
 
 At apply time:
 
@@ -647,8 +650,8 @@ At apply time:
 - Refuse if the authenticated account id differs from the plan's.
 - Refuse if another run holds the account's lock, or if any of the account's
   journals has an open entry or a line that cannot be read. Re-planning does not
-  get past this. The lock and the scan cover the chosen `--workdir` and the
-  default `~/.local/share/wanderfill`, if it exists: a journal in a third
+  get past this. A directory that cannot be read or locked is refused too. The
+  lock and the scan cover the chosen `--workdir` and the default `~/.local/share/wanderfill`, if it exists: a journal in a third
   directory is not seen, so keep one account to one `--workdir`. A journal is
   never repaired by the tool, and not by you either.
 - Refuse if live state has drifted since planning — re-plan instead.
@@ -666,13 +669,19 @@ At apply time:
   already can still be edited. Dates an update in the same plan moves a visit
   away from still count as taken. Undated and year-only visits, and dates that
   merely overlap, are not compared: look for those yourself.
+- Refuse an op this plan's journal has done whose result is gone from the profile:
+  a tick that is not in its list, or a visit added on its own or by a trip whose
+  region has none with those full dates. Somebody took it back. It is not skipped
+  and not sent: if it is wanted again, build a new plan, with the time it was taken
+  in its basis. Updates, undated and year-only visits are not judged. `check` lists
+  each one.
 - Snapshot everything first, and refuse to start if the snapshot fails. A reply
-  without its list, or with an id that is not a number, is a failure and not an
-  empty profile.
+  without its list, with an id that is not a number, or with a visit that lacks a
+  field, is a failure and not an empty profile or an undated visit.
 - Read every series, KYE, DARE and TCC list the plan ticks before the first
   write, and never send an item that is already in it: a series tick is a toggle,
   and a repeat may undo it. Such an op is skipped, not journalled, and printed as
-  `already ticked, not sent`. The series and KYE lists as they were are in the
+  `skip` and as `already ticked, not sent`. The series and KYE lists as they were are in the
   snapshot file under `ticked`.
 - Cap the number of writes per run.
 - Journal every request and its response, including the id of any phantom trip
@@ -685,8 +694,10 @@ At apply time:
   `UnknownWriteOutcome`, which leaves the journal entry open on purpose so the
   next run refuses to start until a human has reconciled it. A
   redirect (no request with the token follows one: a redirected write is an
-  unknown outcome, a redirected read an error), a 5xx, a 408, a body that is not JSON
-  and a toggle that does not say `OK` are no answer either. Only a refusal
+  unknown outcome, a redirected read an error), a 5xx, a 408, a body that is not JSON,
+  an object without `result: OK` (or without the `trip_id` or `visit_id` a trip or
+  an added visit is answered with) and a toggle that does not say `OK` are no
+  answer either. Only a refusal
   closes an entry — ours before sending, or the server's own (401/403, another
   4xx, an `ERROR` body); any other exception, a bug in this package included,
   leaves it open.
@@ -700,7 +711,8 @@ visits that are stored but leave their region unmarked. A trip is read back
 region by region, by the trip id the server answered: one visit per region,
 its planned dates and quality, and no second visit beside it for those dates.
 The dates of the trip itself are read too. A region with no dates of its own in
-the plan is held to the trip's: other full dates are a mismatch, and absent or
+the plan is held to the trip's, and one with a single end (`validate` refuses it
+now) end by end: other full dates are a mismatch, and absent or
 year-only ones are `unproven`, because what the server stores for such a region
 has not been measured.
 `unproven` is what the read-back could not establish either way — a list, a
@@ -724,14 +736,15 @@ on its own are printed and are not an error.
 
 Exit codes of `apply --confirm`: 0 when nothing came out different or unproven
 (`not_counted` alone is still 0); 1 on a mismatch, on `unproven`, on a verify file
-that could not be written and on a plan that is not valid; 2 on an error that
+that could not be written, and on a plan that is not valid or a file that is not a
+plan (`check` and `show` exit 1 on that file too); 2 on an error that
 ended or refused the run, a failed op included; 130 on Ctrl-C. An error the package
 did not foresee is a traceback, after the report.
 
 Before applying anything you did not build in this session, run
 `wanderfill check <plan>`: it is read-only and reports account mismatch, drift,
-duplicate ops, second copies, lists that cannot be read, and every open or
-unreadable journal entry of the account without sending a write.
+duplicate ops, second copies, done ops that are gone, lists that cannot be read,
+and every open or unreadable journal entry of the account without sending a write.
 
 ---
 

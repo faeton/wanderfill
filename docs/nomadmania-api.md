@@ -121,6 +121,20 @@ lived here, travelguru.
 | `quickEnter/set-not-visited` | `region` | the red "Mark as not visited" button on `/regions/`; removes **every** visit on the region. Client: `clear_region`, which refuses a region with trip-owned visits unless told |
 | `quickEnter/delete-visit` | `id` (visit id) | found on `/regions/` (inline script, `removeVisit`). Confirmed 2026-09-09 on visit 13450095: returns `{"result":"OK"}`, the visit is gone from `get-visits-to-region` and the region from `get-visited-regions-ids-simple` at once; the country row in `slow/get-slow-app` still said visited with `yes: 8` on the first read after, so it is batch-derived like YES. Client: `delete_visit(visit_id, region)`; CLI: `wanderfill delete visit`. One id per call, never a plan op. |
 
+What they answer, from the 502 applied writes on record (2026-11-24): `add-visit`
+`{"result":"OK","visit_id":…}`, `new-trip` `{"result":"OK","trip_id":…}`,
+`update-visit`, `updateTCC` and `set-kye` `{"result":"OK"}`. `updateMQP` is not
+among them and is taken to be like `updateTCC`. What `update-trip` and the deletions
+answer was not recorded, except where the table says. The client takes any other
+answer to these six as an unknown outcome, unless it is `"result":"ERROR"`; when
+it un-marks through `updateMQP` or `set-kye`, the read-back settles it instead.
+
+A visit row always carried the same keys (108 rows, 44 regions): the six date
+parts, `hidden`, `id`, `quality` and `trip_id`; `id` and `quality` are numbers, the
+date parts and `trip_id` a number or `null`. Strict reads refuse a row that lacks
+one of them (`hidden` aside), or holds anything but numbers, their digits, or `null`
+where a `null` was seen.
+
 ### Geocoding
 
 ```

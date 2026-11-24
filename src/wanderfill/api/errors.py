@@ -31,8 +31,9 @@ class VerificationFailed(ApiError):
 
     Raised by the undo methods and ``sync_trip_header`` after the request went
     out, whether the read-back disagrees or could not be read at all, and by
-    any strict read whose answer lacks the list it needs or holds an id that is
-    not a number, before a write as well as after one. It is distinct from
+    any strict read whose answer lacks the list it needs, or holds an id that is
+    not a number or a visit row with a field missing, before a write as well as
+    after one. It is distinct from
     a plain :class:`ApiError` so that a caller keeping a journal can tell "the
     server refused, nothing changed" from "something was sent and the state is
     now unknown" — the second must stay unresolved until a human reads back.
@@ -61,8 +62,9 @@ class TransportError(WanderfillError):
 class UnknownWriteOutcome(WanderfillError):
     """A write was sent and no usable answer came back.
 
-    Nothing at all, a redirect, a 5xx or 408, a body that is not JSON, or a
-    series toggle that said something other than ``OK``. Distinct from
+    Nothing at all, a redirect, a 5xx or 408, a body that is not JSON, a plan
+    op answered without ``result: OK`` or without the id it makes, or a series
+    toggle that said something other than ``OK``. Distinct from
     :class:`TransportError`, which on a write means the server answered and
     refused. Here we do not know whether the profile changed, and the difference
     matters: retrying a refused write is safe, retrying an unanswered one is how
@@ -87,7 +89,9 @@ class DriftError(WanderfillError):
     Applying a stale plan is how duplicates get created, so this stops the run
     and asks for a re-plan rather than guessing. A write still open in one of the
     account's journals, and another run holding the account's lock, stop it for
-    the same reason, and so does a write that would put a second copy of a visit on the profile.
+    the same reason, and so do a write that would put a second copy of a visit on
+    the profile, one that landed earlier and is gone now, and a directory of
+    journals that cannot be read or locked.
     """
 
 

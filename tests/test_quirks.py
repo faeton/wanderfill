@@ -27,6 +27,10 @@ from wanderfill.plan.segment import (
 from wanderfill.sources.base import DayPoint, Track
 from wanderfill.sources.normalize import components, fold
 
+# What the server was recorded answering, where it is more than ``result: OK``.
+ANSWERS = {"quickEnter/add-visit": {"result": "OK", "visit_id": 77},
+           "trips/new-trip": {"result": "OK", "trip_id": 78}}
+
 
 class FakeTransport:
     """Records what would have been sent, answers with whatever is queued."""
@@ -39,7 +43,7 @@ class FakeTransport:
 
     def webapi(self, action, **fields):
         self.sent.append((action, fields))
-        reply = self.replies.get(action, {"result": "OK"})
+        reply = self.replies.get(action, ANSWERS.get(action, {"result": "OK"}))
         if isinstance(reply, dict) and reply.get("result") == "ERROR":
             raise ApiError(action, reply.get("result_description", ""), reply)
         return reply
@@ -500,10 +504,11 @@ def test_delete_confirm_journals_open_then_done_with_snapshot(monkeypatch, tmp_p
 
 
 def test_delete_leaves_entry_open_on_failed_verification_and_lost_answer(monkeypatch, tmp_path):
-    from wanderfill.api.errors import TransportError, UnknownWriteOutcome
+    from wanderfill.api.errors import UnknownWriteOutcome
 
     for exc in (VerificationFailed("quickEnter/updateMQP", "still marked"),
-                UnknownWriteOutcome("no answer"), TransportError("read-back died")):
+                VerificationFailed("quickEnter/updateMQP", "read-back died"),
+                UnknownWriteOutcome("no answer")):
         for f in tmp_path.glob("deletes-*"):
             f.unlink()
         fake = FakeClient(outcome=exc)
@@ -513,7 +518,10 @@ def test_delete_leaves_entry_open_on_failed_verification_and_lost_answer(monkeyp
 
 
 def test_delete_closes_entry_only_on_definite_refusals(monkeypatch, tmp_path):
-    for exc in (PrecisionLoss("not marked"), ApiError("quickEnter/updateMQP", "Missing params")):
+    from wanderfill.api.errors import AuthError, TransportError
+
+    for exc in (PrecisionLoss("not marked"), ApiError("quickEnter/updateMQP", "Missing params"),
+                AuthError("server rejected the token (403)"), TransportError("refused: 400")):
         for f in tmp_path.glob("deletes-*"):
             f.unlink()
         fake = FakeClient(outcome=exc)
@@ -976,6 +984,7 @@ def test_check_prints_every_open_entry_and_writes_nothing(monkeypatch, tmp_path,
     out = capsys.readouterr().out
     for wanted in (str(one), "k1", str(two), "delete_visit:1:2"):
         assert wanted in out
+    assert out.count("append") == 1, "what to do is said once"
     two.write_text("torn")
     assert cli.main(["check", str(plan), "--workdir", str(work)]) == 1
     out = capsys.readouterr().out
@@ -1079,13 +1088,18 @@ def test_without_fcntl_the_lock_warns_and_continues(monkeypatch, tmp_path, capsy
 def test_journal_lines_reach_the_disk(monkeypatch, tmp_path):
     """Flushed is not written: a power cut could take the ``open`` line with it."""
     import os
+    import stat
 
     from wanderfill.plan.apply import Journal
 
     j = Journal(tmp_path / "j.ndjson")
     lines_at_sync = []
-    monkeypatch.setattr(os, "fsync",
-                        lambda fd: lines_at_sync.append(j.path.read_bytes().count(b"\n")))
+
+    def fsync(fd):
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            lines_at_sync.append(j.path.read_bytes().count(b"\n"))
+
+    monkeypatch.setattr(os, "fsync", fsync)
     j.opening(Op(kind="mark_dare", region=1))
     j.note(Op(kind="mark_dare", region=1), "OK")
     assert lines_at_sync == [1, 2]
@@ -2325,13 +2339,48 @@ def test_a_trip_region_without_dates_is_held_to_the_trips():
                  {"month_to": None, "day_to": None}):
         mismatches, (line,) = against(**over)
         assert mismatches == [] and "region 7" in line and "not been measured" in line
-    # Dates that are absent in so many words are no dates; a half is today's silence.
+    # Dates that are absent in so many words are no dates.
     empty = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
                regions=[{"id": 7, "quality": 3} | dict.fromkeys(none, "")])
     assert len(against(empty)[0]) == 1
-    half = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-10",
-              regions=[{"id": 7, "quality": 3, "year_from": 2024}])
-    assert against(half) == ([], [])
+
+
+@pytest.mark.parametrize("given,wrong", [
+    ({"year_from": 2024, "month_from": 3, "day_from": 1}, ""),
+    ({"year_from": 2024, "month_from": 3, "day_from": 5}, "2024-03-05..2024-03-02"),
+    ({"year_from": 2024}, "2024..2024-03-02"),
+    ({"year_to": 2024, "month_to": 3, "day_to": 2}, ""),
+    ({"year_to": 2024, "month_to": 3, "day_to": 9}, "2024-03-01..2024-03-09"),
+    ({"year_from": 2024, "month_from": 13, "day_from": 1, "year_to": 2024}, "2024-03-01..2024"),
+])
+def test_a_half_dated_trip_region_is_compared_end_by_end(given, wrong):
+    """One end alone turned off both checks: not a span, and not a region without dates."""
+    from wanderfill.plan.apply import verify
+    op = Op(kind="create_trip", date_from="2024-03-01", date_to="2024-03-02",
+            regions=[{"id": 7, "quality": 3} | given])
+    header = {"date_from": "2024-03-01", "date_to": "2024-03-02"}
+    made = {op.key: {"trip_id": 900}}
+    out = verify(_readback([_stored()], marked=[7], header=header), [op], made)
+    if wrong:
+        (line,) = out["mismatches"]
+        assert f"planned {wrong}" in line and "region 7" in line
+    else:
+        assert out["mismatches"] == []
+    assert out["unproven"] == []
+    # An end it does give must be there: a bare year, or nothing, is not it.
+    for side in ("from", "to"):
+        if f"year_{side}" in given and not wrong:
+            for year in (2024, None):
+                vague = {f"year_{side}": year, f"month_{side}": None, f"day_{side}": None}
+                out = verify(_readback([_stored(**vague)], marked=[7], header=header), [op], made)
+                assert len(out["mismatches"]) == 1 and out["unproven"] == []
+    # The end it does not give is held to the trip's, as for a region that gives none.
+    undated = dict.fromkeys(f"{p}_{w}" for p in ("year", "month", "day")
+                            for w in ("from", "to") if f"year_{w}" not in given)
+    if undated and not wrong:
+        out = verify(_readback([_stored(**undated)], marked=[7], header=header), [op], made)
+        assert out["mismatches"] == [] and "not been measured" in out["unproven"][0]
+
 
 
 # ------------------------------------------- the Photos date window
@@ -2984,6 +3033,18 @@ REJECTED = {
     "trip region ends before it starts": lambda: _vplan(_vtrip(regions=[
         {"id": 1, "quality": 3, "year_from": 2024, "month_from": 3, "day_from": 2,
          "year_to": 2024, "month_to": 3, "day_to": 1}])),
+    "trip region with a start and no end": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 1, "day_from": 2}])),
+    "trip region with an end and no start": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_to": 2024, "month_to": 1, "day_to": 2}])),
+    "trip region with a start year only": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "year_to": ""}])),
+    "trip region from a day to a year": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 1, "day_from": 2,
+         "year_to": 2024}])),
+    "trip region from a year to a day": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024,
+         "year_to": 2024, "month_to": 1, "day_to": 2}])),
     "mark_kye without item": lambda: _vplan(_vop("mark_kye")),
     "mark_tcc without item": lambda: _vplan(_vop("mark_tcc")),
     "tick_series without item": lambda: _vplan(_vop("tick_series", series=22)),
@@ -3296,7 +3357,8 @@ def test_show_prints_the_problems_of_a_huge_numeric_trip_region_part(tmp_path, c
 def test_short_ascii_numeric_strings_in_trip_region_parts_are_still_accepted():
     from wanderfill.plan.model import validate
 
-    region = {"id": 1, "quality": 3, "year_from": "2024", "month_from": "1", "day_from": "02"}
+    region = {"id": 1, "quality": 3, "year_from": "2024", "month_from": "1", "day_from": "02",
+              "year_to": "2024", "month_to": "01", "day_to": "3"}
     assert validate(Plan(account=7, ops=[_vtrip(regions=[region])])) == []
 
 
@@ -3436,11 +3498,12 @@ def test_legacy_trip_key_is_the_old_hash():
     assert op.legacy_key == "8ae84238652ef19e" != op.key
 
 
-def _done_before(workdir, *keys, trip=None, phase="done"):
+def _done_before(workdir, *keys, trip=None, phase="done", rows=()):
     """A plan of one trip, its journal holding ``keys``, its client, and what it sent."""
     from wanderfill.plan.model import basis_of, fingerprint
 
-    c, t = client(STATE | {"trips/new-trip": {"result": "OK", "trip_id": 900}})
+    c, t = client(STATE | {"trips/new-trip": {"result": "OK", "trip_id": 900},
+                           READ: visits(*rows)})
     plan = Plan(account=7, ops=[trip or _jan()],
                 basis={"fingerprint": fingerprint(basis_of(c.snapshot([11]), [11]))})
     path = workdir / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson"
@@ -3492,7 +3555,7 @@ def test_a_trip_done_under_its_own_key_is_skipped_whatever_the_old_key_says(tmp_
     for n, keys in enumerate(([trip.key], [trip.legacy_key, trip.key])):
         work = tmp_path / str(n)
         work.mkdir()
-        plan, _, c, t = _done_before(work, *keys)
+        plan, _, c, t = _done_before(work, *keys, rows=[_stored(**JAN)])
         report = apply_plan(c, plan, workdir=work, confirm=True)
         assert (report.skipped, report.attempted) == (1, 0) and _writes(t) == []
 
@@ -3539,7 +3602,7 @@ def test_check_reports_a_trip_done_under_the_old_key(monkeypatch, tmp_path, caps
     for n, (keys, rc) in enumerate((([trip.legacy_key], 1), ([trip.legacy_key, trip.key], 0))):
         work = tmp_path / str(n)
         work.mkdir()
-        plan, path, c, t = _done_before(work, *keys)
+        plan, path, c, t = _done_before(work, *keys, rows=[_stored(**JAN)] if not rc else ())
         saved = plan.save(tmp_path / "p.json")
         monkeypatch.setattr(cli, "_client", lambda args, c=c: c)
         assert cli.main(["check", str(saved), "--workdir", str(work)]) == rc
@@ -3665,7 +3728,6 @@ def test_the_double_guard_ignores_undated_year_only_and_overlapping_visits(tmp_p
            _vop(region=11, quality=3, date_from="2026", date_to="2026"),
            _vop(region=11, quality=3, date_from="2026-01-01", date_to="2026"),
            _jan(TRIP_REGION | year), _jan(TRIP_REGION | {"day_to": 5}),
-           _jan({"id": 11, "quality": 3, "year_from": 2026, "month_from": 1, "day_from": 1}),
            _jan(TRIP_REGION | {"id": 12})]
     plan, c, t = _rebuilt(*ops, rows=rows)
     assert doubles(c.snapshot([11, 12]), ops) == []
@@ -4258,7 +4320,8 @@ def test_a_partial_read_back_covers_what_was_there_already(tmp_path):
     """Ticked before, or done in this plan's journal: skipped, and still read back."""
     from wanderfill.plan.apply import apply_plan
 
-    ops = [_vop("mark_kye", item=570, label="ticked"), *_four_ticks()]
+    ops = [_vop("mark_kye", item=570, label="ticked"), _vop("mark_kye", item=1),
+           *_four_ticks()[1:]]
     plan, c, t = _rebuilt(*ops, replies=_tick_replies())
     _live(t, lose=3, error=_lost())
     exc, journal = _run_failing(plan, c, tmp_path)
@@ -4266,14 +4329,12 @@ def test_a_partial_read_back_covers_what_was_there_already(tmp_path):
     with journal.path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"phase": "done", "key": ops[3].key, "error": "did not land"}))
     (tmp_path / next(p.name for p in tmp_path.glob("verify-*"))).unlink()
-    # DARE is in the drift basis, so the resume runs against the profile as planned.
-    t.replies[DARE_READ]["ids"].remove(1)
     t.webapi, t.ajax_text = FakeTransport.webapi.__get__(t), FakeTransport.ajax_text.__get__(t)
     _live(t, lose=4, error=_lost("again"))
     with pytest.raises(type(_lost()), match="again") as info:
         apply_plan(c, plan, workdir=tmp_path, confirm=True)
     seen = info.value.report.verified
-    assert seen["checked"] == 4 and seen["mismatches"] == ["DARE area 1 did not stick"]
+    assert seen["checked"] == 4 and seen["mismatches"] == []
 
 
 @pytest.mark.parametrize("broken", ["verify", "uncertain", "file", "network"])
@@ -4710,3 +4771,504 @@ def test_an_op_verify_cannot_check_is_unproven_and_the_rest_are_checked():
     out = verify(c, [_jan({"quality": 3}), _vop("mark_kye", item=5)])
     assert out["mismatches"] == ["KYE quadrant 5 did not stick"]
     assert any("KeyError" in u for u in out["unproven"])
+
+
+# --------------------------------------------------------------------------
+# what the reviews of the whole change found
+# --------------------------------------------------------------------------
+
+WHOLE_ROW = _stored(**JAN)
+BAD_ROWS = {
+    **{f"no {field}": {k: v for k, v in WHOLE_ROW.items() if k != field} for field in WHOLE_ROW},
+    "only an id": {"id": 101},
+    **{f"{field} {value!r}": WHOLE_ROW | {field: value} for field, value in (
+        ("id", None), ("id", "x"), ("id", True), ("id", 1.5), ("quality", None), ("quality", ""),
+        ("quality", "good"), ("trip_id", "x"), ("trip_id", True), ("trip_id", []),
+        ("year_from", "x"), ("month_to", 13), ("day_from", True), ("day_to", 1.5),
+        ("year_from", None), ("year_to", 0))},
+    "not an object": 101, "null": None,
+}
+
+
+@pytest.mark.parametrize("name", BAD_ROWS)
+def test_a_visit_row_with_a_field_missing_is_not_an_undated_good_visit(
+        monkeypatch, tmp_path, capsys, name):
+    """``{"id": 101}`` read as an undated quality 3, and could be written back as one."""
+    from wanderfill.plan.apply import verify
+
+    bad = visits(BAD_ROWS[name])
+    plan, c, t = _rebuilt(_jan_add(**{"date_from": "2026-05-01", "date_to": "2026-05-02"}))
+    t.replies[READ] = bad
+    assert READ in _refused(plan, c, t, tmp_path, VerificationFailed)
+    assert "BLOCKERS" in _checked(monkeypatch, capsys, plan, c, tmp_path, 1)
+    out = verify(c, plan.ops)
+    assert out["mismatches"] == [] and READ in out["unproven"][0]
+    # ...and the read an update is checked against: nothing is sent.
+    with pytest.raises(PrecisionLoss, match="blind"):
+        c.update_visit(1, 11, dt.date(2026, 1, 1), dt.date(2026, 1, 2), quality=3)
+    assert _writes(t) == []
+
+
+@pytest.mark.parametrize("over", [
+    {}, dict.fromkeys(JAN), {"trip_id": None}, {"id": "1", "quality": "3", "trip_id": "9"},
+    dict.fromkeys(("month_from", "day_from", "month_to", "day_to")), {"hidden": 0},
+], ids=str)
+def test_a_whole_visit_row_is_still_read(over):
+    c, _ = client({READ: visits(WHOLE_ROW | over)})
+    (visit,) = c._visits_strict(11)
+    assert visit == Visit.from_api(WHOLE_ROW | over, 11)
+
+
+# the write action, and an op that sends it as the third of four
+PLAN_WRITES = {
+    "add_visit": ("quickEnter/add-visit", lambda: _jan_add(region=13)),
+    "update_visit": ("quickEnter/update-visit", lambda: _vop(
+        "update_visit", region=13, visit_id=1, quality=3, **JAN_DAYS)),
+    "create_trip": ("trips/new-trip", lambda: _jan(TRIP_REGION | {"id": 13})),
+    "mark_dare": ("quickEnter/updateMQP", lambda: _vop("mark_dare", region=3)),
+    "mark_kye": ("kye/set-kye", lambda: _vop("mark_kye", item=3)),
+    "mark_tcc": ("quickEnter/updateTCC", lambda: _vop("mark_tcc", item=64)),
+}
+NOT_OK = [{}, {"status": 1}, {"result": None}, {"result": "ok"}, {"result": ["OK"]},
+          {"result": "FAIL", "trip_id": 900, "visit_id": 900}]
+NO_ID = [{}, {"trip_id": None, "visit_id": None}, {"trip_id": "", "visit_id": ""},
+         {"trip_id": 0, "visit_id": 0}, {"trip_id": True, "visit_id": True},
+         {"trip_id": "x", "visit_id": "x"}, {"trip_id": [9], "visit_id": [9]},
+         {"trip_id": -1, "visit_id": -1}]
+UNUSABLE = [(kind, answer) for kind in PLAN_WRITES for answer in NOT_OK]
+UNUSABLE += [(kind, {"result": "OK"} | ids) for kind in ("add_visit", "create_trip")
+             for ids in NO_ID]
+
+
+@pytest.mark.parametrize("kind,answer", UNUSABLE, ids=str)
+def test_a_write_answered_without_ok_stops_the_run_and_stays_open(tmp_path, kind, answer):
+    """Any JSON object counted as success: op 4 went out on top of an op 3 nobody knows."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    action, op = PLAN_WRITES[kind]
+    ops = [_vop("mark_kye", item=1), _vop("tick_series", series=1, item=2), op(),
+           _vop("tick_series", series=1, item=4)]
+    rows = [_stored(**JAN)] if kind == "update_visit" else ()
+    plan, c, t = _rebuilt(*ops, rows=rows, replies=_tick_replies())
+    real, seen = t.webapi, []
+
+    def webapi(path, /, **fields):
+        if path == action:
+            seen.append(fields)
+            if fields.get("qid") != 1:
+                t.sent.append((path, fields))
+                return answer
+        return real(path, **fields)
+
+    t.webapi = webapi
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert isinstance(exc, UnknownWriteOutcome) and action in str(exc)
+    assert journal.unresolved() == {ops[2].key}
+    assert journal.done_keys() == {ops[0].key, ops[1].key}
+    assert [f["item"] for a, f in t.sent if a == "my_series/"] == [2], "op 4 is not sent"
+    assert exc.report.verified["uncertain"]["key"] == ops[2].key
+
+
+@pytest.mark.parametrize("kind", PLAN_WRITES)
+def test_an_error_answer_is_still_a_refusal(tmp_path, kind):
+    action, op = PLAN_WRITES[kind]
+    op = op()
+    error = {"result": "ERROR", "result_description": "Missing params"}
+    plan, c, _ = _rebuilt(op, rows=[_stored(**JAN)] if kind == "update_visit" else (),
+                          replies=_tick_replies() | {action: error})
+    exc, journal = _run_failing(plan, c, tmp_path)
+    assert type(exc) is ApiError and journal.unresolved() == set()
+
+
+@pytest.mark.parametrize("trip_id", [900, "900"])
+def test_the_recorded_answers_are_enough(tmp_path, trip_id):
+    from wanderfill.plan.apply import apply_plan
+
+    plan, c, _ = _rebuilt(_jan(), _jan_add(region=12), replies={
+        "trips/new-trip": {"result": "OK", "trip_id": trip_id},
+        "quickEnter/add-visit": {"result": "OK", "visit_id": str(trip_id)}})
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 2
+
+
+@pytest.mark.parametrize("method", sorted(UNDO_METHODS))
+def test_a_delete_answered_without_ok_is_settled_by_its_read_back(method):
+    """What these endpoints answer was not recorded; the read-back is the proof."""
+    call, read, before = _undo_calls()[method]
+    gone = {"delete_trip": GONE, "unmark_dare": {"ids": []}, "unmark_kye": {"visited": []},
+            }.get(method, visits())
+    writes_ = ("quickEnter/delete-visit", "quickEnter/set-not-visited", "trips/delete-trip",
+               "quickEnter/updateMQP", "kye/set-kye")
+    t = SequencedTransport({read: [before, gone], YEAR: [{"trips": []}]},
+                           {action: {} for action in writes_})
+    call(NomadMania(token="fake", transport=t))
+
+
+def _syncs(monkeypatch):
+    """Every directory fsynced from now on, in order; the caller adds what it sends."""
+    import os
+    import stat
+
+    events = []
+    real = os.fsync
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode):
+            events.append((st.st_dev, st.st_ino))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return events
+
+
+def _ino(path):
+    st = path.stat()
+    return st.st_dev, st.st_ino
+
+
+def test_a_new_journals_directory_entry_is_on_the_disk_before_the_request(monkeypatch, tmp_path):
+    """The line was synced and the file's name was not: a power cut could take the file."""
+    from wanderfill.plan.apply import Journal
+
+    events = _syncs(monkeypatch)
+    real = FakeTransport.webapi
+
+    def webapi(self, action, **fields):
+        if Transport._is_write(action):
+            events.append("sent")
+        return real(self, action, **fields)
+
+    monkeypatch.setattr(FakeTransport, "webapi", webapi)
+    work = tmp_path / "a" / "b"
+    report, _ = _apply(work)
+    assert report.succeeded == 1
+    before = events[:events.index("sent")]
+    for made in (tmp_path, tmp_path / "a", work):
+        assert _ino(made) in before, made
+    events.clear()
+    (path,) = work.glob("journal-*")
+    Journal(path).opening(Op(kind="mark_dare", region=2))
+    assert events == [], "only for a new journal"
+
+    # A deletion's journal too.
+    events.clear()
+    work = tmp_path / "d"
+    fake = FakeClient()
+    fake.unmark_dare = lambda dare_id: events.append("sent")
+    _run_delete(monkeypatch, work, fake, "dare", "1142", "--confirm", "--reason", "x")
+    before = events[:events.index("sent")]
+    assert _ino(tmp_path) in before and _ino(work) in before
+
+
+def test_a_directory_that_cannot_be_synced_does_not_stop_the_run(monkeypatch, tmp_path):
+    """Windows cannot open one."""
+    import os
+
+    def cannot(path, flags, *a, **kw):
+        raise PermissionError(13, "a directory", str(path))
+
+    monkeypatch.setattr(os, "open", cannot)
+    report, _ = _apply(tmp_path / "w")
+    assert report.succeeded == 1
+
+
+class _DeadReadBack(SequencedTransport):
+    """The DARE list can be read until the write, and never after it."""
+
+    def webapi(self, action, **fields):
+        from wanderfill.api.errors import TransportError
+
+        if action == DARE_READ and _writes(self):
+            raise TransportError("wifi")
+        return super().webapi(action, **fields)
+
+
+UNMARK = ("dare", "1142", "--confirm", "--reason", "typo")
+
+
+def _unmark(monkeypatch, tmp_path, capsys, t):
+    c = NomadMania(token="fake", transport=t)
+    capsys.readouterr()
+    rc = _run_delete(monkeypatch, tmp_path, c, *UNMARK)
+    return rc, [e["phase"] for e in _journal_lines(tmp_path)], capsys.readouterr()
+
+
+DELETE_STATE = {"user/status-quick": {"result": "OK", "uid": 79597}, DARE_READ: {"ids": [1142]}}
+CLOSING = ('"phase": "done"', '"error"', "Read the server back")
+
+
+@pytest.mark.parametrize("code,closed", [(403, True), (401, True), (400, True), (500, False),
+                                         (302, False), (408, False)])
+def test_a_delete_closes_on_the_refusals_an_apply_closes_on(
+        monkeypatch, tmp_path, capsys, code, closed):
+    """A 403 on the write left it open, and blocked the account over nothing."""
+    real, calls = _answering(monkeypatch, code)
+
+    class WritesForReal(FakeTransport):
+        def webapi(self, action, **fields):
+            write = Transport._is_write(action)
+            return (real if write else super()).webapi(action, **fields)
+
+    rc, phases, said = _unmark(monkeypatch, tmp_path, capsys, WritesForReal(DELETE_STATE))
+    assert rc == 1 and len(calls) == 1
+    assert phases == (["open", "done"] if closed else ["open"])
+    assert all((x in said.out) != closed for x in CLOSING)
+    if closed:
+        assert _journal_lines(tmp_path)[1]["error"]
+
+
+def test_a_dead_read_back_after_a_delete_stays_open(monkeypatch, tmp_path, capsys):
+    """It is a TransportError underneath, which on the write itself would close."""
+    rc, phases, said = _unmark(monkeypatch, tmp_path, capsys, _DeadReadBack({}, DELETE_STATE))
+    assert rc == 1 and phases == ["open"]
+    assert all(x in said.out for x in CLOSING) and "deletes-79597" in said.out
+
+
+@pytest.mark.parametrize("error", [RuntimeError("a bug of ours"), KeyboardInterrupt()], ids=repr)
+def test_a_delete_that_ends_unforeseen_says_how_to_close_its_entry(
+        monkeypatch, tmp_path, capsys, error):
+    fake = FakeClient(outcome=error)
+    if isinstance(error, KeyboardInterrupt):
+        assert _run_delete(monkeypatch, tmp_path, fake, *UNMARK) == 130
+    else:
+        with pytest.raises(RuntimeError, match="a bug of ours"):
+            _run_delete(monkeypatch, tmp_path, fake, *UNMARK)
+    said = capsys.readouterr()
+    assert all(x in said.out for x in CLOSING)
+    assert [e["phase"] for e in _journal_lines(tmp_path)] == ["open"]
+
+
+def test_a_delete_whose_done_line_will_not_go_in_says_so(monkeypatch, tmp_path, capsys):
+    from wanderfill.plan import apply as ap
+
+    def full(self, op, result, error=""):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ap.Journal, "note", full)
+    for outcome in (None, ApiError("quickEnter/updateMQP", "no")):
+        for f in tmp_path.glob("deletes-*"):
+            f.unlink()
+        with pytest.raises(OSError, match="disk full"):
+            _run_delete(monkeypatch, tmp_path, FakeClient(outcome=outcome), *UNMARK)
+        said = capsys.readouterr().out
+        assert all(x in said for x in CLOSING)
+
+
+def test_every_command_says_the_same_about_an_open_entry(monkeypatch, tmp_path, capsys):
+    from wanderfill.plan.apply import CLOSE_BY_HAND
+
+    _open_line(tmp_path / "journal-79597-aaaaaaaaaaaa.ndjson")
+    assert _run_delete(monkeypatch, tmp_path, FakeClient(), *UNMARK) == 2
+    assert CLOSE_BY_HAND in capsys.readouterr().out
+    _open_line(tmp_path / "journal-7-aaaaaaaaaaaa.ndjson")
+    exc, _ = _apply(tmp_path)
+    assert CLOSE_BY_HAND in str(exc)
+    plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
+    _live(t, lose=3, error=_lost())
+    monkeypatch.setattr("wanderfill.cli.main.DEFAULT_WORKDIR", tmp_path / "none")
+    _, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    assert CLOSE_BY_HAND in said.out and "journal-7-" in said.out
+
+
+@pytest.mark.parametrize("command", [["apply"], ["apply", "--confirm"], ["check"], ["show"]])
+def test_a_plan_file_that_cannot_load_exits_one(monkeypatch, tmp_path, capsys, command):
+    """It exited 2, which is an error that ended or refused a run; this is not a plan."""
+    from wanderfill.cli import main as cli
+
+    c, t = client()
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    path = tmp_path / "p.json"
+    for text in ("{", '{"account": 7, "surprise": 1}', None):
+        path.unlink() if text is None else path.write_text(text)
+        assert cli.main([command[0], str(path), *command[1:]]) == 1
+        assert str(path) in capsys.readouterr().err
+    assert t.sent == []
+
+
+def _stateful(plan_ops, rows_after):
+    """A plan on a server that keeps the visit a trip or an add makes."""
+    plan, c, t = _rebuilt(*plan_ops)
+    real = t.webapi
+
+    def webapi(path, /, **fields):
+        if path in ("trips/new-trip", "quickEnter/add-visit"):
+            t.replies[READ] = visits(rows_after)
+            t.replies[REGIONS_READ] = {"ids": [11]}
+        return real(path, **fields)
+
+    t.webapi = webapi
+    t.replies["trips/get-trip"] = {"trip": JAN_DAYS}
+    return plan, c, t
+
+
+@pytest.mark.parametrize("op", [
+    pytest.param(lambda: _jan(), id="trip"),
+    pytest.param(lambda: _jan({"id": 11, "quality": 3}), id="trip, dates from the header"),
+    pytest.param(lambda: _jan_add(), id="add"),
+])
+def test_a_trip_deleted_after_it_landed_is_not_skipped_as_done(monkeypatch, tmp_path, capsys, op):
+    """Applied, deleted by the owner, applied again: the profile matches the plan's basis
+    once more, the journal says done, and the run "finished" without a trip."""
+    from wanderfill.plan.apply import Journal, apply_plan
+
+    plan, c, t = _stateful([op()], _stored(**JAN, trip_id=901))
+    first = apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert first.succeeded == 1 and first.verified["mismatches"] == []
+    (path,) = tmp_path.glob("journal-*")
+    t.sent.clear()
+    with pytest.raises(DriftError, match="live state changed"):  # it is there, and done
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+
+    t.replies[READ], t.replies[REGIONS_READ] = visits(), {"ids": []}  # the owner deletes it
+    with pytest.raises(DriftError) as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    for wanted in (str(path), "the op", plan.ops[0].kind, "2026-01-01..2026-01-02", "region 11",
+                   "gone now", "new plan", "Nothing was sent"):
+        assert wanted in str(info.value)
+    assert _writes(t) == [] and Journal(path).unresolved() == set()
+
+    from wanderfill.cli import main as cli
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    saved = plan.save(tmp_path / "p.json")
+    capsys.readouterr()
+    assert cli.main(["check", str(saved), "--workdir", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "BLOCKERS" in out and "gone now" in out and str(path) in out and "unchanged" in out
+
+    # The way out the message names: a new plan, with a journal of its own.
+    again = Plan(account=7, ops=plan.ops, basis=plan.basis | {"taken_at": "later"})
+    assert apply_plan(c, again, workdir=tmp_path, confirm=True).succeeded == 1
+
+
+@pytest.mark.parametrize("name", TICKED)
+def test_a_tick_taken_back_after_it_landed_is_not_skipped_as_done(
+        monkeypatch, tmp_path, capsys, name):
+    from wanderfill.plan.apply import Journal, apply_plan
+    from wanderfill.plan.model import fingerprint
+
+    op = TICKED[name]()
+    plan, c, t = _rebuilt(op, _vop("tick_series", series=9, item=1), replies={
+        "V2/": {"visited": []}, "kye/get-kye": {"visited": []}})
+    if name == "tcc":
+        op.item = 64  # in the list, and not ticked
+    path = tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson"
+    Journal(path).note(op, {"result": "OK"})
+    with pytest.raises(DriftError, match="gone now") as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert str(path) in str(info.value) and _writes(t) == []
+    assert not any(a == "my_series/" for a, _ in t.sent)
+
+
+def test_a_half_applied_tick_plan_can_still_be_finished(monkeypatch, tmp_path, capsys):
+    from wanderfill.plan.apply import apply_plan
+
+    ops = [_vop("mark_kye", item=1), *_four_ticks()[1:]]
+    plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+    _live(t, lose=3, error=_lost())
+    _, journal = _run_failing(plan, c, tmp_path)
+    with journal.path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "done", "key": ops[2].key, "error": "did not land"}))
+    t.webapi, t.ajax_text = FakeTransport.webapi.__get__(t), FakeTransport.ajax_text.__get__(t)
+    _live(t)
+    report = apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert (report.skipped, report.succeeded) == (2, 2)
+    assert report.verified["mismatches"] == []
+
+
+def test_updates_and_vague_visits_are_not_judged_gone(tmp_path):
+    """Two real visits can share a year, and an update leaves nothing to look for."""
+    from wanderfill.plan.apply import Journal, apply_plan
+    from wanderfill.plan.model import fingerprint
+
+    ops = [_vop(region=11, quality=3), _vop(region=11, quality=3, date_from="2026", date_to="2026"),
+           _vop(region=11, quality=3, date_from="2026-01-01", date_to="2026"),
+           _jan_update(),
+           _jan(TRIP_REGION | dict.fromkeys(("month_from", "day_from", "month_to", "day_to")))]
+    plan, c, t = _rebuilt(*ops)
+    j = Journal(tmp_path / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson")
+    for op in ops:
+        j.note(op, {"result": "OK"})
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).skipped == len(ops)
+    assert _writes(t) == []
+
+
+def test_an_op_skipped_as_ticked_is_not_printed_as_ok(monkeypatch, tmp_path, capsys):
+    plan, c, t = _rebuilt(_vop("mark_kye", item=570, label="there"),
+                          _vop("mark_kye", item=5, label="new"), replies=_tick_replies())
+    _live(t)
+    rc, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    there, new = (next(x for x in said.out.splitlines() if x.startswith("  [") and w in x)
+                  for w in ("there", "new"))
+    assert rc == 0 and "skip" in there and " ok " not in there and " ok " in new
+
+
+def _broken_dirs(tmp_path):
+    """Directories that cannot be read or locked, whoever runs the suite."""
+    a_file = tmp_path / "a-file"
+    a_file.write_text("")
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    return a_file, loop
+
+
+@pytest.mark.parametrize("n", [0, 1], ids=["a file", "a link to itself"])
+def test_a_directory_that_cannot_be_used_is_a_refusal_not_a_traceback(
+        monkeypatch, tmp_path, capsys, n):
+    bad = _broken_dirs(tmp_path)[n]
+    exc, sent = _apply(tmp_path / "w", also=(bad,))
+    assert isinstance(exc, DriftError) and str(bad) in str(exc) and sent == ACCOUNT_READ
+    exc, sent = _apply(bad)
+    assert isinstance(exc, DriftError) and str(bad) in str(exc) and sent == ACCOUNT_READ
+    exc, sent = _apply(bad / "below")
+    assert isinstance(exc, DriftError) and str(bad) in str(exc) and sent == ACCOUNT_READ
+
+    fake = FakeClient()
+    assert _run_delete(monkeypatch, bad, fake, *UNMARK) == 2
+    assert fake.calls == [] and str(bad) in capsys.readouterr().err
+    from wanderfill.cli import main as cli
+    c, _ = client(STATE)
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    plan = _dare_plan().save(tmp_path / "p.json")
+    assert cli.main(["check", str(plan), "--workdir", str(bad)]) == 1
+    out = capsys.readouterr().out
+    assert "BLOCKERS" in out and str(bad) in out
+
+
+def test_a_directory_that_cannot_be_listed_or_locked_is_a_refusal(monkeypatch, tmp_path):
+    import errno
+    import pathlib
+
+    from wanderfill.plan.apply import account_lock, open_entries
+
+    fcntl = pytest.importorskip("fcntl")
+
+    def denied(self):
+        raise PermissionError(errno.EACCES, "Permission denied")
+        yield
+
+    with monkeypatch.context() as m:
+        m.setattr(pathlib.Path, "iterdir", denied)
+        with pytest.raises(DriftError, match="Permission denied") as info:
+            open_entries([tmp_path], 7)
+        assert str(tmp_path) in str(info.value)
+    (tmp_path / "journal-7-aaaaaaaaaaaa.ndjson").mkdir()  # a journal that cannot be read
+    with pytest.raises(DriftError, match="journal-7-a"):
+        open_entries([tmp_path], 7)
+
+    def no_locks(*a):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    with pytest.raises(DriftError, match="No locks available") as info:
+        with account_lock([tmp_path], 7):
+            raise AssertionError("not reached")
+    assert str(tmp_path) in str(info.value)
+
+
+def test_an_error_under_the_lock_is_not_taken_for_the_lock_failing(tmp_path):
+    from wanderfill.plan.apply import account_lock
+
+    with pytest.raises(OSError, match="disk full") as info:
+        with account_lock([tmp_path], 7):
+            raise OSError("disk full")
+    assert not isinstance(info.value, DriftError)

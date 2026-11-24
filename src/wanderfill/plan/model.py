@@ -402,8 +402,16 @@ def _trip_problems(op: Op) -> list[str]:
         bad = [f"{at}: {why}" for _, why in sides.values() if why]
         out += bad
         a, b = sides["from"][0], sides["to"][0]
-        if not bad and a and b and _backwards(a, b):
-            out.append(f"{at} starts after it ends")
+        if not bad:
+            # One end, or a day against a year, is a date the read-back cannot hold
+            # the server to.
+            if (a is None) != (b is None):
+                out.append(f"{at} has only its {'from' if a else 'to'} date; a region gives both "
+                           "ends or neither")
+            elif a and b and a[0] != b[0]:
+                out.append(f"{at} has a full date at one end and a bare year at the other")
+            elif a and b and _backwards(a, b):
+                out.append(f"{at} starts after it ends")
     return out
 
 
