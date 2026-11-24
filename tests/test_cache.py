@@ -1,6 +1,6 @@
 """The read cache, the slow-link transport, and the line between them and the write path.
 
-No network: urlopen is replaced, and the cache lives in tmp_path.
+No network: urlopen or the handlers under it are replaced, and the cache lives in tmp_path.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import stat
 from pathlib import Path
 
 import pytest
-from test_quirks import FakeTransport
+from test_quirks import FakeTransport, wire
 
 from wanderfill.api import cache as cache_mod
 from wanderfill.api import transport as tr
@@ -67,31 +67,28 @@ def test_a_header_claiming_gzip_over_plain_json_is_not_inflated(monkeypatch):
 
     On a write this would turn an applied ``add-visit`` into an unknown outcome.
     """
-    monkeypatch.setattr(tr.urllib.request, "urlopen",
-                        lambda req, timeout: _Resp(b'{"result":"OK"}', "gzip"))
+    sent = wire(monkeypatch, b'{"result":"OK"}', encoding="gzip")
     t = tr.Transport(token="x" * 36)
     assert t.webapi("quickEnter/add-visit", region=1) == {"result": "OK"}
+    assert len(sent) == 1
 
 
 def test_writes_still_get_exactly_one_attempt(monkeypatch):
     from wanderfill.api.errors import UnknownWriteOutcome
 
-    calls = []
-
-    def boom(req, timeout):
-        calls.append(1)
-        raise TimeoutError("lost")
-
-    monkeypatch.setattr(tr.urllib.request, "urlopen", boom)
-    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    calls = wire(monkeypatch, TimeoutError("lost"))
     t = tr.Transport(token="x" * 36)
     with pytest.raises(UnknownWriteOutcome):
         t.webapi("quickEnter/add-visit", region=1)
     assert len(calls) == 1
 
 
-class _Conn:
-    """A stand-in for HTTPSConnection. ``script`` is what each request does."""
+class _Conn(tr.http.client.HTTPSConnection):
+    """A stand-in for HTTPSConnection. ``script`` is what each request does.
+
+    A subclass because building an opener reads attributes off the class; every
+    method that would touch a socket is replaced.
+    """
 
     made: list = []  # noqa: RUF012 - reset per test by the fixture
 
@@ -155,13 +152,24 @@ def test_a_read_on_a_connection_the_server_closed_goes_again_on_a_fresh_one(conn
 def test_writes_never_use_the_kept_alive_connection(conns, monkeypatch):
     """A write sent down a connection the server already closed has an unknown
     outcome. Writes open their own, exactly as before."""
-    opened = []
-    monkeypatch.setattr(tr.urllib.request, "urlopen",
-                        lambda req, timeout: opened.append(req) or _Resp(b"{}", None))
+    opened = wire(monkeypatch, b"{}")
     t = tr.Transport(token="x" * 36)
     t.webapi("quickEnter/add-visit", region=1)
     t.ajax_text("my_series/", action="toggle", item=1, state=1, series=22)
     assert len(opened) == 2 and conns.made == []
+    assert all(r.host == "nomadmania.com" for r in opened)
+
+
+@pytest.mark.parametrize("action", ["quickEnter/add-visit", "maps/get-visited-dare-ids-simple"])
+def test_a_request_is_tunnelled_through_the_configured_proxy(conns, monkeypatch, action):
+    """Writes have an opener of their own; it must not be a way round the proxy."""
+    monkeypatch.setattr(tr.urllib.request, "getproxies", lambda: {"https": "http://p:3128"})
+    monkeypatch.setattr(tr.urllib.request, "proxy_bypass", lambda host: False)
+    opened = wire(monkeypatch, b"{}")
+    tr.Transport(token="x" * 36).webapi(action)
+    (req,) = opened
+    assert req.host == "p:3128" and req._tunnel_host == "nomadmania.com"
+    assert conns.made == []
 
 
 def test_a_configured_proxy_is_not_bypassed(conns, monkeypatch):
@@ -174,7 +182,7 @@ def test_a_configured_proxy_is_not_bypassed(conns, monkeypatch):
 
 
 def test_reads_and_writes_are_paced_by_different_limiters(monkeypatch):
-    monkeypatch.setattr(tr.urllib.request, "urlopen", lambda req, timeout: _Resp(b"{}", None))
+    wire(monkeypatch, b"{}")
     t = tr.Transport(token="x" * 36, keep_alive=False)
     calls = []
     t.limiter.wait = lambda: calls.append("write")

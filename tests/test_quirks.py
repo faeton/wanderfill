@@ -546,37 +546,49 @@ def test_journal_unresolved_is_chronological(tmp_path):
 # an error after sending is not proof of failure
 # --------------------------------------------------------------------------
 
-def _answering(monkeypatch, *answers):
-    """A real Transport over a scripted urlopen: an int is an HTTP error, bytes a body."""
-    import urllib.error
+def wire(monkeypatch, *answers, encoding=None):
+    """Script the server underneath urllib: its real opener and handlers still run.
+
+    Stubbed where a connection would be opened, so redirects, HTTP errors and
+    proxies go through urllib's own chain. Each request takes the next answer,
+    and the last one repeats: bytes are a 200, an int an HTTP status, a pair a
+    status and a ``Location``, an exception is raised. Returns the requests sent.
+    """
+    import io
+    import urllib.request
+    import urllib.response
+    from email.message import Message
 
     from wanderfill.api import transport as tr
 
-    calls = []
+    sent = []
 
-    class Resp:
-        def __init__(self, body):
-            self.body = body
+    def open_(self, req):
+        answer = answers[min(len(sent), len(answers) - 1)]
+        sent.append(req)
+        if isinstance(answer, Exception):
+            raise answer
+        headers = Message()
+        if encoding:
+            headers["Content-Encoding"] = encoding
+        status, body = (200, answer) if isinstance(answer, bytes) else (answer, b"")
+        if isinstance(status, tuple):
+            status, headers["Location"] = status
+        resp = urllib.response.addinfourl(io.BytesIO(body), headers, req.full_url, status)
+        resp.msg = "scripted"
+        return resp
 
-        def read(self):
-            return self.body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(req, timeout):
-        answer = answers[min(len(calls), len(answers) - 1)]
-        calls.append(req.full_url)
-        if isinstance(answer, int):
-            raise urllib.error.HTTPError(req.full_url, answer, "scripted", {}, None)
-        return Resp(answer)
-
-    monkeypatch.setattr(tr.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", open_)
+    monkeypatch.setattr(urllib.request.HTTPHandler, "http_open", open_)
+    monkeypatch.setattr(urllib.request, "_opener", None)  # urlopen caches its proxies here
     monkeypatch.setattr(tr.time, "sleep", lambda s: None)
-    return Transport(token="x" * 36, keep_alive=False), calls
+    return sent
+
+
+def _answering(monkeypatch, *answers):
+    """A real Transport over a scripted wire, and the requests it sends."""
+    sent = wire(monkeypatch, *answers)
+    return Transport(token="x" * 36, keep_alive=False), sent
 
 
 @pytest.mark.parametrize("code", [500, 502, 503, 504, 408])
@@ -610,6 +622,74 @@ def test_a_500_on_a_read_is_still_retried(monkeypatch):
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_rejected_token_on_a_write_is_still_definite(monkeypatch, code):
+    from wanderfill.api.errors import AuthError
+
+    t, calls = _answering(monkeypatch, code)
+    with pytest.raises(AuthError):
+        t.webapi("quickEnter/add-visit", region=1)
+    assert len(calls) == 1
+
+
+PORTAL = "https://portal.example/login"
+REDIRECTS = [(code, PORTAL) for code in (301, 302, 303, 307, 308)]
+REDIRECTS += [(302, "http://portal.example/"), (302, "javascript:void(0)"), 300, 302, 304]
+
+
+@pytest.mark.parametrize("answer", REDIRECTS, ids=str)
+def test_a_redirect_on_a_write_is_an_unknown_outcome(monkeypatch, answer):
+    """urllib turns a redirected POST into a GET, or refuses a 307 outright. Neither
+    says what the server did with the POST, and the GET's answer is not its answer:
+    here it says OK. The GET would also carry the token to wherever it points."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    for write in (
+        lambda t: t.webapi("quickEnter/add-visit", region=1),
+        lambda t: t.ajax_json("my_series/", action="toggle", item=1),
+        lambda t: t.ajax_text("my_series/", action="toggle", item=1, state=1, series=1),
+    ):
+        t, calls = _answering(monkeypatch, answer, b'{"result":"OK"}')
+        with pytest.raises(UnknownWriteOutcome):
+            write(t)
+        assert [c.get_method() for c in calls] == ["POST"]
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_redirect_to_a_403_is_not_the_server_rejecting_the_token(monkeypatch, code):
+    """POST -> 303 -> GET -> 403 raised AuthError, which closes a journal entry."""
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    t, calls = _answering(monkeypatch, (303, PORTAL), code)
+    with pytest.raises(UnknownWriteOutcome):
+        t.webapi("quickEnter/add-visit", region=1)
+    assert len(calls) == 1
+
+
+def test_a_redirect_on_a_read_is_still_followed(monkeypatch):
+    t, calls = _answering(monkeypatch, (302, PORTAL), b'{"result":"OK","ids":[1]}')
+    assert t.webapi("maps/get-visited-regions-ids-simple")["ids"] == [1]
+    assert [c.get_method() for c in calls] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("answers", [((307, PORTAL),), ((303, PORTAL), 403)], ids=str)
+def test_a_redirected_write_leaves_the_journal_open(monkeypatch, tmp_path, answers):
+    from wanderfill.api.errors import UnknownWriteOutcome
+
+    real, calls = _answering(monkeypatch, *answers)
+
+    class WritesForReal(FakeTransport):
+        def webapi(self, action, **fields):
+            write = Transport._is_write(action)
+            return (real if write else super()).webapi(action, **fields)
+
+    op = Op(kind="mark_dare", bucket="apply", region=1)
+    exc, journal = _apply_one(tmp_path, op, transport=WritesForReal)
+    assert isinstance(exc, UnknownWriteOutcome)
+    assert journal.unresolved() == {op.key}
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("body", [b"<html>", b"[]", b"", b"\xff\xfe"])
 def test_a_write_answered_with_html_is_an_unknown_outcome(monkeypatch, body):
     """A captive portal or an error page: no word on what the server did."""
@@ -623,7 +703,7 @@ def test_a_write_answered_with_html_is_an_unknown_outcome(monkeypatch, body):
     assert len(calls) == 2, "one attempt each"
 
 
-def _apply_one(tmp_path, op, replies=None):
+def _apply_one(tmp_path, op, replies=None, transport=FakeTransport):
     """Run a one-op plan that has not drifted; return what it raised and its journal."""
     from wanderfill.plan.apply import Journal, apply_plan
     from wanderfill.plan.model import basis_of, fingerprint
@@ -631,7 +711,7 @@ def _apply_one(tmp_path, op, replies=None):
     state = {"user/status-quick": {"result": "OK", "uid": 7},
              "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
              "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}}
-    c, _ = client(state | (replies or {}))
+    c = NomadMania(token="fake", transport=transport(state | (replies or {})))
     plan = Plan(account=7, ops=[op], basis={"fingerprint": fingerprint(basis_of({}, []))})
     with pytest.raises(Exception) as info:
         apply_plan(c, plan, workdir=tmp_path, confirm=True)

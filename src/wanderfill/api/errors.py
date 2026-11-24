@@ -48,13 +48,13 @@ class TransportError(WanderfillError):
 class UnknownWriteOutcome(WanderfillError):
     """A write was sent and no usable answer came back.
 
-    Nothing at all, a 5xx or 408, a body that is not JSON, or a series toggle
-    that said something other than ``OK``. Distinct from :class:`TransportError`,
-    which on a write means the server answered and refused. Here we do not know
-    whether the profile changed, and the difference matters: retrying a refused
-    write is safe, retrying an unanswered one is how duplicate visits and phantom
-    trips are made. The only correct response is to stop and read the affected
-    record back.
+    Nothing at all, a redirect, a 5xx or 408, a body that is not JSON, or a
+    series toggle that said something other than ``OK``. Distinct from
+    :class:`TransportError`, which on a write means the server answered and
+    refused. Here we do not know whether the profile changed, and the difference
+    matters: retrying a refused write is safe, retrying an unanswered one is how
+    duplicate visits and phantom trips are made. The only correct response is to
+    stop and read the affected record back.
     """
 
 

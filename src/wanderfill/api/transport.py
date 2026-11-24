@@ -102,6 +102,25 @@ def _inflate(raw: bytes, encoding: str | None = None) -> bytes:
     return raw
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Leave a 3xx as the answer it is: urllib then raises it as an HTTPError."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _open_write(req: urllib.request.Request, timeout: float) -> Any:
+    """``urlopen`` for a write: the same handlers and proxies, no redirects.
+
+    urllib answers a redirected POST by sending a GET to the new address, and
+    that GET's reply would pass for the write's: an ``OK`` that is not, or a
+    captive portal's 403 read as "the server rejected the token". It would also
+    carry the token there. The opener is built per write, so it sees the
+    proxies configured now.
+    """
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
 @dataclass
 class Transport:
     """Does the talking. Knows nothing about what any endpoint means."""
@@ -191,7 +210,8 @@ class Transport:
         without an answer from the server raises :class:`UnknownWriteOutcome`,
         because "it did not happen" is not something we know. A 5xx or a 408 is
         no answer either: it is usually a gateway giving up on a server that may
-        have committed. Only the other HTTP errors are a refusal.
+        have committed. Nor is a redirect, which a write never follows. Only
+        the other 4xx are a refusal.
         """
         body = urllib.parse.urlencode(
             {k: v for k, v in fields.items() if v is not None}
@@ -218,7 +238,8 @@ class Transport:
                 if pooled:
                     raw, _ = self._read_pooled(url, body, all_headers)
                 else:
-                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    opening = urllib.request.urlopen if idempotent else _open_write
+                    with opening(req, timeout=self.timeout) as resp:
                         raw = resp.read()
                 self.traffic.add(label, len(raw), time.monotonic() - started)
                 return _inflate(raw)
@@ -232,10 +253,10 @@ class Transport:
                 time.sleep(1.5 * (attempt + 1))
         if not idempotent:
             # A 4xx means the server answered and refused. Anything else —
-            # timeout, reset, DNS, a 5xx, a 408 — means we never learned what
-            # it did.
+            # timeout, reset, DNS, a redirect, a 5xx, a 408 — means we never
+            # learned what it did.
             if isinstance(last, urllib.error.HTTPError):
-                if last.code < 500 and last.code != 408:
+                if 400 <= last.code < 500 and last.code != 408:
                     raise TransportError(f"{url} refused: {last}")
                 raise UnknownWriteOutcome(
                     f"{url} sent, answered with {last}. "
