@@ -815,7 +815,7 @@ def cmd_show(args) -> int:
 
 def cmd_check(args) -> int:
     """Read-only: does this plan still match the profile it was built against?"""
-    from ..plan.apply import Journal, describe_open, open_entries
+    from ..plan.apply import Journal, describe_open, open_entries, trips_under_old_keys
     from ..plan.model import Plan, basis_of, fingerprint, regions_touched, validate
 
     plan = Plan.load(args.plan)
@@ -857,11 +857,12 @@ def cmd_check(args) -> int:
         stuck = open_entries((workdir, DEFAULT_WORKDIR), plan.account)
         problems += [f"{line} — reconcile by hand" for line in describe_open(stuck)]
         done = journal.done_keys()
+        problems += trips_under_old_keys(journal, plan)
     except JournalCorrupt as exc:
         problems.append(str(exc))
         done = set()
-    if done:
-        print(f"journal: {len(done)} op(s) already applied and would be skipped")
+    if skipped := sum(op.key in done for op in ops):
+        print(f"journal: {skipped} op(s) already applied and would be skipped")
 
     print(f"\n{len(ops)} op(s) would execute across {len(regions)} region(s).")
     if problems:

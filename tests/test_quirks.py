@@ -2736,3 +2736,210 @@ def test_short_ascii_numeric_strings_in_trip_region_parts_are_still_accepted():
 
     region = {"id": 1, "quality": 3, "year_from": "2024", "month_from": "1", "day_from": "02"}
     assert validate(Plan(account=7, ops=[_vtrip(regions=[region])])) == []
+
+
+# --------------------------------------------------------------------------
+# a trip's key covers what is sent
+# --------------------------------------------------------------------------
+
+JAN = {"year_from": 2026, "month_from": 1, "day_from": 1,
+       "year_to": 2026, "month_to": 1, "day_to": 2}
+TRIP_REGION = {"id": 11, "quality": 3, "hidden": 0} | JAN
+
+
+def _jan(*regions, **kw):
+    return _vtrip(**({"date_from": "2026-01-01", "date_to": "2026-01-02",
+                      "regions": [dict(r) for r in regions] or [dict(TRIP_REGION)]} | kw))
+
+
+@pytest.mark.parametrize("change", [
+    {"year_from": 2025}, {"month_from": 2}, {"day_from": 2}, {"year_to": 2027},
+    {"month_to": 2}, {"day_to": 3}, {"month_from": None, "day_from": None},
+    dict.fromkeys(JAN),
+], ids=str)
+def test_trip_keys_differ_when_only_a_regions_dates_differ(change):
+    """A trip re-planned with a region's dates corrected was skipped as already done."""
+    from wanderfill.plan.model import validate
+
+    a, b = _jan(TRIP_REGION), _jan(TRIP_REGION | change)
+    assert a.key != b.key and a.legacy_key == b.legacy_key
+    if change == {"day_from": 2}:
+        assert validate(_vplan(a, b)) == [], "the old key is not a duplicate"
+
+
+def test_trip_keys_differ_when_only_hidden_differs():
+    from wanderfill.plan.model import validate
+
+    a, b = _jan(TRIP_REGION), _jan(TRIP_REGION | {"hidden": 1})
+    assert a.key != b.key and a.legacy_key == b.legacy_key
+    assert validate(_vplan(a, b)) == []
+
+
+def test_trip_key_ignores_region_order():
+    """Order inside the list or a region, and how a number is spelled, change nothing sent."""
+    other = {"id": 2, "quality": 4, "year_from": 2026}
+    want = _jan(TRIP_REGION, other).key
+    assert _jan(other, TRIP_REGION).key == want
+    assert _jan(dict(reversed(TRIP_REGION.items())), other).key == want
+    # Two regions with one id are refused, but their order still must not count.
+    twin = TRIP_REGION | {"hidden": None, "month_from": None, "day_from": None}
+    assert _jan(TRIP_REGION, twin).key == _jan(twin, TRIP_REGION).key
+
+
+@pytest.mark.parametrize("field", ["id", *JAN])
+def test_trip_key_reads_text_digits_as_the_number(field):
+    region = TRIP_REGION | {"id": 11, "month_from": 11, "month_to": 11, "day_to": 12}
+    want = _jan(region).key
+    assert _jan(region | {field: str(region[field])}).key == want
+    if not field.startswith(("id", "year")):
+        assert _jan(region | {field: f"{region[field]:03}"}).key == want
+
+
+def test_trip_key_has_one_spelling_of_absent():
+    plain = {k: v for k, v in TRIP_REGION.items() if k not in ("hidden", *JAN)}
+    want = _jan(plain).key
+    for same in ({"hidden": h} for h in (0, "0", "", None, False)):
+        assert _jan(plain | same).key == want, same
+    for empty in (None, ""):
+        assert _jan(plain | dict.fromkeys(JAN, empty)).key == want, repr(empty)
+    shown = _jan(plain | {"hidden": 1}).key
+    assert shown == _jan(plain | {"hidden": "1"}).key == _jan(plain | {"hidden": True}).key != want
+
+
+@pytest.mark.parametrize("hidden", [
+    None, "", "x", 1.5, float("nan"), True, [1], [[]], {"a": 1}, 10**30, "9" * 5000, "\ud83d"])
+def test_a_trip_key_never_raises_for_a_plan_validation_accepts(hidden):
+    from wanderfill.plan.model import validate
+
+    op = _jan(TRIP_REGION | {"hidden": hidden}, {"id": 12, "quality": 3})
+    assert validate(_vplan(op)) == []
+    assert len(op.key) == len(op.legacy_key) == 16
+
+
+GOLDEN = {
+    "add_visit": "79c8eaaa53229ef7",
+    "update_visit": "d7a05a5109773bc2",
+    "mark_dare": "81bbe4792ea14391",
+    "mark_kye": "42cab0614eae52d7",
+    "mark_tcc": "722f39f054a6a4fe",
+    "tick_series": "643df695b5e5a487",
+}
+
+
+def test_other_keys_did_not_move():
+    """The journals on disk name these; a moved key re-sends a write that landed."""
+    days = {"date_from": "2026-01-01", "date_to": "2026-01-02"}
+    ops = [
+        Op(kind="add_visit", region=5, quality=3, **days),
+        Op(kind="update_visit", region=5, visit_id=9, quality=3, **days),
+        Op(kind="mark_dare", region=7),
+        Op(kind="mark_kye", item=570),
+        Op(kind="mark_tcc", item=64),
+        Op(kind="tick_series", series=5, item=2903),
+    ]
+    assert {o.kind: o.key for o in ops} == GOLDEN
+    assert {o.legacy_key for o in ops} == {None}
+
+
+def test_legacy_trip_key_is_the_old_hash():
+    op = _jan()
+    assert op.legacy_key == "8ae84238652ef19e" != op.key
+
+
+def _done_before(workdir, *keys, trip=None, phase="done"):
+    """A plan of one trip, its journal holding ``keys``, its client, and what it sent."""
+    from wanderfill.plan.model import basis_of, fingerprint
+
+    c, t = client(STATE | {"trips/new-trip": {"result": "OK", "trip_id": 900}})
+    plan = Plan(account=7, ops=[trip or _jan()],
+                basis={"fingerprint": fingerprint(basis_of(c.snapshot([11]), [11]))})
+    path = workdir / f"journal-7-{fingerprint(plan.basis)[:12]}.ndjson"
+    path.write_text("".join(json.dumps({"phase": phase, "key": k, "kind": "create_trip"}) + "\n"
+                            for k in keys), encoding="utf-8")
+    t.sent.clear()
+    return plan, path, c, t
+
+
+def _writes(t):
+    return [a for a, _ in t.sent if Transport._is_write(a)]
+
+
+@pytest.mark.parametrize("change", [{}, {"day_to": 1}], ids=["same", "corrected"])
+def test_a_trip_done_under_the_old_key_is_refused_not_resent(tmp_path, change):
+    """The old key cannot say whether the trip it stands for is this one or a corrected
+    one: sending could duplicate it, and skipping could drop the correction."""
+    from wanderfill.plan.apply import apply_plan
+
+    trip = _jan(TRIP_REGION | change)
+    plan, path, c, t = _done_before(tmp_path, trip.legacy_key, trip=trip)
+    plan.ops.insert(0, _vop("mark_dare", region=1))  # refused before this one is sent, too
+    before = path.read_bytes()
+    with pytest.raises(DriftError) as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    for wanted in (str(path), trip.legacy_key, "the op", "ops[1]", "older", "ebuil"):
+        assert wanted in str(info.value)
+    assert _writes(t) == [] and path.read_bytes() == before
+
+
+def test_a_trip_done_under_its_own_key_is_skipped_whatever_the_old_key_says(tmp_path):
+    from wanderfill.plan.apply import apply_plan
+
+    trip = _jan()
+    for n, keys in enumerate(([trip.key], [trip.legacy_key, trip.key])):
+        work = tmp_path / str(n)
+        work.mkdir()
+        plan, _, c, t = _done_before(work, *keys)
+        report = apply_plan(c, plan, workdir=work, confirm=True)
+        assert (report.skipped, report.attempted) == (1, 0) and _writes(t) == []
+
+
+def test_only_this_plans_apply_ops_are_held_to_the_old_key(tmp_path):
+    from wanderfill.plan.apply import apply_plan
+
+    other = _jan(TRIP_REGION | {"id": 12})
+    plan, _, c, t = _done_before(tmp_path, other.legacy_key)
+    other.bucket = "review"
+    plan.ops.append(other)
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 1
+    assert _writes(t) == ["trips/new-trip"]
+
+
+def test_a_trip_open_under_the_old_key_blocks_and_can_be_closed(tmp_path):
+    from wanderfill.plan.apply import apply_plan
+
+    old = _jan().legacy_key
+    plan, path, c, t = _done_before(tmp_path, old, phase="open")
+
+    def close(error):
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"phase": "done", "key": old, "error": error}) + "\n")
+
+    with pytest.raises(DriftError, match=f"never confirmed: {old}") as info:
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert str(path) in str(info.value) and t.sent == ACCOUNT_READ
+    still_open = path.read_bytes()
+    close("")  # it landed
+    with pytest.raises(DriftError, match="older"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert _writes(t) == []
+    path.write_bytes(still_open)
+    close("did not land")
+    assert apply_plan(c, plan, workdir=tmp_path, confirm=True).succeeded == 1
+    assert _writes(t) == ["trips/new-trip"]
+
+
+def test_check_reports_a_trip_done_under_the_old_key(monkeypatch, tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    trip = _jan()
+    for n, (keys, rc) in enumerate((([trip.legacy_key], 1), ([trip.legacy_key, trip.key], 0))):
+        work = tmp_path / str(n)
+        work.mkdir()
+        plan, path, c, t = _done_before(work, *keys)
+        saved = plan.save(tmp_path / "p.json")
+        monkeypatch.setattr(cli, "_client", lambda args, c=c: c)
+        assert cli.main(["check", str(saved), "--workdir", str(work)]) == rc
+        out = capsys.readouterr().out
+        assert (str(path) in out and trip.legacy_key in out) == bool(rc)
+        assert ("1 op(s) already applied" in out) == (not rc)
+        assert _writes(t) == []

@@ -197,6 +197,25 @@ def describe_open(entries: dict[Path, set[str]]) -> list[str]:
             f"{', '.join(sorted(keys))}" for path, keys in entries.items()]
 
 
+def trips_under_old_keys(journal: Journal, plan: Plan) -> list[str]:
+    """One line per trip this plan's journal has done under :attr:`Op.legacy_key` only.
+
+    That key left out the regions' dates, so the trip it stands for is this one
+    or one that differs from it. Sending would duplicate the first and skipping
+    would drop the second, so neither is done.
+    """
+    done = journal.done_keys()
+    return [
+        f"{journal.path}: ops[{i}] {op.kind} {op.label!r}: a trip with these regions was "
+        f"written under the older key {op.legacy_key}, which leaves out the regions' dates, "
+        "so whether it is this trip is not known. Read the server back and rebuild the plan; "
+        "if the new one is refused for the same key, the profile is as it was before that "
+        "trip was sent, and a person has to settle the journal."
+        for i, op in enumerate(plan.ops)
+        if op.bucket == "apply" and op.legacy_key in done and op.key not in done
+    ]
+
+
 @contextmanager
 def account_lock(dirs: Iterable[Path], account: int) -> Iterator[None]:
     """Hold the right to write to ``account``, or raise :class:`DriftError` at once.
@@ -291,6 +310,8 @@ def apply_plan(
        moved needs a new plan, not an optimistic write.
     8. The op count must fit under ``max_writes``. A ceiling means a logic bug
        cannot rewrite an entire profile in one go.
+    9. No trip may be done in this plan's journal under the key earlier versions
+       gave it and not under its own.
     """
     report = ApplyReport()
     ops = plan.to_apply()
@@ -372,6 +393,8 @@ def _apply_locked(
     # Keyed to the plan, not to the run, so a resumed apply can see what the
     # interrupted one already did.
     journal = Journal(workdir / f"journal-{plan.account}-{fingerprint(plan.basis)[:12]}.ndjson")
+    if old := trips_under_old_keys(journal, plan):
+        raise DriftError("; ".join(old) + " Nothing was sent.")
     already = journal.done_keys()
 
     # What the server answered, per op, for this run only. verify() needs the

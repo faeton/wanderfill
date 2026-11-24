@@ -604,6 +604,9 @@ At apply time:
   directory is not seen, so keep one account to one `--workdir`. A journal is
   never repaired by the tool, and not by you either.
 - Refuse if live state has drifted since planning — re-plan instead.
+- Refuse a trip this plan's journal has done only under the key older versions
+  gave it, which left out the regions' dates (`Op.legacy_key`). Neither send it
+  nor skip it: read the server back and rebuild the plan. `check` lists it too.
 - Snapshot everything first, and refuse to start if the snapshot fails.
 - Cap the number of writes per run.
 - Journal every request and its response, including the id of any phantom trip

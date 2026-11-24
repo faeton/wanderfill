@@ -73,14 +73,34 @@ class Op:
         updates to different visit records in the same region on the same dates
         hash identically, and a journal entry for the first makes the second
         look complete; likewise a re-plan that raises a quality would be skipped
-        as already-applied. Provenance fields — label, evidence, confidence,
-        method — stay out, because changing the reasoning does not change the
-        write.
+        as already-applied. A trip's regions are in with their own dates and
+        ``hidden`` for the same reason. Provenance fields — label, evidence,
+        confidence, method — stay out, because changing the reasoning does not
+        change the write.
         """
+        if self.kind == "create_trip":
+            rows = [_region_row(r) for r in self.regions]
+            # The rest as text: absent parts are None, which has no order.
+            return self._hash(sorted(rows, key=lambda row: (row[0], json.dumps(row))))
+        return self._hash(self._ids_and_qualities())
+
+    @property
+    def legacy_key(self) -> str | None:
+        """What earlier versions called this trip, or ``None`` for every other kind.
+
+        It covered only each region's id and quality, so a trip and the same
+        trip with its dates corrected share it. Journals on disk hold it, and
+        ``apply`` refuses such a trip: the key cannot say which of them landed.
+        """
+        return self._hash(self._ids_and_qualities()) if self.kind == "create_trip" else None
+
+    def _ids_and_qualities(self) -> list[tuple]:
+        return sorted((r.get("id", 0), r.get("quality")) for r in self.regions)
+
+    def _hash(self, regions: list) -> str:
         material = json.dumps(
             [self.kind, self.region, self.visit_id, self.series, self.item,
-             self.date_from, self.date_to, self.quality, self.allow_vaguer,
-             sorted((r.get("id", 0), r.get("quality")) for r in self.regions)],
+             self.date_from, self.date_to, self.quality, self.allow_vaguer, regions],
             sort_keys=True,
         )
         return hashlib.sha256(material.encode()).hexdigest()[:16]
@@ -298,6 +318,28 @@ def _number(value: object) -> int | None:
     if isinstance(value, str) and len(value) <= 10 and value and set(value) <= _DIGITS:
         return int(value)
     return None
+
+
+def _part(value: object) -> object:
+    """A region's number as it counts: ``"02"`` is 2, and absent, null and empty are ``None``.
+
+    Anything else comes back as it is, so that two values nobody can read do not
+    become the same one.
+    """
+    if value is None or value == "":
+        return None
+    n = _number(value)
+    return value if n is None else n
+
+
+def _region_row(r: dict) -> list:
+    """What one trip region puts in the trip's key, however its dict was spelled."""
+    hidden = _part(r.get("hidden"))
+    return [
+        _part(r.get("id", 0)), _part(r.get("quality")),
+        int(hidden or 0) if hidden is None or type(hidden) is bool else hidden,
+        *(_part(r.get(f"{p}_{which}")) for which in ("from", "to") for p in _PARTS),
+    ]
 
 
 def _side_of(region: dict, which: str) -> tuple[tuple[str, Any] | None, str | None]:
