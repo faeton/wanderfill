@@ -527,7 +527,7 @@ def test_trips_are_read_from_the_year_before_the_first_run_to_the_year_after(sit
     site.trip(703, None, None, year=2032)
     m, _ = listed()
     assert [f["year"] for f in site.read("trips/get-trips-for-year-app")] == [2030, 2031, 2032]
-    assert [t["id"] for t in m.trips] == [700, 701, 703]
+    assert [t["id"] for t in m.trips] == [700, 701]  # one with no dates is over no day
 
 
 def test_no_runs_is_an_answer(site, capsys):
@@ -767,7 +767,8 @@ def test_review_prints_counts_sources_the_table_and_what_to_do(site, capsys):
         "2 offered", "2 held, which your own words can release", "1 open", "1 undated",
         "1 that nothing releases", "1 overlap", "1 on the profile already",
         "1 from another camera", "1 with no clock",
-        "trip 700, 2031-05-02 to 2031-05-03: hill[2J walk", "1 more with no dates",
+        "trips on the profile that can be over these days: 1",
+        "trip 700, 2031-05-02 to 2031-05-03: hill[2J walk",
         "map tiles:", "0 not read",
         "Nothing was sent",
     ):
@@ -1052,8 +1053,8 @@ def test_visits_that_are_not_what_was_shown_refuse_the_plan(site, capsys, change
     lambda s: s.trips[700].update(date_to=str(day(4))),
     lambda s: s.trips[700].update(date_from=str(dt.date(2031, 9, 1)),
                                   date_to=str(dt.date(2031, 9, 2))),
-    lambda s: s.trip(703, None, None, year=2030),
-], ids=["new", "gone", "words", "dates", "moved away", "undated"])
+    lambda s: s.trip(703, day(3), None, year=2031),
+], ids=["new", "gone", "words", "dates", "moved away", "one end"])
 def test_another_trip_over_the_same_days_refuses_the_plan(site, capsys, change):
     site.trip(700, day(2), day(3), "hills")
     listed()
@@ -1071,6 +1072,36 @@ def test_a_trip_elsewhere_in_the_year_does_not_refuse_it(site):
     site.trip(702, dt.date(2031, 11, 1), dt.date(2031, 11, 2))
     site.visit(6, dt.date(2031, 11, 1), dt.date(2031, 11, 2), 1, 702)
     assert do_plan() == 0
+
+
+def test_a_trip_with_no_dates_does_not_refuse_it(site):
+    """It is over no day; the visits in it are read with their regions."""
+    site.trip(700, None, None, "old", year=2031)
+    assert listed()[0].trips == []
+    site.trips[700]["description"] = "rewritten"
+    site.trip(701, None, None, year=2030)
+    assert do_plan() == 0
+
+
+def test_the_help_says_what_a_gap_is(capsys):
+    assert run_cli("trips", "review", "--help") == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "with 1, every day with no photo ends a stay; with 2, one such day does not" in out
+    assert "fewer than" not in out
+
+
+def test_a_hub_seen_twice_is_cut_where_the_owner_says(site, capsys):
+    """Between two places where nothing suggests it."""
+    photos(*days(HOME, -9, -4), *days(1, 1, 3), *days(2, 4, 5), *days(3, 6, 6), *days(1, 7, 8),
+           *days(HOME, 10, 11))
+    m, _ = listed()
+    assert not any(b.suggestions for b in m.boundaries[:3])
+    assert do_plan({1: "3", 2: "3", 3: "3"}) == 0
+    out = capsys.readouterr().out
+    assert 'press "A new trip starts here" somewhere between the two' in out
+    assert "Aldmoor (1), 2031-05-01 to 2031-05-03" in out
+    assert do_plan({1: "3", 2: "3", 3: "3"}, cuts={(2, 3): "cut"}) == 0
+    assert rows(Plan.load("plan-trips.json")) == [[(1, 3), (2, 3)], [(3, 3), (1, 3)]]
 
 
 def test_a_profile_in_another_order_is_not_another_profile(site):

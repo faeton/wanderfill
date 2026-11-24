@@ -1544,14 +1544,11 @@ def _print_trips(m) -> None:
         print(f"  {r.gap_days:>4}{r.runs:>7}{r.suggested:>16}{r.held:>7}"
               + ("  (this list)" if r.gap_days == p["gap_days"] else ""))
 
-    dated = [t for t in m.trips if t["date_from"] or t["date_to"]]
     print(f"\ntrips on the profile that can be over these days: {len(m.trips)}")
-    for t in dated:
+    for t in m.trips:
         words = f": {one_line(t['description'])}" if t["description"] else ""
         print(one_line(f"  trip {t['id']}, {t['date_from'] or 'no date'} to "
                        f"{t['date_to'] or 'no date'}{words}"))
-    if undated := len(m.trips) - len(dated):
-        print(f"  {undated} more with no dates")
     cov = m.coverage
     print(f"\nmap tiles: {cov['tiles_read']:,} read, {cov['tiles_unread']:,} not read")
     if cov["tiles_unread"] or cov["unread_photos"]:
@@ -2290,8 +2287,8 @@ def _trips_parser(sub) -> None:
     r.add_argument("--until", type=_day_arg, metavar="DATE",
                    help="YYYY-MM-DD, the last day. A stay that ended after it is held")
     r.add_argument("--gap-days", type=_gap_arg, default=2, metavar="N",
-                   help="a stay goes on over fewer than N days with no photo in a row "
-                        "(default: 2)")
+                   help="with 1, every day with no photo ends a stay; with 2, one such day does "
+                        "not; with N, up to N-1 in a row do not (default: 2)")
     r.add_argument("--fast-kmh", type=_kmh_arg, metavar="N",
                    help="over this a photo is in the air (default: 150)")
     r.add_argument("--spans", metavar="FILE",

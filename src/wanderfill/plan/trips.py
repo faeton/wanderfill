@@ -68,6 +68,7 @@ _LAYOVER = dt.timedelta(hours=24)
 _FAST_NEAR = dt.timedelta(hours=6)
 _CLOCKS_APART = 12 * 3600
 _NIGHT = dt.timedelta(hours=2)
+_UNDATED = 3  # so many are named
 
 
 def kind_of(text: str) -> str:
@@ -494,6 +495,34 @@ def _against_visit(ix: _Index, run: Run, v: Visit) -> str | None:
     return None
 
 
+def _against_visits(ix: _Index, run: Run, visits: Iterable[Visit]) -> list[str]:
+    """The reasons of all the region's visits, as few as say the same.
+
+    Every overlap. The first three undated visits by id, and how many more there are. And
+    the nearest continuation before the run and after it, by the nearest day each can be: if
+    no photo shows that the owner left since that one, the farther ones add nothing. What is
+    left out is of a kind that is there, so the status is the same.
+    """
+    by_kind: dict[str, list[tuple[Visit, str]]] = defaultdict(list)
+    for v in visits:
+        if why := _against_visit(ix, run, v):
+            by_kind[kind_of(why)].append((v, why))
+    if there := by_kind["there"]:
+        return [why for _, why in there]
+    out = [why for _, why in by_kind["overlap"]]
+    undated = sorted(by_kind["undated"], key=lambda e: e[0].id)
+    out += [why for _, why in undated[:_UNDATED]]
+    if (more := len(undated) - _UNDATED) > 0:
+        out.append(f"undated: and {more} more visit{'s' * (more > 1)} with no full dates")
+    sides: dict[bool, list[tuple[int, int, str]]] = {True: [], False: []}
+    for v, why in by_kind["continuation"]:
+        dates = _Dates.of(v)
+        before = dates.hi < run.first
+        away = run.first - dates.hi if before else dates.lo - run.last
+        sides[before].append((away.days, v.id, why))
+    return out + [min(side)[2] for side in sides.values() if side]
+
+
 # -- judging ------------------------------------------------------------------------------
 
 
@@ -574,10 +603,8 @@ def judge(
 
     out = []
     for run in chosen:
-        said = [_against_visit(ix, run, v) for v in visits[run.region]]
-        reasons = [s for s in said if s and kind_of(s) == "there"]
-        if not reasons:
-            reasons = [s for s in said if s]
+        reasons = _against_visits(ix, run, visits[run.region])
+        if "there" not in map(kind_of, reasons):
             reasons += [f"continuation: no photo shows that you left between it and run {r.id}"
                         for r in half_of[run.id]]
             reasons += _own_reasons(ix, run, since, until)
@@ -851,7 +878,8 @@ def group(
             first = once.setdefault(row.run.region, row.run)
             if first is not row.run:
                 holds.append(f"a trip has a region once, and {first.id} and {row.run.id} are of "
-                             "one region; cut between them")
+                             'one region; press "A new trip starts here" somewhere between the '
+                             "two")
         if holds:
             not_made.append(NotMade(tuple(r.id for r in members), tuple(holds)))
         elif rows:

@@ -521,6 +521,83 @@ def test_no_visit_at_all_is_offered():
     assert held_by([]) == ("offered", set())
 
 
+def why(*visits):
+    return list(one(settled(), {R: list(visits)}).reasons)
+
+
+def test_only_the_nearest_continuation_on_each_side_is_named():
+    """If no photo shows that you left since the nearest, the farther ones say no more."""
+    before = [visit(d, d, id=d) for d in (6, 8, 7, 9, 5)]
+    after = [visit(d, d + 1, id=d) for d in (18, 15, 17)]
+    for rows in (before + after, (before + after)[::-1]):
+        got = why(*rows)
+        assert len(got) == 2 and "visit 9," in got[0] and "visit 15," in got[1]
+        assert all(g.startswith("continuation: no photo shows") for g in got)
+    assert len(why(*before)) == len(why(*after)) == 1
+    # The nearest that is one: Q is seen on the 2nd to the 4th, so the 1st is another visit.
+    assert why(visit(1, 1, id=1), visit(6, 6, id=2)) == why(visit(6, 6, id=2))
+    # By the day that it can be; and of two that are as near, the first id.
+    obs = [*stay(R, 10, 14), *stay(Q, 20, 22)]
+    part = visit(2024, None, id=4)
+    assert "undated" in kinds(one(obs, {R: [part]}))  # an open end can be a day of the run
+    old, older = visit(2025, 2025, id=5), visit(day(1, year=2024), 2025, id=6)
+    far = visit(day(1, 12, 2025), day(5, 12, 2025), id=1)
+    for rows in ([far, old, older], [older, old, far]):
+        (got,) = [r for r in one(obs, {R: rows}).reasons if kind_of(r) == "continuation"]
+        assert "visit 5," in got
+    late = [visit(2027, 2028, id=9), visit(day(2, 1, 2027), day(3, 1, 2027), id=8),
+            visit(2027, 2027, id=7)]
+    obs = [*stay(Q, 2, 4), *stay(R, 10, 14)]
+    for rows in (late, late[::-1]):
+        (got,) = [r for r in one(obs, {R: rows}).reasons if kind_of(r) == "continuation"]
+        assert "visit 7," in got
+
+
+def test_a_continuation_with_a_run_is_named_beside_one_with_a_visit():
+    obs = [*stay(Q, 1, 1), *stay(R, 3, 4), *stay(R, 10, 14), *stay(Q, 20, 22)]
+    runs = judged(obs, {R: [visit(8, 8)]})
+    (late,) = [r for r in runs if r.region == R and r.first == day(10)]
+    assert len(late.reasons) == 2 and "run 1:" in late.reasons[1]
+
+
+def test_more_than_three_undated_visits_are_counted():
+    rows = [visit(None, None, id=n) for n in (9, 3, 7, 5, 1)]
+    for n, want in ((1, ""), (3, ""), (4, "undated: and 1 more visit with no full dates"),
+                    (5, "undated: and 2 more visits with no full dates")):
+        some = sorted(rows, key=lambda v: v.id)[:n]
+        for given in (some, some[::-1]):
+            got = why(*given)
+            assert got[:3] == [f"undated: may be visit {v.id}, with no dates" for v in some[:3]]
+            assert got[3:] == ([want] if want else [])
+            assert held_by(given) == ("held", {"undated"})
+
+
+def test_fewer_reasons_never_make_another_status():
+    """Against a reason for every visit, as it was."""
+    rng = random.Random(8)
+    ends = [None, 2025, 2026, 2027, *range(1, 32)]
+    seen = set()
+    for _ in range(1500):
+        rows = []
+        for n in range(rng.randrange(8)):
+            a, b = rng.choice(ends), rng.choice(ends)
+            if isinstance(a, int) and isinstance(b, int) and (a > 31) is (b > 31):
+                a, b = sorted((a, b))
+            rows.append(visit(a, b, id=n))
+        obs = [ob(d, Q) for d in rng.sample(range(1, 31), 4) if not 10 <= d <= 14] + stay(R, 10, 14)
+        (run,) = [r for r in judged(obs, {R: rows}) if r.region == R and r.first == day(10)]
+        ix = trips._Index(obs)
+        old = [x for x in (trips._against_visit(ix, run, v) for v in rows) if x]
+        was = {kind_of(x) for x in old}
+        now = kinds(run) - {"open", "brief"}
+        assert now == ({"there"} if "there" in was else was)
+        assert run.status == status_of([*old, *(x for x in run.reasons if kind_of(x) == "open")])
+        assert {x for x in run.reasons if "more visit" not in x} <= {*old, *(
+            x for x in run.reasons if kind_of(x) == "open")}
+        seen.add(run.status)
+    assert seen == {"there", "fixed", "held", "offered"}
+
+
 def test_equal_full_dates_are_there():
     run = one(settled(), {R: [visit(10, 14, id=7123)]})
     assert run.status == "there" and "7123" in run.reasons[0]
@@ -531,7 +608,8 @@ def test_there_wins_over_all():
     rows = [visit(None, None, id=1), visit(10, 14, id=2), visit(12, 20, id=3)]
     for v in (rows, rows[::-1]):
         assert held_by(v) == ("there", {"there"})
-    assert one(stay(R, 10, 14), {R: [visit(10, 14)]}, since=day(12)).status == "there"
+    run = one(stay(R, 10, 14), {R: [visit(10, 14)]}, since=day(12))  # open, and across
+    assert (run.status, kinds(run)) == ("there", {"there"})
 
 
 @pytest.mark.parametrize("a, b", [(10, 13), (11, 14), (14, 14), (10, 10), (1, 10), (14, 30),
@@ -2036,6 +2114,12 @@ def page_data(m):
     return json.loads(embedded(render_page(m)))
 
 
+def cut_label():
+    """The button of the page that cuts."""
+    (label,) = re.findall(r'cut: "(A [^"]+)"', render_page(small()))
+    return label
+
+
 GROUP = "return cases.map(([data, answers]) => logic.group(data, answers));"
 
 
@@ -2047,7 +2131,8 @@ def test_the_page_groups_by_every_rule_of_group(tmp_path):
         assert page == as_text(*group(m.runs, m.boundaries, ans))
     said = " ".join(r for g in got for n in g["notMade"] for r in n["reasons"])
     for rule in ("it is not answered whether a new trip starts", "is not answered", "question mark",
-                 "needs words of yours", "cut between them"):
+                 "needs words of yours",
+                 f'press "{cut_label()}" somewhere between the two'):
         assert rule in said, rule
 
 
@@ -2877,6 +2962,10 @@ def test_every_reason_and_flag_is_said_in_plain_words(tmp_path):
         "brief: one photo": "one photo",
         "layover?: under 24 hours, with a fast photo before it and after it": "change of planes",
         "undated: may be visit 7, with no dates": "visit 7, with no dates",
+        "undated: and 22 more visits with no full dates":
+            "And 22 more visits on your profile that have no full dates may be it.",
+        "undated: and 1 more visit with no full dates":
+            "And 1 more visit on your profile that has no full dates may be it.",
         "overlap: shares a day with visit 7, 2026-05-10 to 2026-05-11": "It shares a day with",
         f"continuation: no photo shows that you left between it and run {R_ID}":
             "the photos in Aldmoor (1), 2026-05-01 to 2026-05-03",

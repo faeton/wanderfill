@@ -393,7 +393,8 @@ const Trips = (() => {
           once.set(run.region, run);
         } else {
           holds.push("a trip has a region once, and " + idOf(once.get(run.region)) + " and " +
-            idOf(run) + " are of one region; cut between them");
+            idOf(run) + ' are of one region; press "' + CUT_WORDS.cut +
+            '" somewhere between the two');
         }
       }
       if (holds.length) {
@@ -436,8 +437,11 @@ const Trips = (() => {
     brief: (d) => "Very short: " + d + ".",
     "layover?": () => "It may be a change of planes: under 24 hours, with a photo at travel speed " +
       "before it and after it.",
-    undated: (d) => "It may be a visit on your profile that has no full dates: " +
-      d.replace(/^may be /, "") + ".",
+    undated: (d) => (/^and \d+ more/.test(d)
+      ? cap(d).replace(/^(And 1 more visit) with/, "$1 on your profile that has")
+        .replace(/^(And \d+ more visits) with/, "$1 on your profile that have") + " may be it."
+      : "It may be a visit on your profile that has no full dates: " +
+        d.replace(/^may be /, "") + "."),
     overlap: (d) => "It shares a day with a visit on your profile: " +
       d.replace(/^shares a day with /, "") + ".",
     continuation: (d, data) => cap(named(data, d.replace(/\brun (?=-?\d+:)/, "the photos in "))) + ".",

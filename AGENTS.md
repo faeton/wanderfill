@@ -345,7 +345,7 @@ and no others.
    One kind, trips, and one approval (rule 5). It prints how many regions will be marked
    and how many visits will only be stored: say both before the yes. A refusal (another
    account, another list, a visit or a trip over the same days that is not as the list
-   shows it) means a new `review`, not a repair of the files. It refuses more than 50
+   shows it; a trip with no dates is over no day and refuses nothing) means a new `review`, not a repair of the files. It refuses more than 50
    region visits; `--max-rows` is the owner's to say.
 
 A run is days of photos strictly inside one region, taken on the ground by the owner's
@@ -377,8 +377,12 @@ say. What nothing releases goes on by hand, or waits.
 over, and not because the trip would look better with it: a stay that is extended later
 leaves its trip's header behind (above). A layover is theirs to judge: some count one,
 most do not. Do not cut or join anything for them either: where a new trip starts is
-asked on the page. A region can be in one trip only once; the page says where, and they
-cut.
+asked on the page.
+
+**A region is in a trip once.** A journey through one hub (A, B, A) is not made until the
+owner presses "A new trip starts here" somewhere between the two stays in A, also where
+nothing suggests a cut. The owner picks where; do not pick it for them, and do not
+propose a place.
 
 `--gap-days`, `--fast-kmh`, `--spans` and `--until` are theirs to choose, as for series.
 With a larger gap more days without a photo are inside a stay, and the gap table says

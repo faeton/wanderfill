@@ -565,11 +565,16 @@ One with a visit of exactly its days is greyed and left out. Between two runs th
 asks whether a new trip starts wherever something suggests it: a flight, days with nothing,
 a run that is on the profile.
 
+A trip can have a region once. A journey that comes back through a place, A, B and A
+again, has to be two trips: press "A new trip starts here" somewhere between the two
+stays in A. Any place between them will do, not only a suggested one, and you pick it.
+Until you do, the trip is not made, and the page says which two stays it is about.
+
 | flag | what it does |
 |---|---|
 | `--since`, `--until` | the first and the last day, by the photo's own clock |
 | `--track FILE...` or `--no-track` | one of them is needed. A row of a track proves no day; on a day with no photo, in another region, it ends a run |
-| `--gap-days N` | a run goes on over fewer than N days with no photo in a row; 2 unless you say. A table shows the other settings |
+| `--gap-days N` | with 1, every day with no photo ends a run; with 2, one such day does not; with N, up to N-1 in a row do not. 2 unless you say. A table shows the other settings |
 | `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
 | `--spans FILE` | stretches that prove nothing, as for `series` |
 | `--library`, `--out` | another Photos library, another directory |
@@ -580,7 +585,9 @@ different coordinates (made-up photos, tiles already in memory).
 
 **`plan`** takes the list and the answers, and reads the profile again. If a visit of a
 region on the list, or a trip over the same days, is not what the list shows, there is no
-plan: run `review` again. It writes `plan-trips.json`, or `--plan FILE`, and never
+plan: run `review` again. A trip with no dates at all is over no day: it is not on the
+page and refuses nothing, and the visits in it are read with those of their regions. It
+writes `plan-trips.json`, or `--plan FILE`, and never
 replaces a file. It says how many regions will be marked and how many visits will be
 stored and mark nothing (a transit does not mark a region), and refuses more than 50
 region visits unless `--max-rows` says more. Then `show -v`, `check` and `apply`, as for
