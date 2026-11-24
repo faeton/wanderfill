@@ -461,7 +461,7 @@ def test_a_frozen_run_before_a_jump_is_fast_every_photo_of_it(lat, lon):
     before = photo(lat - 200 * KM, lon, -20)
     assert kinds(before, *frozen) == ["fast"] * 13
     # 100 km in 50 minutes since the last photo, not in the 2 h 45 since the first.
-    assert kinds(*frozen, photo(lat + 120 * KM, lon, 15 * 11 + 50)) == ["fast"] * 13
+    assert kinds(*frozen, photo(lat + 130 * KM, lon, 15 * 11 + 50)) == ["fast"] * 13
     assert kinds(*frozen) == ["ground"] * 12
 
 
@@ -524,9 +524,14 @@ def test_a_photo_without_utc_time_is_never_ground_and_breaks_no_leg():
 # ------------------------------------------------------------------ decision 4: impossible photos
 
 
+def test_fast_is_over_150_km_h():
+    assert kinds(photo(10.0, 20.0, 0), photo(10.0 + 149 * KM, 20.0, 60)) == ["ground"] * 2
+    assert kinds(photo(10.0, 20.0, 0), photo(10.0 + 151 * KM, 20.0, 60)) == ["fast"] * 2
+
+
 def test_an_impossible_leg_is_a_conflict_at_both_ends_and_outranks_fast():
     a, b = photo(10.0, 20.0, 0), photo(10.001, 20.0, 10)
-    c, d = photo(15.0, 20.0, 20), photo(15.5, 20.0, 45)
+    c, d = photo(15.0, 20.0, 20), photo(15.5, 20.0, 40)
     assert kinds(a, b, c, d) == ["conflict", "conflict", "conflict", "fast"]
     early = photo(10.002, 20.0, -600)
     assert kinds(early, b, c, d) == ["ground", "conflict", "conflict", "fast"]
@@ -1023,7 +1028,7 @@ def candidate(item=1, series=22, **kw):
 PARAMS = {
     "since": "2026-05-01", "until": "2026-05-31", "radius_km": 2.0, "origins": ["own-camera"],
     "skip": [-2, 12, 17, 60],
-    "speeds": {"fast_kmh": 120.0, "min_leg_km": 1.0, "impossible_kmh": 1200.0,
+    "speeds": {"fast_kmh": 150.0, "min_leg_km": 1.0, "impossible_kmh": 1200.0,
                "impossible_km": 100.0, "burst_minutes": 10.0},
 }
 RECALL = {22: {"ticked": 4, "located": 3, "found": {0.2: 1, 2.0: 2}, "no_photo": [7, 9]}}
@@ -2395,7 +2400,7 @@ def test_the_header_says_what_was_read_and_what_was_left_out(tmp_path):
     for words in ("Account 1", "2026-05-01", "2026-05-31", "2 km", "your own camera",
                   m.sha256[:12], "6 items", "12 map tiles"):
         assert words in got[0], words
-    for words in ("5 photos taken at travel speed, over 120 km/h", "2 photos beside an impossible",
+    for words in ("5 photos taken at travel speed, over 150 km/h", "2 photos beside an impossible",
                   "3 photos in a stretch", "1 photo in a layover", "6 photos with no absolute",
                   "4 photos taken after 2026-05-31", "8 photos from another origin",
                   "31 things of series 12", "never offered: -2, 12, 17, 60"):

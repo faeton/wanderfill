@@ -1,6 +1,6 @@
 # `wanderfill trips`: photos to a trip plan
 
-Status: design, 2026-11-24. The owner answered questions 1, 2, 4 and 6 as recommended; 3 and 5 are open. The answers settle the design only: building it needs a separate yes.
+Status: design, 2026-11-24. The owner answered questions 1, 2, 4 and 6 as recommended, and 3 with 150 km/h; 5 is open. The answers settle the design only: building it needs a separate yes.
 File and line numbers are of commit `41dbf15`, under `src/wanderfill/`.
 
 ## Purpose
@@ -47,7 +47,7 @@ Status: **R** is a recommendation that follows from the rules or the code. **Qn*
 | 3 | First visits and repeats | Every new run of a journey goes into one `create_trip`, first visit or not. `add_visit` is not used, for a one-region journey either | Totals inflate only when a trip repeats a visit that exists; decision 6 holds those. And `add_visit` is not standalone: the server wraps it in its own trip (`api/client.py:727-730`, `plan/apply.py:1052-1056`), so the split leaves one phantom trip per first visit and a real trip without them | If a duplicate slips through, one region counts twice; `verify` reports it | Q2 |
 | 3a | If Q2 is answered "split" | Two plan files, the second built after the first is applied | One approval per kind (rule 5). Applying the first marks regions, and the fingerprint covers all marked ids (`plan/model.py:218-221`) | An extra round | R |
 | 4 | Where a trip is cut | At runs, never inside one. The tool only proposes cuts, with the fact: `fast leg` (over 200 km/h, `grade.FAST_KMH`, between the last ground shot of one run and the first of the next), `silence` (over `gap_days`), `home` (stated), `long` (over 30 days). The owner answers cut or same; blank holds both sides. Places with no proposal between them are one trip | Segmentation has no right answer (AGENTS 5). A cut by day count inside a stay writes two visits for one | A wrong cut makes two trips of one; no region or date changes | R |
-| 4a | Ground speed for proof | 120 km/h, as in series review; `--fast-kmh` raises it, and it is in the manifest | One rule for both reviews. A landing aircraft must not pass | Photos from a motorway or a fast train are not proof; a region seen only from them is held | Q3 |
+| 4a | Ground speed for proof | 150 km/h, as in series review; `--fast-kmh` changes it, and it is in the manifest | One rule for both reviews. A landing aircraft must not pass | Photos from a motorway or a fast train are not proof; a region seen only from them is held | Q3 |
 | 4b | Layovers | A ground shot in an `airports` span is no proof of a region. A run under 24 h with fast shots or a fast leg on both sides, and no span, is flagged `layover?`. Both are in the held list with the facts, not answerable | `airports` means "in the airport and nowhere else" (`plan/review.py:72-75`). Whether an airside stop is a visit is the owner's call (AGENTS 6: hold, not reject, not mark) | A real short stay between two flights is not offered until the owner lists it in `--stays`, or takes the span out | Q4 |
 | 5 | Finished stay | Finished when an own-camera ground shot is strictly inside another region, with `use` `all`, dated more than `gap_days` after the run's last day. Otherwise `open`, and held until the owner types in their own words that it is over. A trip is planned only when all its runs are finished | After that date a return starts a new run, so this run can no longer grow. A day trip, or a phone that has not synced, does not finish a stay. A stay extended later leaves a stale header that only `sync-header`, a delete and recreate, fixes | Too strict: the newest trip waits. Too loose: every id in the trip changes later | Q5 |
 | 6 | Existing visits, `trip_id` ignored, every row | Same full dates: dropped, named. Any shared day, or within `gap_days` of the run: held, with the visit id. Year-only or one-ended and its years include the run, or no date: held until the owner answers "a different visit". Same against other runs in the plan | `doubles` compares only equal full dates (`plan/apply.py:357`), so overlaps are the planner's work. An undated record may be this very visit | Too loose: a duplicate. Too strict: a repeat visit waits for one answer | R |
@@ -141,11 +141,11 @@ Answers file: format, account, manifest sha256, and by stable id: run (`1`..`6`,
 
 S is under half a day, M a day, L two days.
 
-## For the owner to decide (1, 2, 4 and 6 answered as recommended)
+## For the owner to decide (1, 2, 4 and 6 as recommended, 3 with 150 km/h; 5 is open)
 
 1. **Gap.** (answered: as recommended) May one silent day inside a region join two photo days? Recommended: yes, `gap_days` 2; the table shows 1, 2, 3, 5 before any answer.
 2. **First visits.** (answered: as recommended) One trip with every new region, or first visits apart and only repeats in trips (the rule AGENTS 5 has now for backfills)? Recommended: one trip, only for regions with no possibly overlapping visit; keep the split for backfills over existing standalone visits.
-3. **Ground speed for proof.** (open) 120 km/h as in series review, or 200 km/h as in `grade.py`? Recommended: 120, raised per run of the command for rail or motorway trips.
+3. **Ground speed for proof.** (answered: 150 km/h) Over it a photo is taken to be in the air; under it it can be anything. Changed per run of the command for fast trains.
 4. **Layovers.** (answered: as recommended) Held and not answerable, or answerable with a quality? Recommended: held; a real visit is listed in `--stays` in the owner's words.
 5. **Owner's word that a stay is over.** (open) Typed text, or a button? Recommended: typed text, kept as `memory` proof; dates stay the photo days.
 6. **Quality in bulk.** (answered: as recommended) One choice per run only, or also "same for this trip"? Recommended: per run only; look again after the first real use.

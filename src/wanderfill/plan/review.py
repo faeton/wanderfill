@@ -200,7 +200,7 @@ def grade_shots(
     spans: Sequence[Span],
     *,
     until: dt.date | None = None,
-    fast_kmh: float = 120.0,
+    fast_kmh: float = 150.0,
     min_leg_km: float = 1.0,
     impossible_kmh: float = 1200.0,
     impossible_km: float = 100.0,
