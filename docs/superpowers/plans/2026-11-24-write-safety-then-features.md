@@ -72,7 +72,7 @@
   - `test_a_delete_whose_readback_errors_stays_open`: `delete-visit` answers OK, the next `get-visits-to-region` is an `ERROR` reply; `delete_visit` raises `VerificationFailed`. Parametrize over all five undo methods.
 - [ ] Run `.venv/bin/pytest -q tests/test_quirks.py`; expect the new tests to fail.
 - [ ] **Implement:**
-  - `_post`: for non-idempotent calls, HTTP >= 500 or 408 raises `UnknownWriteOutcome`; other HTTP errors keep `TransportError`.
+  - `_post`: for non-idempotent calls, HTTP >= 500, 408 or any 3xx raises `UnknownWriteOutcome`, and no redirect is followed; other HTTP errors keep `TransportError`. (Redirects added after Codex's review: a captive portal's answer passed for the server's.)
   - `webapi` and `ajax_json`: for a write, undecodable or non-object JSON raises `UnknownWriteOutcome`.
   - `_execute`: a non-OK toggle raises `UnknownWriteOutcome`.
   - `apply_plan` closes an entry with an error only for `PrecisionLoss`, `AuthError`, `TransportError` and `ApiError` that is not `VerificationFailed`. Everything else re-raises with the entry open.
@@ -154,14 +154,21 @@ GOLDEN = {
 - `NomadMania.series_ticked(series_id: int) -> set[int]` and `kye_ticked() -> set[int]`: strict; `VerificationFailed` if the list is missing.
 - `ticked_before(client, ops) -> dict[tuple[str, int], set[int]]` in `plan/apply.py`; keys `("series", id)`, `("kye", 0)`, `("dare", 0)`, `("tcc", 0)`; one read per key.
 - `ApplyReport.already: list[str]`.
+- `doubles(snapshot: dict, ops: Sequence[Op]) -> list[str]` in `plan/apply.py`: one line per `add_visit` or `create_trip` region whose full dates equal a visit already in the snapshot for that region, or another op's for that region. `apply_plan` raises `DriftError` before any write; `check` lists each as a blocker.
+
+Why the last one: Task 4's review showed that a plan rebuilt after its trip landed carries that trip in its own basis, so neither the journal nor drift stops a second copy; `verify` only reports it afterwards. Undated and year-only visits are not compared: two real visits can share them. A trip region without its own dates is compared by the trip's header.
 
 - [ ] **Tests:**
+  - `test_a_rebuilt_plan_does_not_send_a_trip_that_is_already_there`: nothing sent, for `create_trip` and for `add_visit`, and the same for a trip-owned existing visit.
+  - `test_two_ops_for_one_region_and_dates_are_refused`: an add and a trip region, and two trips.
+  - `test_the_double_guard_ignores_undated_year_only_and_overlapping_visits`.
+  - `test_an_update_visit_is_not_a_double_of_itself`.
   - `test_snapshot_refuses_a_reply_without_its_list`: for visited regions, DARE and one region's visits; no write follows.
   - `test_apply_skips_an_item_that_is_already_ticked`: no toggle sent, label in `report.already`, nothing journalled. The same for KYE, DARE and TCC.
   - `test_a_tick_only_plan_does_not_read_every_region`: zero `get-visits-to-region` calls.
   - `test_the_snapshot_file_keeps_the_ticks_it_is_about_to_change`.
   - `test_a_fingerprint_made_before_this_change_still_matches`: `{"visited_regions": [5, 6], "visited_dare": [7], "visits": {"5": [{"id": 1, "date_from": "2026-01-01", "date_to": "2026-01-02", "quality": 3}]}}` with `[5]` gives `091eb3c2162171bedddce8c38be944a1`.
-- [ ] Run; expect failures. **Implement.** `snapshot` uses `visited_region_ids(strict=True)`, `_dare_strict`, `_visits_strict`. `apply_plan` and `cmd_check` pass `regions` rather than `regions or None`. `basis_of` is unchanged.
+- [ ] Run; expect failures. **Implement.** `snapshot` uses `visited_region_ids(strict=True)`, `_dare_strict`, `_visits_strict`. `apply_plan` and `cmd_check` pass `regions` rather than `regions or None`. `basis_of` is unchanged. `ticked_before` takes DARE and TCC from the snapshot, which has just read them strictly, and reads only series and KYE.
 - [ ] Full suite, ruff, README row. Commit `apply: a missing list is not an empty profile`.
 
 ## Task 6: verify everything that landed, once, and say so in the exit code
