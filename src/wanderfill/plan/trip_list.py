@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 from .. import evidence
-from ..api.client import MARKS_REGION_FROM, QUALITY, Visit
+from ..api.client import MARKS_REGION_FROM, QUALITY, Visit, When
 from ..api.client import _whole as _live_id
 from ..api.errors import PlanInvalid
 from ..sources.photos_app import PhotoAsset
@@ -536,16 +536,24 @@ def _trip_of(row: object, what: str) -> dict:
     return out
 
 
-def _trip_end(text: str | None) -> tuple[dt.date, dt.date]:
+def _trip_end(text: str | None) -> When | None:
+    """An end of a trip's header; one that cannot be read is none."""
     try:
-        return _ends(parse_when(text))
-    except ValueError:  # no date that can be read, so any
-        return _ends(None)
+        return parse_when(text)
+    except ValueError:
+        return None
 
 
 def _over(trip: Mapping, run: AnyRun) -> bool:
-    """Whether a trip can have a day of the run. An end that does not say is taken for open."""
-    (a, b), (c, d) = _trip_end(trip["date_from"]), _trip_end(trip["date_to"])
+    """Whether a trip can have a day of the run.
+
+    An end that does not say is taken for open, but a header with no date that can be read is
+    over no day: there are many, and they would be over every run.
+    """
+    ends = [_trip_end(trip[k]) for k in ("date_from", "date_to")]
+    if ends == [None, None]:
+        return False
+    (a, b), (c, d) = map(_ends, ends)
     lo, hi = (a, d) if a <= d else (c, b)
     return lo <= run.last and run.first <= hi
 
@@ -554,7 +562,8 @@ def trips_rows(trips: Iterable[Mapping], runs: Iterable[AnyRun]) -> list[dict]:
     """The headers of the trips over the days of ``runs``, as :attr:`TripList.trips` has them.
 
     ``trips`` are rows of ``trips/get-trips-for-year-app``, of all the years that the runs
-    are in. One that is listed under two years is there once.
+    are in. One that is listed under two years is there once, and one with no dates is not
+    there: the visits in it are seen with those of their regions.
     """
     runs = list(runs)
     out: dict[int, dict] = {}
@@ -679,6 +688,8 @@ def render_page(trip_list: TripList) -> str:
         "controls": sorted(_CONTROLS),
         "refused": _NOT_IN_WORDS,
         "blank": SAYS_NOTHING,
+        "over": {run.id: [n for n, trip in enumerate(trip_list.trips) if _over(trip, run)]
+                 for run in trip_list.runs},
     }
     template = files(__package__).joinpath("trips_page.html").read_text(encoding="utf-8")
     before, after = template.split(_DATA)  # exactly one, or this is another template

@@ -1566,10 +1566,28 @@ def test_trip_headers_over_the_same_days():
     assert over("2026-05-05", "2026-05-09") and over("2026-04-01", "2026-05-01")
     assert not over("2026-05-06", "2026-05-09") and not over("2026-04-01", "2026-04-30")
     # An end that is not there, or is a year, or cannot be read, is not shown to be apart.
-    assert over(None, None) and over("2026-05-09", None) is False and over(None, "2026-05-02")
-    assert over("2026", "2026") and not over("2025", "2025") and over("soon", "never")
+    assert over("2026-05-01", None) and over("2026-05-09", None) is False
+    assert over(None, "2026-05-02") and over(None, "2026-04-30") is False
+    assert over("2026", "2026") and not over("2025", "2025")
+    assert over("soon", "2026-05-02") and over("2026-05-03", "0000-00-00")
+    assert not over("soon", "2026-04-30")
     assert over("2026-05-09", "2026-05-02")  # the wrong way round
-    assert trips_rows([], runs) == [] and trips_rows([header(None, None)], []) == []
+    assert trips_rows([], runs) == trips_rows([header("2026-05-01", "2026-05-02")], []) == []
+
+
+def test_a_trip_header_with_no_date_at_all_is_over_no_day(tmp_path):
+    """There are many, and a visit inside one is judged with the visits of its region."""
+    runs = small().runs
+    bare = [header(None, None), header("", None), header(None, ""), header("", ""), {"id": 7},
+            header("0000-00-00", "0000-00-00"), header("soon", "never"), header(None, "soon"),
+            header("2026-02-31", "0")]
+    for raw in bare:
+        assert trips_rows([raw], runs) == []
+    assert trips_rows([*bare, TRIP], runs) == [TRIP] == small(trips=[*bare, TRIP]).trips
+    raw = json.loads(small().to_json())
+    for a, b in ((None, None), ("", ""), ("0000-00-00", "soon")):
+        with pytest.raises(PlanInvalid, match="over none of these days"):
+            reload(tmp_path, rehashed(put(raw, "trips.0", header(a, b))))
 
 
 def test_live_trips_in_the_form_of_the_list():
@@ -1578,8 +1596,8 @@ def test_live_trips_in_the_form_of_the_list():
         "date_from", "date_to", "description")}
     assert trips_rows([live], runs) == [TRIP]
     assert trips_rows([live, dict(live)], runs) == [TRIP]  # listed under two years
-    assert trips_rows([{"id": 7}], runs) == [
-        {"id": 7, "date_from": None, "date_to": None, "description": None}]
+    assert trips_rows([{"id": 7, "date_to": "2026-05-04"}], runs) == [
+        {"id": 7, "date_from": None, "date_to": "2026-05-04", "description": None}]
     for bad in ([live, live | {"date_to": "2026-05-09"}], [{"date_from": None}], ["x"], [5],
                 [live | {"id": True}], [live | {"date_from": 5}], [live | {"description": 5}]):
         with pytest.raises(PlanInvalid):
@@ -2267,7 +2285,9 @@ def test_answers_of_another_list_are_not_this_lists(tmp_path):
 @needs_node
 @pytest.mark.parametrize("key, junk", [
     *((f"run:{R_ID}", j) for j in ("0", "7", "", " 3", "y", "null", '"3"', "__proto__", "12")),
-    (f"run:{S_ID}", "3"), (f"run:{S_ID}", "?"), (f"cut:{CUT_RQ}", "join"), (f"cut:{CUT_RQ}", ""),
+    (f"run:{S_ID}", "3"), (f"run:{S_ID}", "?"),
+    *((f"cut:{CUT_RQ}", j) for j in ("join", "", "__proto__", "toString", "constructor")),
+    *((f"run:{R_ID}", j) for j in ("toString", "constructor", "length")),
 ])
 def test_a_stored_value_that_is_no_answer_is_not_used_and_said(tmp_path, key, junk):
     m = listed(visits=MIXED)
@@ -2418,6 +2438,128 @@ def test_two_tabs_at_once_on_two_answers_both_count(tmp_path):
     assert len(rows) >= 12 and {r[0] for r in rows} == {0, 1, 2}
     for which, a, b, again, kept in rows:
         assert a == b == again == wanted[which] and "not being kept" not in kept
+
+
+ANSWERS_OF = {
+    "run": (f"run:{R_ID}", "no", "3", """
+      (p, v) => p.press(p.run("Aldmoor"), {no: "Leave it out", 3: "3 good visit",
+                                           "": "Clear this answer"}[v])"""),
+    "words": (f"words:{Q_ID}", "as a child", "last year", '(p, v) => p.type(p.run("Berrow"), v)'),
+    "cut": (f"cut:{CUT_49}", "same", "cut", """
+      (p, v) => p.press(p.betweens()[3], {same: "Same trip", cut: "A new trip starts here",
+                                          "": "Clear this answer"}[v])"""),
+}
+PUT = """
+  const value = (p) => {
+    p.byId.download.click();
+    return read(p.blobs[p.blobs.length - 1].text);
+  };
+  const read = (text) => {
+    const { runs, cuts } = JSON.parse(text);
+    const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
+    if (kind === "cut") return cuts[id] || null;
+    return (runs[id] || {})[kind === "run" ? "a" : "words"] || null;
+  };
+"""
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ANSWERS_OF)
+@pytest.mark.parametrize("was, mine, theirs", [
+    ("old", "new", "old"), ("", "new", ""), ("old", "", "old"), ("old", "new", ""),
+    ("", "new", "old"),
+], ids=str)
+def test_what_another_tab_answers_after_this_one_wins(tmp_path, kind, was, mine, theirs):
+    """B's whole press at each point of A's. Back to what it was is an answer as well."""
+    key, old, new, act = ANSWERS_OF[kind]
+    of = {"old": old, "new": new, "": ""}
+    m = listed(visits=MIXED)
+    (name,) = stored(m, key)
+    rows = run(tmp_path, m, f"const act = {act};" + PUT + """
+      const out = [];
+      for (let at = 0; at < 30; at += 1) {
+        const storage = new Storage();
+        if (was) storage.held.set(name, was);
+        const b = open({storage});
+        let n = -1, fired = false;
+        const a = open({storage: new View(storage, (op, when) => {
+          if (n >= 0 && n++ === at) { fired = true; act(b, theirs); }
+        })});
+        a.byId.show.click(); /* the text on the page is what it has, with no further look */
+        n = 0;
+        act(a, mine);
+        n = -1;
+        if (!fired) break;
+        out.push([a.byId.kept.textContent.includes("not being kept"), [...storage.held.keys()],
+                  read(a.byId.text.value), value(a), value(b), storage.held.get(name) || null]);
+      }
+      return out;
+    """, key=key, name=name, was=of[was], mine=of[mine], theirs=of[theirs])
+    assert len(rows) >= 4
+    for lost, names, _, a, b, now in rows:
+        assert not lost and names in ([], [name])  # nothing is left behind by the look
+        assert a == b == now
+    assert all(at_once == now for _, _, at_once, _, _, now in rows[:-1])  # then the event tells
+    assert {now for *_, now in rows} == {of[mine] or None, of[theirs] or None}
+
+
+@needs_node
+def test_another_answer_in_a_storage_with_no_room_left_wins_too(tmp_path):
+    (name,) = stored(m := listed(visits=MIXED), f"run:{R_ID}")
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      storage.held.set(name, "no");
+      storage.setItem = function (k, v) {
+        if (k !== name) throw new Error("full");
+        Storage.prototype.setItem.call(this, k, "5"); /* and another tab, at once */
+      };
+      const p = open({storage});
+      p.press(p.run("Aldmoor"), "3 good visit");
+      return [p.pressed(p.run("Aldmoor")), p.byId.kept.textContent.includes("not being kept")];
+    """, name=name)
+    assert got == [["5 lived here"], False]
+
+
+@needs_node
+def test_what_changes_while_the_storage_is_looked_at_is_seen(tmp_path):
+    """Another tab puts the old answer back, and then gives one more."""
+    (name,) = stored(m := listed(visits=MIXED), f"run:{R_ID}")
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      storage.held.set(name, "no");
+      storage.setItem = function (k, v) {
+        Storage.prototype.setItem.call(this, k, k === name ? "no" : v);
+        if (k !== name) this.held.set(name, "5");
+      };
+      const p = open({storage});
+      p.press(p.run("Aldmoor"), "3 good visit");
+      return [p.pressed(p.run("Aldmoor")), p.byId.kept.textContent.includes("not being kept")];
+    """, name=name)
+    assert got == [["5 lived here"], False]
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ANSWERS_OF)
+@pytest.mark.parametrize("was, mine", [("", "new"), ("old", "new"), ("old", "")], ids=str)
+def test_a_storage_that_drops_what_it_is_given_loses_no_answer(tmp_path, kind, was, mine):
+    key, old, new, act = ANSWERS_OF[kind]
+    of = {"old": old, "new": new, "": ""}
+    m = listed(visits=MIXED)
+    (name,) = stored(m, key)
+    for drops in (["setItem", "removeItem"], ["removeItem"] if mine == "" else ["setItem"]):
+        got = run(tmp_path, m, f"const act = {act};" + PUT + """
+          const storage = new Storage();
+          if (was) storage.held.set(name, was);
+          const p = open({storage});
+          for (const op of drops) storage[op] = () => {};
+          act(p, mine);
+          p.tell("storage", {});
+          const first = [value(p), p.byId.kept.textContent.includes("not being kept")];
+          for (const op of drops) delete storage[op];
+          act(p, mine);
+          return [...first, value(p), p.byId.kept.textContent.includes("not being kept")];
+        """, key=key, name=name, was=of[was], mine=of[mine], drops=drops)
+        assert got == [of[mine] or None, True, of[mine] or None, False]
 
 
 @needs_node
@@ -2617,13 +2759,115 @@ def test_a_run_shows_its_facts(tmp_path):
     for fact in ("Days with photos: 2026-05-01, 2026-05-03, 2026-05-05 to 2026-05-06",
                  "Days with no photo: 2026-05-02, 2026-05-04", "4 photos",
                  "First: 2026-05-01 09:30, clock UTC-3:30", "Last: 2026-05-06 20:00, clock UTC",
-                 "2013 to no date, 4 worked here, in trip 9",
+                 "2013 to no date, 4 worked here, in a trip",
                  "2026-05-25 to 2026-05-26, no visit",
-                 "hills", "2026-05-03 to 2026-05-04", "no date to 2026-05-01"):
+                 "2026-05-03 to 2026-05-04, hills", "no date to 2026-05-01"):
         assert fact in first, fact
     assert "Days with no photo" not in second and "hills" not in second
     assert "No visit to this region is on your profile" in second
-    assert "by the photo" not in first or "clock" in first
+    assert "No visit" not in first
+    boxes = run(tmp_path, m, "return open().runs().map((r) => r.cls('visits').length);")
+    assert boxes == [1, 0]
+
+
+READ_PARTS = """
+  return open().runs().map((r) => r.all((e) => e.tag === "details").map((d) => [
+    d.open, d.all((e) => e.tag === "summary")[0].textContent,
+    d.all((e) => e.tag === "li").map((e) => [e.textContent, e.getAttribute("dir")])]));
+"""
+
+
+@needs_node
+def test_the_visits_of_a_region_are_lines_in_a_closed_box_with_no_ids(tmp_path):
+    rows = [visit(dt.date(2000 + n, 3, 1), dt.date(2000 + n, 3, 2), id=7000 + n, trip_id=8000 + n)
+            for n in range(25)]
+    rows += [visit(None, None, id=6001), visit(2014, 2014, id=6002, quality=1)]
+    m = listed([*stay(R, 1, 3), ob(4, Q)], {R: rows[::-1], Q: [visit(None, None, Q, id=6003)]})
+    (first, second) = run(tmp_path, m, READ_PARTS)
+    ((is_open, title, lines),) = first
+    assert is_open is False and title == "27 visits of this region on your profile"
+    want = [f"{2000 + n}-03-01 to {2000 + n}-03-02, 3 good visit, in a trip" for n in range(25)]
+    want[14:14] = ["2014, 1 transit"]
+    assert lines == [[t, "auto"] for t in [*want, "no dates, 3 good visit"]]
+    assert second[0][1] == "1 visit of this region on your profile"
+    assert second[0][2] == [["no dates, 3 good visit", "auto"]]
+    # No id in the box; the visit that a reason names is named there.
+    texts = run(tmp_path, m, "return open().runs().map((r) => r.textContent);")
+    assert "8003" not in texts[0] and "visit 6001" in texts[0]
+
+
+@needs_node
+def test_trips_over_the_days_are_lines_and_in_a_box_when_there_are_many(tmp_path):
+    def several(n):
+        rows = [header("2026-05-02", f"2026-05-{2 + i:02}", id=9000 + i, description=f"trip of {i}")
+                for i in range(n)]
+        return run(tmp_path, listed([*stay(R, 1, 3), ob(40, Q)], trips=rows), """
+          const r = open().runs()[0];
+          return [r.cls("over").map((e) => [e.tag, e.textContent]), r.cls("over").flatMap(
+            (o) => o.all((e) => e.tag === "li").map((e) => e.textContent)), r.textContent];
+        """)
+    over, lines, _ = several(0)
+    assert over == [] and lines == []
+    over, lines, text = several(3)
+    assert [tag for tag, _ in over] == ["div"]
+    assert over[0][1].startswith("Trips on your profile over these days")
+    assert lines == ["2026-05-02, trip of 0", "2026-05-02 to 2026-05-03, trip of 1",
+                     "2026-05-02 to 2026-05-04, trip of 2"] and "9001" not in text
+    over, lines, text = several(4)
+    assert [tag for tag, _ in over] == ["details"] and len(lines) == 4
+    assert over[0][1].startswith("4 trips on your profile over these days")
+    assert "9001" not in text
+
+
+ENDS = (None, "", "soon", "0000-00-00", "2026-02-31", "1776", "2025", "2026", "2027", "2026-04-30",
+        "2026-05-01", "2026-05-03", "2026-05-04", "2026-05-06", "2026-05-09")
+
+
+@needs_node
+def test_every_trip_of_the_list_is_shown_at_the_runs_it_is_over_and_nowhere_else(tmp_path):
+    rows = [header(a, b, id=n, description=f"<{n}>")
+            for n, (a, b) in enumerate(itertools.product(ENDS, ENDS))]
+    m = listed([*stay(R, 1, 3), *stay(Q, 4, 5), ob(5, S, 22), ob(40, 8)], trips=rows)
+    assert 50 < len(m.trips) < len(rows)
+    got = run(tmp_path, m, """
+      return open().runs().map((r) => r.cls("over").flatMap((o) =>
+        o.all((e) => e.tag === "li").map((e) => Number(/<(\\d+)>/.exec(e.textContent)[1]))));
+    """)
+    assert [sorted(ids) for ids in got] == [
+        sorted(t["id"] for t in m.trips if trip_list._over(t, r)) for r in m.runs]
+    assert {i for ids in got for i in ids} == {t["id"] for t in m.trips}
+
+
+@needs_node
+def test_one_photo_shows_its_time_once(tmp_path):
+    one_photo, two = run(tmp_path, listed([ob(1, hour=9.5), ob(3, Q), ob(3, Q, 13)]),
+                         "return open().runs().map((r) => r.textContent);")
+    assert "1 photo: 2026-05-01 09:30, clock UTC" in one_photo
+    assert "First" not in one_photo and one_photo.count("09:30") == 1
+    assert "2 photos. First: 2026-05-03 12:00, clock UTC. Last: 2026-05-03 13:00" in two
+
+
+@needs_node
+@pytest.mark.parametrize("gap, says", [
+    (1, "Every day with no photo ends a stretch"),
+    (2, "One day with no photo does not end a stretch"),
+    (3, "Up to 2 days with no photo in a row do not end a stretch"),
+    (5, "Up to 4 days with no photo in a row do not end a stretch"),
+])
+def test_the_gap_is_said_in_plain_words(tmp_path, gap, says):
+    m = listed([*stay(R, 1, 3)], params=PARAMS | {"gap_days": gap})
+    lines = run(tmp_path, m, "return open().byId.about.children.map((c) => c.textContent);")
+    assert says in lines and not any("fewer" in line for line in lines)
+
+
+@needs_node
+def test_reasons_that_left_nothing_out_are_not_said(tmp_path):
+    read = 'return open().byId["left-out"].children.map((c) => c.textContent);'
+    none = dict.fromkeys(LEFT_OUT, 0)
+    assert run(tmp_path, small(left_out=none | {"fast": 1, "edge": 12}), read) == [
+        "1 photo taken at travel speed",
+        "12 photos near the edge of a region, or of what could be read"]
+    assert run(tmp_path, small(left_out=none), read) == ["Nothing was left out."]
 
 
 @needs_node
@@ -2677,8 +2921,8 @@ def test_the_header_says_what_was_read_and_what_was_left_out(tmp_path):
               p.byId.incomplete.textContent, p.byId.incomplete.hidden, p.order[0]];
     """
     about, sources, out, gaps, stop, hidden, first = run(tmp_path, m, read)
-    for word in ("Account 1", "2026-04-20", "2026-05-30", "2 days", "150 km/h", m.sha256[:12],
-                 "12 map tiles read, 3 not read", "2 stretches"):
+    for word in ("Account 1", "2026-04-20", "2026-05-30", "One day with no photo", "150 km/h",
+                 m.sha256[:12], "12 map tiles read, 3 not read", "2 stretches"):
         assert word in about, word
     for word in ("Photos library", "2019-03-02 to 2026-06-20", "4321", "days.csv",
                  "2012-01-01 to 2018-12-30", "spans.json"):

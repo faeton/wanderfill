@@ -66,6 +66,7 @@ summary { cursor: pointer; padding: 0.5rem 0; }
 .not-made { border-left-color: var(--line); color: var(--soft); }
 .name { font-weight: 600; margin: 0; unicode-bidi: isolate; }
 .facts { margin: 0.25rem 0; color: var(--soft); font-size: 0.92rem; }
+.visits, .over { color: var(--soft); font-size: 0.92rem; }
 .facts div, li { unicode-bidi: isolate; }
 .flags { list-style: none; padding: 0; margin: 0.4rem 0; }
 .flags li { margin: 0.25rem 0; font-size: 0.92rem; }
@@ -160,6 +161,7 @@ const Trips = (() => {
   const NO = "Leave it out";
   const ASK = "I don't remember";
   const CUT_WORDS = { same: "Same trip", cut: "A new trip starts here" };
+  const CUTS = Object.keys(CUT_WORDS);
 
   const plural = (n, one, many = one + "s") => n + " " + (n === 1 ? one : many);
   const idOf = (run) => run.region + ":" + run.first + ":" + run.last;
@@ -219,7 +221,7 @@ const Trips = (() => {
       if (run.status === "held") out.set("words:" + idOf(run), (text) => text !== "");
     }
     for (const edge of data.boundaries) {
-      if (!edge.forced) out.set("cut:" + cutOf(edge), (text) => text in CUT_WORDS);
+      if (!edge.forced) out.set("cut:" + cutOf(edge), (text) => CUTS.includes(text));
     }
     return out;
   }
@@ -271,6 +273,17 @@ const Trips = (() => {
       for (const key of known.keys()) pullOne(key);
     }
 
+    /* Whether the storage keeps what it is given and lets go of it. Where the old value is read
+       back after a write that did not throw, this tells another tab's answer, which is the later
+       one, from a write that was lost. It looks under a name that no answer and no tab has. */
+    function keeps() {
+      const name = nameOf("probe:" + Math.random());
+      where().setItem(name, "1");
+      const kept = where().getItem(name) === "1";
+      where().removeItem(name);
+      return kept && where().getItem(name) === null;
+    }
+
     function set(key, value) {
       if (!known.has(key) || typeof value !== "string") return;
       if (value !== "" && !known.get(key)(value)) return;
@@ -280,11 +293,11 @@ const Trips = (() => {
         if (wanted === null) where().removeItem(nameOf(key));
         else where().setItem(nameOf(key), wanted);
         const now = read(key);
-        if (now !== wanted && now === was) {
+        if (now !== wanted && now === was && !keeps()) {
           hold(key, value);
         } else {
           held.delete(key);
-          take(key, now); /* which another tab may have just written */
+          take(key, now === wanted ? now : read(key)); /* which another tab has just written */
         }
       } catch {
         hold(key, value);
@@ -511,39 +524,37 @@ const Trips = (() => {
       : (row.date_from || "no date") + " to " + (row.date_to || "no date"));
 
   function visitText(data, v) {
-    const word = v.quality in data.page.quality ? v.quality + " " + data.page.quality[v.quality]
+    const word = qualities(data).includes(String(v.quality)) ? v.quality + " " + data.page.quality[v.quality]
       : v.quality === 0 ? data.page.no_visit : "quality " + v.quality;
-    return "Visit " + v.id + ": " + ends(v) + ", " + word +
-      (v.trip_id === null ? "" : ", in trip " + v.trip_id);
+    return ends(v) + ", " + word + (v.trip_id === null ? "" : ", in a trip");
   }
 
-  const tripText = (data, t) => "Trip " + t.id + ": " + shown(data, ends(t)) +
+  const tripText = (data, t) => shown(data, ends(t)) +
     (t.description && shown(data, t.description) ? ", " + shown(data, t.description) : "");
 
-  /* As `_over` in Python: an end that is not a day or a year is open. */
-  function over(trip, run) {
-    const at = (text, low, high) => (text === null ? [low, high]
-      : /^\d{4}$/.test(text) ? [text + "-01-01", text + "-12-31"]
-        : /^\d{4}-\d\d-\d\d$/.test(text) ? [text, text] : [low, high]);
-    const [a, b] = at(trip.date_from, "0000", "9999-99");
-    const [c, d] = at(trip.date_to, "0000", "9999-99");
-    const [lo, hi] = a <= d ? [a, d] : [c, b];
-    return lo <= run.last && run.first <= hi;
-  }
-
   function facts(data, run) {
-    const visits = data.visits[run.region].map((v) => visitText(data, v));
     const out = ["Days with photos: " + dayList(run.days)];
     if (run.silent.length) out.push("Days with no photo: " + dayList(run.silent));
-    out.push(plural(run.photos, "photo") + ". First: " + clockText(run.first_photo) +
-      ". Last: " + clockText(run.last_photo));
+    out.push(plural(run.photos, "photo") + (run.photos === 1 ? ": " + clockText(run.first_photo)
+      : ". First: " + clockText(run.first_photo) + ". Last: " + clockText(run.last_photo)));
     out.push("Evidence: " + run.evidence + ", " + GRADES[run.evidence]);
-    out.push(visits.length ? "On your profile for this region: " + visits.join("; ")
-      : "No visit to this region is on your profile");
-    const trips = data.trips.filter((t) => over(t, run)).map((t) => tripText(data, t));
-    if (trips.length) out.push("Trips on your profile over these days: " + trips.join("; "));
+    if (!data.visits[run.region].length) out.push("No visit to this region is on your profile");
     return out;
   }
+
+  /* By date, and those with no first day last. */
+  const byDate = (rows) => [...rows].sort((a, b) => {
+    const [x, y] = [a.date_from || "9999", b.date_from || "9999"];
+    return x < y ? -1 : Number(x > y);
+  });
+
+  const visitLines = (data, run) => byDate(data.visits[run.region]).map((v) => visitText(data, v));
+  const visitsTitle = (n) => plural(n, "visit") + " of this region on your profile";
+
+  /* Which trips are over a run is worked out once, in Python, and is in the data. */
+  const tripLines = (data, run) =>
+    byDate(data.page.over[idOf(run)].map((n) => data.trips[n])).map((t) => tripText(data, t));
+  const tripsTitle = (n) => (n > 3 ? n + " trips" : "Trips") + " on your profile over these days";
 
   function edgeNotes(data, edge, after) {
     const out = edge.suggestions.map((s) => plainText(data, s));
@@ -562,12 +573,18 @@ const Trips = (() => {
       "again; the answers you give here are for this list only.";
   }
 
+  function gapText(gap) {
+    if (gap === 1) return "Every day with no photo ends a stretch";
+    if (gap === 2) return "One day with no photo does not end a stretch";
+    return "Up to " + (gap - 1) + " days with no photo in a row do not end a stretch";
+  }
+
   function about(data) {
     const p = data.params;
     return [
       "Account " + data.account,
       "Days from " + p.since + " to " + (p.until || "the newest one"),
-      "A stretch goes on over fewer than " + plural(p.gap_days, "day") + " with no photo in a row",
+      gapText(p.gap_days),
       "Over " + p.speeds.fast_kmh + " km/h a photo is in the air",
       plural(data.runs.length, "stretch", "stretches") + " on this list",
       plural(data.coverage.tiles_read, "map tile") + " read, " + data.coverage.tiles_unread +
@@ -602,8 +619,11 @@ const Trips = (() => {
     clock: "with no clock, or one that cannot be the local one",
   };
 
-  const leftOut = (data) => Object.keys(LEFT_OUT).map((k) =>
-    plural(data.left_out[k], "photo") + " " + LEFT_OUT[k]);
+  function leftOut(data) {
+    const out = Object.keys(LEFT_OUT).filter((k) => data.left_out[k])
+      .map((k) => plural(data.left_out[k], "photo") + " " + LEFT_OUT[k]);
+    return out.length ? out : ["Nothing was left out."];
+  }
 
   const gapRows = (data) => [
     ["Days", "Stretches", "Cuts to answer", "Held"],
@@ -681,7 +701,8 @@ const Trips = (() => {
     CUT_WORDS, FILE, MARKS_NOTHING, WHY_NOT, about, answerWord, countsText, cutOf, edgeNotes,
     exportNote, exportText, facts, gapRows, given, group, idOf, incomplete, keptNote, leftOut,
     marksNothing, openStore, plainText, preview, problemOf, problems, refusal, runTitle, says,
-    sources, takes, unusedNote, wordsLabel, wordsProblem,
+    sources, takes, tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel,
+    wordsProblem,
   };
 })();
 </script>
@@ -726,6 +747,13 @@ const Trips = (() => {
     const ul = el("ul", cls);
     ul.append(...lines(texts));
     return ul;
+  }
+
+  /* Closed, for there can be many lines in it. */
+  function boxOf(cls, title, texts) {
+    const box = el("details", cls);
+    box.append(el("summary", "", title), listOf("", texts));
+    return box;
   }
 
   function answered(key, value) {
@@ -776,6 +804,16 @@ const Trips = (() => {
       return line;
     }));
     box.append(name, said);
+    const visits = Trips.visitLines(data, run);
+    if (visits.length) box.append(boxOf("visits", Trips.visitsTitle(visits.length), visits));
+    const trips = Trips.tripLines(data, run);
+    if (trips.length > 3) {
+      box.append(boxOf("over", Trips.tripsTitle(trips.length), trips));
+    } else if (trips.length) {
+      const few = el("div", "over");
+      few.append(el("div", "", Trips.tripsTitle(trips.length)), listOf("", trips));
+      box.append(few);
+    }
     if (run.flags.length) {
       box.append(listOf("flags", run.flags.map((f) => Trips.plainText(data, f))));
     }
