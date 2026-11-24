@@ -39,7 +39,7 @@ Status: **R** is a recommendation that follows from the rules or the code. **Qn*
 
 | # | Question | Recommendation | Reason | Cost if wrong | |
 |---|---|---|---|---|---|
-| 1 | What is a run | The days with an own-camera `ground` shot strictly inside one region. Two days join when at most `gap_days` apart (default 2, so one silent day) and no ground shot is inside another region on the silent days. Dates are the first and last photo day | Edge days are always observed. Same meaning of `gap_days` as `segment` (`plan/segment.py:244`), same "nothing seen elsewhere" rule as `history` | Too small: one stay becomes two visits. Too large: days claimed in a place already left | Q1 |
+| 1 | What is a run | The days with an own-camera `ground` shot strictly inside one region. Two days join when at most `gap_days` apart (default 2, so one silent day) and no ground shot is inside another region on the silent days. Dates are the first and last photo day | Edge days are always observed. Same meaning of `gap_days` as `segment` (`plan/segment.py:244`). The "nothing seen elsewhere" rule resembles `history`'s, which also bridges nothing across an overflight inside the gap, or from an edge day with more than one country | Too small: one stay becomes two visits. Too large: days claimed in a place already left | Q1 |
 | 1a | Joining runs a longer gap or a day elsewhere keeps apart | Only by `--stays FILE`: the owner's `{region, from, to, why}`, written unprompted; both ends must be photo days of that region. A row also releases a `layover?` run whose dates it gives; it never overrides a span. The page has no join button | Showing a gap and asking "there all the time?" is what rule 7 forbids | More work for a base with overnight excursions | R |
 | 2 | Region evidence states | Four: **inside**; **none strictly inside** (nearest-polygon only); **not read** (tile failed); **no photo**. Only *inside* makes a run | `tile_nearest` reaches 0.30 degrees, 33 km of latitude (`geo/resolve.py:77, 158`) | A neighbour across the border is claimed | R |
 | 2a | Strictly inside | `tile_interior` from the raw coordinate, and the eight points 100 m around it are in the same region or in none (a failed tile there is *not read*). Otherwise the shot is `edge`: it does not start, end or make a run, and is counted | `covers` includes the border (`geo/resolve.py:150`); the shared coordinate cache is rounded to about 110 m (`sources/photos_app.py:228`); tile outlines are simplified | Tiny regions, and islets whose outline is drawn small, have only `edge` shots: held, shown as such | R |
@@ -62,7 +62,7 @@ Status: **R** is a recommendation that follows from the rules or the code. **Qn*
 
 ## Input
 
-- **Photos.** Own camera by default; `--origin` widens it, each origin is graded alone, and every run names its origins. Runs are built over the whole library and then selected by `--since` and `--until`; a run across either date is held, not cut. `grade_shots(until=...)` is not used: a late shot loses its span (`plan/review.py:295-299`), so a spoofed later photo would finish a stay.
+- **Photos.** Own camera by default; `--origin` widens it, each origin is graded alone, and every run names its origins. Runs are built over the whole library and then selected by `--since` and `--until`; a run across either date is held, not cut. `grade_shots(until=...)` is not used: a late shot gets `use` `none` (`plan/review.py:295-299`), so it could not finish a stay, spoofed or not; but the specific reason it was left out, its span or its speed, is lost behind "after the date".
 - **Other sources (rule 6).** `--track FILE` or an explicit `--no-track`, recorded in the manifest with each source's first and last day. A track row in another region on a run's day flags `sources disagree` and holds the run. A day-level row never makes, extends or finishes a run: it has no clock.
 - **Profile.** Strict reads only. Account id, `regions()` live, visits per decision 6a, trips of every year touched. A missing list stops the command.
 - **No words from mail, tickets or place names.**
@@ -76,7 +76,7 @@ Use `grade_shots` and `--spans` as they are. Only `kind == "ground"` with `use =
 - `thin`: `evidence.grade` says so. Say it at plan time (AGENTS 6a); never "ready".
 - `clock?`: an edge photo whose offset is 0, or over 3.5 h from its longitude. A missing zone is read as UTC (`sources/photos_app.py:124`), so an edge day may be one off.
 
-What none of this sees: a photo in the air hours from both neighbours (`plan/review.py:233-235`). It is `thin`, and the owner answers. Only needed change: `Shot.uuid: str = ""`, last field, so that a run can name its photos and reuse `evidence.grade`.
+What none of this sees: a photo in the air hours from both neighbours (`plan/review.py:233-235`). Alone it is `thin`; with other photos in the region it may evade both checks, and then only the owner's answer stops it. Only needed change: `Shot.uuid: str = ""`, last field, so that a run can name its photos and reuse `evidence.grade`.
 
 ## Unread tiles and stale ids
 
@@ -96,7 +96,7 @@ Answers file: format, account, manifest sha256, and by stable id: run (`1`..`6`,
 
 - One `create_trip` per trip: header is min and max of its rows; every row has both full dates (`plan/model.py:411-415`), quality as answered, no `hidden`. Local dates may run backwards across the date line: use min and max, never swap silently.
 - `proof`: one entry per run, region id first in `detail`, since a row may carry no other field (`plan/model.py:243`). Owner's words are `memory`. `confidence` stays 0.0.
-- `basis`: fingerprint of `basis_of(snapshot, regions)` over exactly the planned regions, plus `taken_at`. Moving an op to `review` by hand changes that set (`plan/apply.py:585, 632, 652`) and `apply` refuses with drift: change the answers and rebuild.
+- `basis`: fingerprint of `basis_of(snapshot, regions)` over exactly the planned regions, plus `taken_at`. Moving an op to `review` by hand makes `apply` refuse with drift only if it changes that set (`plan/apply.py:585, 632, 652`), which it does not where the other ops touch the same regions: do not rely on it, change the answers and rebuild.
 - `params`: gap, speeds, window, home file hash, the sweep rows. `sources`: manifest, answers, spans, stays and track hashes.
 - `plan` prints trips, regions, how many will and will not mark a region, and what was held. One `create_trip` counts as one write under `max_writes`, whatever its size (`plan/apply.py:660`), so `plan` refuses over 50 region rows without `--max-rows`.
 

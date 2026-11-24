@@ -97,6 +97,7 @@ you remember yourself.</p>
 <ul>
 <li>Leaving an item blank is fine and means no answer.</li>
 <li>A photo nearby does not prove that you went inside.</li>
+<li>Times are by the photo's own clock, and a photo with no recorded time zone shows UTC.</li>
 <li>Your answers change nothing by themselves. This page sends nothing anywhere: you save the
 answers as a file, and a plan is made from it for you to read first.</li>
 </ul>
@@ -334,13 +335,16 @@ const Review = (() => {
 
   /* The list in the parts it is shown in, each with a heading or "". The thin airports are on
      their own, and the flagged ones after them, for no flagged item of a series is put before
-     one that has no flag. */
+     one that has no flag; and of those the thin ones under a heading of their own too, for under
+     one heading the days come first, and a thin one of an earlier day with them. */
   function sections(list) {
     const flaggedAirport = (c) => c.series === AIRPORTS && flagged(c);
     const parts = [
       ["", (c) => !thinAirport(c) && !flaggedAirport(c)],
       ["Airports: one photo, or over 1 km away", (c) => thinAirport(c) && !flagged(c)],
-      ["Airports: with a conflict or one spot", flaggedAirport],
+      ["Airports: with a conflict or one spot", (c) => flaggedAirport(c) && !c.thin],
+      ["Airports: with a conflict or one spot, and one photo or over 1 km away",
+        (c) => flaggedAirport(c) && c.thin],
     ];
     return parts.map(([title, has]) => ({ title, days: byDay(list.filter(has)) }))
       .filter((s) => s.days.length);
@@ -353,7 +357,7 @@ const Review = (() => {
 
   function facts(c) {
     return [
-      "Nearest photo: " + kmText(c.km) + " away, " + dayOf(c) + " " + c.at.slice(11, 16) +
+      "Nearest ground photo: " + kmText(c.km) + " away, " + dayOf(c) + " " + c.at.slice(11, 16) +
         " by the photo's own clock",
       plural(c.photos, "photo") + " on " + plural(c.days, "day") + ", from " +
         originText(c.origins),
@@ -644,8 +648,8 @@ const Review = (() => {
     $("days").replaceChildren(...nodes);
     put("shown", list.length
       ? "Showing " + list.length + " of " + Review.plural(data.candidates.length, "item") +
-        ", each under the day of its nearest photo. An item you answer stays in view until you " +
-        "change a filter."
+        ", each under the day of its nearest ground photo. An item you answer stays in view " +
+        "until you change a filter."
       : data.candidates.length ? "No items match these filters." : "No items on this list.");
     drawState();
   }

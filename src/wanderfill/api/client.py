@@ -391,9 +391,9 @@ def series_ticks(action: str, data: object) -> set[int]:
     if not isinstance(ids, list):
         raise VerificationFailed(action, "the answer has no 'visited' list of what is ticked")
     out = set()
-    for i in ids:
-        if (n := _whole(i)) is None:
-            raise VerificationFailed(action, "'visited' holds something that is not an id")
+    for i, v in enumerate(ids):
+        if (n := _whole(v)) is None:
+            raise VerificationFailed(action, f"visited[{i}] is not an id")
         out.add(n)
     return out
 

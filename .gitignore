@@ -12,6 +12,7 @@ build/
 *.token
 .env
 plan*.json
+*.part
 journal-*.ndjson
 deletes-*.ndjson
 verify-*.json

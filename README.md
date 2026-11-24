@@ -426,17 +426,17 @@ wanderfill apply plan.json
 wanderfill apply plan.json --confirm
 
 # undo ONE thing you have identified yourself (ids from `export --full` / `state`)
-wanderfill delete visit 13450095 --region 791   # shows it, sends nothing
-wanderfill delete visit 13450095 --region 791 --confirm --reason "never went"
-wanderfill delete trip 305716 --confirm --reason "..."        # the trip AND its visits
-wanderfill delete region 791 --all-visits --confirm --reason "..."  # every visit on it
+wanderfill delete visit VISIT_ID --region REGION_ID   # shows it, sends nothing
+wanderfill delete visit VISIT_ID --region REGION_ID --confirm --reason "never went"
+wanderfill delete trip TRIP_ID --confirm --reason "..."       # the trip AND its visits
+wanderfill delete region REGION_ID --all-visits --confirm --reason "..."  # every visit on it
 wanderfill delete dare 1142 --confirm --reason "..."          # un-mark one DARE area
 wanderfill delete kye 570 --confirm --reason "..."            # un-tick one KYE quadrant
 
 # widen ONE trip's dates to span its regions. The server deletes the trip and its
 # visits and creates new ones: every id in it changes.
-wanderfill sync-header 305716                                # shows it, sends nothing
-wanderfill sync-header 305716 --confirm --reason "extended after it was written"
+wanderfill sync-header TRIP_ID                               # shows it, sends nothing
+wanderfill sync-header TRIP_ID --confirm --reason "extended after it was written"
 ```
 
 There is deliberately **no command that computes and writes in one step.**
@@ -591,17 +591,16 @@ ocean and excluded, 469 markable, and 434 the scoring maximum once the deep-sout
 boxes collapse into one tick. Membership is arithmetic on a coordinate, so unlike
 regions there are no stale ids and unlike series there is no radius to choose.
 
-The judgement moves entirely to *whether a coordinate is a visit*. Grading one
-real profile's 105 candidate cells:
+The judgement moves entirely to *whether a coordinate is a visit*. Every cell a
+coordinate falls inside is graded:
 
 | test | result |
 |---:|---|
-| coordinates fall inside | 105 cells |
-| ≥2 distinct days, or one day with 10+ points over 2+ hours | **93 marked** |
-| most consecutive legs above 200 km/h, or a lone point | **12 held** |
+| ≥2 distinct days, or one day with 10+ points over 2+ hours | **marked** |
+| most consecutive legs above 200 km/h, or a lone point | **held** |
 
-The twelve held include two mid-Pacific boxes 1,100 km apart 2.5 hours apart, a
-flight over Yemen at 305 km/h, and two airport layovers — every one of which a
+What it holds includes boxes in mid-ocean too far apart for the hours between them,
+a country flown over at aircraft speed, and airport layovers — every one of which a
 point-count test marks and a speed test refuses. Held is not rejected: the user
 decides, which is the same rule the series thresholds follow. Photos in a row with
 exactly one coordinate have since been counted once, because a phone in flight can
@@ -674,14 +673,15 @@ A time "by the photo's own clock" is UTC for a photo with no recorded zone.
 
 It prints how much of what you have ticked already the same photos find. That says
 what the list will miss, and not how often it is right. Things that no photo is near
-are not listed anywhere.
+are not listed anywhere, except the ticked airports of the next paragraph.
 
-Airports come first in that table, and the ticked ones with no photo near are named,
-because they are ticked: few people photograph every airport, and the list is not all
-of them. A layover span counts for airports and for nothing else. A photo from the air
-offers no airport, and no nearest one is guessed. The airports with one photo, or none
-within a kilometre, are under their own heading after the other items, and the ones with
-a conflict or one spot after those.
+Airports come first in that table. The ticked ones with no photo near are counted there
+and named on the page only, because they are ticked: few people photograph every
+airport, and the list is not all of them. A layover span counts for airports and for
+nothing else. A photo from the air offers no airport, and no nearest one is guessed. The
+airports with one photo, or none within a kilometre, are under their own heading after
+the other items. After those are the ones with a conflict or one spot, and last the ones
+that are both.
 
 On the page you answer "I was there", "I was not there" or "I don't remember", or
 nothing. The page loads nothing and sends nothing; it saves a file of answers, which

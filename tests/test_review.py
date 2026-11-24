@@ -987,6 +987,23 @@ def test_show_prints_proof_whatever_shape_it_is(tmp_path, capsys, proof, wanted)
     assert "proof" not in capsys.readouterr().out
 
 
+def test_show_says_how_much_of_the_plan_it_does_not_show(tmp_path, capsys):
+    """Forty ops of a longer plan looked like all of it, and were approved as that."""
+    from wanderfill.cli import main as cli
+
+    path = Plan(account=1, ops=[dataclasses.replace(tick(), item=n) for n in range(1, 44)]).save(
+        tmp_path / "p.json")
+    for argv, shown in (([], 40), (["--limit", "42"], 42), (["--limit", "0"], 0),
+                        (["--limit", "-1"], 42)):
+        assert cli.main(["show", str(path), "-v", *argv]) == 0
+        out = capsys.readouterr().out
+        assert out.count("  [apply] tick_series") == shown
+        assert f"{43 - shown} more op(s) are not shown; --limit 43 shows them all" in out
+    for argv in (["-v", "--limit", "43"], ["-v", "--limit", "99"], []):
+        assert cli.main(["show", str(path), *argv]) == 0
+        assert "not shown" not in capsys.readouterr().out
+
+
 # ------------------------------------------------------------------ the manifest: what was shown
 
 HOSTILE = ("</script><script>boom()</script><!--\"'&amp;"
@@ -1395,8 +1412,12 @@ def test_the_page_says_what_an_answer_means():
                  "one photo, or over 1 km away",
                  "every photo on several days has exactly the same coordinate: check it is not "
                  "a frozen or false position",
-                 "a photo that day has an impossible jump"):
+                 "a photo that day has an impossible jump",
+                 "under the day of its nearest ground photo",
+                 "Times are by the photo's own clock, and a photo with no recorded time zone "
+                 "shows UTC."):
         assert copy in rest, copy
+    assert "earest photo" not in rest
 
 
 def test_the_template_is_in_the_package():
@@ -1506,7 +1527,7 @@ def test_names_and_facts_are_shown_as_they_are(tmp_path):
     }
     for flag, names in flags.items():
         assert {n for n, text in shown.items() if flag in text} == names, flag
-    for fact in ("500 m away", "2026-05-01 14:05", "by the photo's own clock",
+    for fact in ("Nearest ground photo: 500 m away", "2026-05-01 14:05", "by the photo's own clock",
                  "3 photos on 2 days", "your own camera"):
         assert fact in shown[hostile], fact
     assert "1.5 km away" in shown["Object 2"] and "1 photo on 1 day" in shown["Object 2"]
@@ -2650,6 +2671,16 @@ def test_a_series_reply_that_is_no_series_is_refused(reply):
         assert "Glass" not in str(e.value)
 
 
+@pytest.mark.parametrize("bad", ["Glass Hall", None, True, 5.5])
+def test_a_tick_that_is_no_id_is_found_by_its_place_and_not_quoted(bad):
+    s = Site()
+    s.series[22] = {"visited": [4, "5", bad, "Glass Roof"]}
+    with pytest.raises(VerificationFailed) as e:
+        s.client().series_ticked(22)
+    assert "visited[2]" in str(e.value) and "Glass" not in str(e.value)
+    assert str(bad) not in str(e.value)
+
+
 def test_only_the_ticked_list_of_a_skipped_series_is_needed():
     s = Site()
     s.series[12] = {"visited": ["4"]}
@@ -3108,6 +3139,57 @@ def test_a_file_cut_short_is_removed(tmp_path, monkeypatch, write):
     with pytest.raises(OSError, match="No space"):
         write(tmp_path / "x", "mine")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_new_file_is_there_whole_or_not_at_all(tmp_path, monkeypatch):
+    """A run that was killed left half a plan, and the next one would not replace it."""
+    path, fdopen, seen = tmp_path / "plan.json", os.fdopen, []
+
+    def halfway(fd, mode):
+        (part,) = tmp_path.iterdir()
+        seen.append((path.exists(), part.name.endswith(".part"), part.stat().st_mode & 0o777))
+        return fdopen(fd, mode)
+
+    monkeypatch.setattr(os, "fdopen", halfway)
+    cli._write_new(path, "mine")
+    assert seen == [(False, True, 0o600)]
+    assert list(tmp_path.iterdir()) == [path] and path.read_text() == "mine"
+    assert path.stat().st_mode & 0o777 == 0o600 and path.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("make", [
+    lambda p: p.write_text("theirs"), lambda p: p.symlink_to("elsewhere"),
+    lambda p: p.mkdir()], ids=["file", "dangling", "directory"])
+def test_a_new_file_never_replaces_what_came_to_be_there(tmp_path, monkeypatch, make):
+    """Also what is made while it is being written."""
+    path, fdopen = tmp_path / "plan.json", os.fdopen
+
+    def meanwhile(fd, mode):
+        make(path)
+        return fdopen(fd, mode)
+
+    monkeypatch.setattr(os, "fdopen", meanwhile)
+    with pytest.raises(FileExistsError):
+        cli._write_new(path, "mine")
+    assert list(tmp_path.iterdir()) == [path]
+    assert path.is_symlink() or path.is_dir() or path.read_text() == "theirs"
+    assert not (tmp_path / "elsewhere").exists()
+
+
+def test_what_a_killed_run_left_does_not_stop_the_next_and_is_not_committed(tmp_path, monkeypatch):
+    def killed(*a):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "fdopen", killed)
+        m.setattr(Path, "unlink", lambda *a, **kw: None)
+        with pytest.raises(KeyboardInterrupt):
+            cli._write_new(tmp_path / "plan.json", "mine")
+    (part,) = tmp_path.iterdir()
+    cli._write_new(tmp_path / "plan.json", "mine")
+    assert (tmp_path / "plan.json").read_text() == "mine"
+    ignored = (Path(__file__).parents[1] / ".gitignore").read_text().split()
+    assert part.suffix == ".part" and "*.part" in ignored
 
 
 def test_an_out_that_cannot_be_a_directory_is_a_plain_error(world, capsys):
@@ -3652,12 +3734,17 @@ def test_review_prints_airports_first_and_what_it_would_miss(flights, capsys):
     out = capsys.readouterr().out
     rows = [line.split()[0] for line in out.splitlines() if re.match(r"  \d+ \S", line)]
     assert rows == ["5", "1", "22"]
-    part = out[out.index("ticked airports"):]
-    assert "Birch Field" in part and "Cedar Field" in part and "2 ticked airports" in out
-    for name in ("Alder Field", "Dogwood Field", "Elm Field"):  # found; offered; nothing of it
+    assert "2 ticked airports with no photo near" in out and "named on the page" in out
+    for name in AIRPORTS.values():
         assert name not in out
     assert "\u202e" not in out and "\x1b" not in out
     _, m = written_by()
+    assert set(m.coverage["recall"]["5"]["no_photo_names"]) == {"2", "3"}
+    flights.series[5]["visited"] = [1, 2]
+    capsys.readouterr()
+    assert do_review(out="again") == 0
+    out = capsys.readouterr().out
+    assert "1 ticked airport with no photo near" in out and "it is named on the page" in out
     assert [(c.series, c.item, c.thin) for c in m.candidates if c.series == 5] == [(5, 4, True)]
     assert "Elm Field" not in json.dumps(m._stored())
 
@@ -3700,6 +3787,7 @@ def test_the_page_says_nothing_of_airports_where_none_is_missed(tmp_path, recall
 
 THIN_AIRPORTS = "Airports: one photo, or over 1 km away"
 MARKED_AIRPORTS = "Airports: with a conflict or one spot"
+BOTH_AIRPORTS = "Airports: with a conflict or one spot, and one photo or over 1 km away"
 
 
 def mixed():
@@ -3722,7 +3810,24 @@ def test_thin_airports_are_under_a_heading_of_their_own_before_the_flagged(tmp_p
       return p.byId.days.children.map((e) => e.tag === "h2" ? e.textContent : names(e));
     """)
     assert got == [[12, 6, 1, 9, 10, 11], THIN_AIRPORTS, [2, 5], [7],
-                   MARKED_AIRPORTS, [8, 3, 4]]
+                   MARKED_AIRPORTS, [8, 3], BOTH_AIRPORTS, [4]]
+
+
+@needs_node
+def test_a_day_puts_no_thin_flagged_airport_before_one_that_is_not_thin(tmp_path):
+    """Inside one heading the days came first, and a thin one of an earlier day with them."""
+    first, last = dt.datetime(2026, 5, 1, 9), dt.datetime(2026, 5, 2, 9)
+    m = manifest([candidate(1, series=5, km=0.01, conflict=True, thin=True, at=first),
+                  candidate(2, series=5, km=0.9, one_spot=True, at=last),
+                  candidate(3, series=5, km=0.8, conflict=True, at=first),
+                  candidate(4, series=5, km=0.02, one_spot=True, thin=True, at=last)])
+    got = run(tmp_path, m, """
+      const p = open();
+      const ids = (s) => s.days.flatMap((d) => d.items.map((c) => c.item));
+      return [logic.sections(data.candidates).map((s) => [s.title, ids(s)]),
+              p.days().length];
+    """)
+    assert got == [[[MARKED_AIRPORTS, [3, 2]], [BOTH_AIRPORTS, [1, 4]]], 4]
 
 
 @needs_node
@@ -3753,8 +3858,8 @@ def test_a_heading_with_nothing_under_it_is_not_there_and_days_stay_open(tmp_pat
       const opened = () => p.days().every((d) => d.open);
       return [pick("22"), pick("5"), opened(), pick("1"), pick("")];
     """)
-    assert got == [[], [THIN_AIRPORTS, MARKED_AIRPORTS], True, [],
-                   [THIN_AIRPORTS, MARKED_AIRPORTS]]
+    heads = [THIN_AIRPORTS, MARKED_AIRPORTS, BOTH_AIRPORTS]
+    assert got == [[], heads, True, [], heads]
 
 
 @needs_node

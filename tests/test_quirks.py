@@ -5539,6 +5539,24 @@ def test_phantom_trips_are_printed_and_do_not_change_the_exit_code(
     assert rc == 0 and "trip 900" in said.out and "region 11" in said.out
 
 
+def test_two_long_names_are_told_apart_by_their_ids(monkeypatch, tmp_path, capsys):
+    """Cut at 56 characters, two ticks of a run were one line twice."""
+    name = "The Former Residence and Memorial Garden of Somebody or Other, "
+    ops = [_vop("tick_series", series=1, item=n, label=name + str(n)) for n in (570, 571, 5, 6)]
+    ops += [_vop("mark_kye", item=7, label=name), _vop("mark_dare", region=8, label=name),
+            _vop("mark_tcc", item=64, label=name), _jan_add(label="a visit")]
+    plan, c, t = _rebuilt(*ops, replies=_tick_replies())
+    _live(t)
+    _, said = _apply_cli(monkeypatch, capsys, plan, c, tmp_path)
+    lines = [line for line in said.out.splitlines() if line.startswith("  [")]
+    assert len(set(line.split("]")[1] for line in lines)) == 8
+    for line, mark, what in zip(lines, ["skip"] * 2 + ["ok "] * 5, (
+            "series 1 item 570", "series 1 item 571", "series 1 item 5", "series 1 item 6",
+            "KYE quadrant 7", "DARE area 8", "TCC destination 64"), strict=False):
+        assert f"] {mark} " in line and f" {what}: The Former" in line
+    assert "ok  add_visit     a visit" in lines[7]
+
+
 def test_a_full_run_says_it_is_not_partial(monkeypatch, tmp_path, capsys):
     plan, c, t = _rebuilt(*_four_ticks(), replies=_tick_replies())
     _live(t)

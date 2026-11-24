@@ -402,7 +402,9 @@ for letter. When it does not, do not go looking in the catalogue for what they m
 meant: ask them for the exact name.
 
 Never print or read out items that no photo is near, not even the nearest, and not
-from `client.series()` either.
+from `client.series()` either. The page names one kind of them, the ticked airports
+with no photo near, so that its airports are not taken for all of them; the terminal
+says only how many, and you read out no more than it does.
 
 **KYE is not a series and has its own module.** "Know Your Earth" is not filled
 in promptly from regions or trips — a profile with hundreds of regions can sit at

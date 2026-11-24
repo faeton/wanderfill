@@ -43,6 +43,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -841,6 +842,8 @@ def cmd_show(args) -> int:
                 typed = isinstance(p, dict) and {"kind", "detail"} <= p.keys()
                 print(one_line(f"        - proof {p['kind']}: {p['detail']}" if typed
                                else f"        - proof {p}"))
+        if hidden := len(plan.ops) - len(plan.ops[: args.limit]):
+            print(f"\n{hidden} more op(s) are not shown; --limit {len(plan.ops)} shows them all.")
     elif plan.ops:
         print("Run with -v to see dates, ids, quality and the evidence behind each op.")
     if problems := validate(plan):
@@ -1117,7 +1120,7 @@ def _write_review(out: Path, manifest) -> tuple[Path, Path]:
 def _write_private(path: Path, text: str) -> None:
     """Replace ``path`` whole, by a file nobody else can read."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.part")
-    _write_new(tmp, text)  # raises if it is there, and then it is not ours to remove
+    _write_part(tmp, text)  # raises if it is there, and then it is not ours to remove
     try:
         tmp.replace(path)
     except BaseException:
@@ -1126,7 +1129,22 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def _write_new(path: Path, text: str) -> None:
-    """Make ``path``, private, and raise :class:`FileExistsError` if anything is there."""
+    """Make ``path``, whole and private, or raise :class:`FileExistsError` if anything is there.
+
+    A hard link is made only if the name is free, and the file it names is complete: a run
+    that is killed leaves a ``.part``, and never half a file that the next would not replace.
+    """
+    tmp = path.with_name(f".{secrets.token_hex(8)}.part")
+    _write_part(tmp, text)
+    try:
+        os.link(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):  # whichever way that went, it is settled
+            tmp.unlink(missing_ok=True)
+
+
+def _write_part(path: Path, text: str) -> None:
+    """Write a file that is nothing yet, private, where nothing was."""
     data = text.encode("utf-8")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -1138,7 +1156,7 @@ def _write_new(path: Path, text: str) -> None:
 
 
 def _print_review(m, ground: int) -> None:
-    """Counts. No item is named here, and none without a photo anywhere."""
+    """Counts. No item is named here; the ticked airports with no photo near are on the page."""
     from ..plan.review import shown
     from ..plan.series import AIRPORT_SERIES
 
@@ -1178,11 +1196,10 @@ def _print_review(m, ground: int) -> None:
         for series in AIRPORT_SERIES:
             row = rows.get(str(series))
             if row and row["no_photo"]:
-                n, names = len(row["no_photo"]), row.get("no_photo_names", {})
+                n = len(row["no_photo"])
                 print(f"\n{n} ticked airport{'' if n == 1 else 's'} with no photo near, so the "
-                      "airports on this list are not complete:")
-                for item in row["no_photo"]:
-                    print(f"  {shown(names.get(str(item), ''), f'item {item}')}")
+                      "airports on this list are not complete; "
+                      f"{'it is' if n == 1 else 'they are'} named on the page.")
         print("\noffered, by distance to the nearest photo:")
         for r in radii:
             print(f"  within {float(r):g} km: {sum(c.km <= float(r) for c in m.candidates):,}")
@@ -1406,7 +1423,7 @@ def cmd_apply(args) -> int:
     A failed op is raised again after the report of what landed is printed, and
     :func:`main` returns 2 for it, or 130 for Ctrl-C.
     """
-    from ..plan.apply import apply_plan
+    from ..plan.apply import apply_plan, tick_name, tick_of
     from ..plan.model import Plan, one_line, validate
 
     plan = Plan.load(args.plan)
@@ -1426,13 +1443,16 @@ def cmd_apply(args) -> int:
         )
         return 0
 
+    def said(op):
+        which = f"{tick_name(op)}: " if tick_of(op) else ""
+        return f"{op.kind:13} {which}{one_line(op.label)[:56]}"
+
     def progress(i, total, op, ok):
         mark = "ok " if ok else "ERR"
-        print(f"  [{i:4}/{total}] {mark} {op.kind:13} {one_line(op.label)[:56]}")
+        print(f"  [{i:4}/{total}] {mark} {said(op)}")
 
     def skipped(i, total, op):
-        print(f"  [{i:4}/{total}] skip {op.kind:13} {one_line(op.label)[:56]} "
-              "(ticked already, not sent)")
+        print(f"  [{i:4}/{total}] skip {said(op)} (ticked already, not sent)")
 
     try:
         report = apply_plan(

@@ -475,7 +475,7 @@ def gone(
         missing = []
         if tick := tick_of(op):
             if tick[1] not in ticked[tick[0]]:
-                missing.append(f"{_tick_name(op)} is not ticked")
+                missing.append(f"{tick_name(op)} is not ticked")
         elif op.kind != "update_visit":
             missing = [f"region {region} has no visit for {days[0]}..{days[1]}"
                        for region, days in _new_visits(op, stored)
@@ -954,7 +954,8 @@ def _blank() -> dict[str, Any]:
     }
 
 
-def _tick_name(op: Op) -> str:
+def tick_name(op: Op) -> str:
+    """The thing a tick op ticks, by its id: two names may look the same where they are cut."""
     _, n = tick_of(op)  # type: ignore[misc]
     return {"mark_kye": "KYE quadrant", "mark_tcc": "TCC destination", "mark_dare": "DARE area",
             }.get(op.kind, f"series {op.series} item") + f" {n}"
@@ -995,8 +996,8 @@ def _what_is_there_now(reads: _Reads, op: Op) -> list[str]:
     try:
         held = tick_of(op)[1] in reads.ticked(op)  # type: ignore[index]
     except VerificationFailed as exc:
-        return [f"{_tick_name(op)}: the list could not be read back ({exc})"]
-    return [f"{_tick_name(op)} is {'' if held else 'not '}in the list now"]
+        return [f"{tick_name(op)}: the list could not be read back ({exc})"]
+    return [f"{tick_name(op)} is {'' if held else 'not '}in the list now"]
 
 
 def verify(
@@ -1122,11 +1123,11 @@ def verify(
                 held = reads.ticked(op)
             except VerificationFailed as exc:
                 out["unproven"].append(
-                    f"{_tick_name(op)}: the list could not be read back ({exc})"
+                    f"{tick_name(op)}: the list could not be read back ({exc})"
                 )
             else:
                 if tick[1] not in held:
-                    out["mismatches"].append(f"{_tick_name(op)} did not stick")
+                    out["mismatches"].append(f"{tick_name(op)} did not stick")
 
     def check_trip(op: Op) -> None:
         # One trip with the planned dates, and each region in it carrying exactly

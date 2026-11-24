@@ -27,7 +27,9 @@ answers to another list. :func:`plan_for_series` makes the plan for one series f
 two, and :func:`plan_for_named` one for a thing the owner named without being asked.
 
 Objects that no photo is near do not leave this module, not as a list and not as
-the nearest one: a page that shows them has proposed them.
+the nearest one: a page that shows them has proposed them. One kind does, for it is
+ticked already: the list names the ticked airports that no photo is near, and the page
+shows those names, so that nobody takes its airports for all of them.
 """
 
 from __future__ import annotations

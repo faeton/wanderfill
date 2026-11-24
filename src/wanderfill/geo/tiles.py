@@ -260,8 +260,8 @@ class TileReader:
         """Yield every series object in one tile.
 
         One harvest geocodes all 69 series at once, which is why this is the
-        only practical way to match a track against World Heritage Sites, Know
-        Your Earth, TCC and the rest.
+        only practical way to match a track against World Heritage Sites, World
+        Capitals and the rest.
 
         A tile in :attr:`failed` yields nothing: a harvest with any is incomplete.
 
