@@ -2012,10 +2012,10 @@ def test_a_write_that_does_not_take_is_held_and_one_that_another_tab_changed_is_
     (two, three) = stored(m, "22:2", "22:3")
     got = run(tmp_path, m, f"const [two, three] = {json.dumps([two, three])};" + """
       const storage = new Storage();
-      const set = Storage.prototype.setItem, drop = Storage.prototype.removeItem;
+      const set = Storage.prototype.setItem;
       storage.held.set(two, "y");
-      storage.setItem = function (k, v) { if (k !== two) set.call(this, k, v); };
-      storage.removeItem = function (k) { if (k !== two) drop.call(this, k); };
+      storage.setItem = () => {};
+      storage.removeItem = () => {};
       const p = open({storage});
       p.openAll();
       const out = [];
@@ -2042,6 +2042,124 @@ def test_a_write_that_does_not_take_is_held_and_one_that_another_tab_changed_is_
         [{"22:2": "n", "22:3": "q", "22:4": "y"}, False],
     ]
     assert got[1] == 3
+
+
+SAY = {"y": "I was there", "n": "I was not there", "": "Clear this answer"}
+
+
+@needs_node
+@pytest.mark.parametrize("was, mine, theirs", [
+    ("n", "y", "n"), ("", "y", ""), ("n", "", "n"), ("n", "y", ""), ("", "y", "n"),
+], ids=str)
+def test_what_another_tab_answers_after_this_one_wins(tmp_path, was, mine, theirs):
+    """B's whole press at each point of A's. Back to what it was is an answer as well."""
+    m = manifest(EVERYTHING)
+    (two,) = stored(m, "22:2")
+    given = f"const [two, was, mine, theirs] = {json.dumps([two, was, SAY[mine], SAY[theirs]])};"
+    rows = run(tmp_path, m, given + """
+      const out = [];
+      for (let at = 0; at < 30; at += 1) {
+        const storage = new Storage();
+        if (was) storage.held.set(two, was);
+        const b = open({storage});
+        b.openAll();
+        let n = -1, fired = false;
+        const a = open({storage: new View(storage, () => {
+          if (n >= 0 && n++ === at) {
+            fired = true;
+            b.press(b.item("Object 2"), theirs);
+          }
+        })});
+        a.openAll();
+        n = 0;
+        a.press(a.item("Object 2"), mine);
+        n = -1;
+        if (!fired) break;
+        const pressed = a.pressed();
+        const lost = a.byId.kept.textContent.includes("not being kept");
+        const value = (p) => {
+          p.byId.download.click();
+          return JSON.parse(p.blobs[0].text).answers["22:2"] || "";
+        };
+        out.push([lost, [...storage.held.keys()], value(a), value(b),
+                  storage.held.get(two) || "", pressed]);
+      }
+      return out;
+    """)
+    assert len(rows) >= 4
+    for lost, names, a, b, now, _ in rows:
+        assert not lost and names in ([], [two])  # nothing is left behind by the look
+        assert a == b == now
+    for *_, now, pressed in rows[:-1]:  # after A's last look the event tells it
+        assert pressed == ([SAY[now]] if now else [])
+    assert {row[4] for row in rows} == {mine, theirs}
+
+
+@needs_node
+def test_another_answer_in_a_storage_with_no_room_left_wins_too(tmp_path):
+    (two,) = stored(m := manifest(EVERYTHING), "22:2")
+    got = run(tmp_path, m, f"const two = {json.dumps(two)};" + """
+      const storage = new Storage();
+      storage.held.set(two, "n");
+      storage.setItem = function (k, v) {
+        if (k !== two) throw new Error("full");
+        Storage.prototype.setItem.call(this, k, "q"); /* and another tab, at once */
+      };
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      return [p.pressed(), p.byId.kept.textContent.includes("not being kept")];
+    """)
+    assert got == [["I don't remember"], False]
+
+
+@needs_node
+def test_what_changes_while_the_storage_is_looked_at_is_seen(tmp_path):
+    """Another tab puts the old answer back, and then gives one more."""
+    (two,) = stored(m := manifest(EVERYTHING), "22:2")
+    got = run(tmp_path, m, f"const two = {json.dumps(two)};" + """
+      const storage = new Storage();
+      storage.held.set(two, "n");
+      storage.setItem = function (k, v) {
+        Storage.prototype.setItem.call(this, k, k === two ? "n" : v);
+        if (k !== two) this.held.set(two, "q");
+      };
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      return [p.pressed(), p.byId.kept.textContent.includes("not being kept")];
+    """)
+    assert got == [["I don't remember"], False]
+
+
+@needs_node
+@pytest.mark.parametrize("was, mine", [("", "y"), ("n", "y"), ("n", "")], ids=str)
+def test_a_storage_that_drops_what_it_is_given_loses_no_answer(tmp_path, was, mine):
+    m = manifest(EVERYTHING)
+    (two,) = stored(m, "22:2")
+    for drops in (["setItem", "removeItem"], ["removeItem"] if mine == "" else ["setItem"]):
+        given = f"const [two, was, mine, drops] = {json.dumps([two, was, SAY[mine], drops])};"
+        got = run(tmp_path, m, given + """
+          const storage = new Storage();
+          if (was) storage.held.set(two, was);
+          const p = open({storage});
+          p.openAll();
+          for (const op of drops) storage[op] = () => {};
+          const out = [];
+          const note = () => {
+            p.byId.download.click();
+            out.push(JSON.parse(p.blobs[p.blobs.length - 1].text).answers["22:2"] || "",
+                     p.byId.kept.textContent.includes("not being kept"));
+          };
+          p.press(p.item("Object 2"), mine);
+          p.tell("storage", {});
+          note();
+          for (const op of drops) delete storage[op];
+          p.press(p.item("Object 2"), mine);
+          note();
+          return out;
+        """)
+        assert got == [mine, True, mine, False]
 
 
 NO_TEXT = ["undefined", "false", "0", "({})", "['y']", "new String('y')"]

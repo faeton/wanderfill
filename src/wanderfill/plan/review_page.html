@@ -244,6 +244,17 @@ const Review = (() => {
       }
     }
 
+    /* Whether the storage keeps what it is given and lets go of it. Where the old value is read
+       back after a write that did not throw, this tells another tab's answer, which is the later
+       one, from a write that was lost. It looks under a name that no answer and no tab has. */
+    function keeps() {
+      const name = nameOf("probe:" + Math.random());
+      where().setItem(name, "1");
+      const kept = where().getItem(name) === "1";
+      where().removeItem(name);
+      return kept && where().getItem(name) === null;
+    }
+
     function set(key, value) {
       if (!known.has(key) || !(value === "" || VALUES.includes(value))) return;
       const wanted = value === "" ? null : value;
@@ -252,11 +263,11 @@ const Review = (() => {
         if (wanted === null) where().removeItem(nameOf(key));
         else where().setItem(nameOf(key), wanted);
         const now = read(key);
-        if (now !== wanted && now === was) {
+        if (now !== wanted && now === was && !keeps()) {
           hold(key, value);
         } else {
           held.delete(key);
-          take(key, now); /* which another tab may have just written */
+          take(key, now === wanted ? now : read(key)); /* which another tab has just written */
         }
       } catch {
         hold(key, value);
