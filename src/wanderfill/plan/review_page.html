@@ -23,7 +23,7 @@
 * { box-sizing: border-box; }
 html { scroll-padding-bottom: 11rem; }
 body {
-  margin: 0; padding: 0 1rem 12rem; background: var(--back); color: var(--ink);
+  margin: 0; padding: 0 1rem; background: var(--back); color: var(--ink);
   font: 16px/1.5 system-ui, sans-serif; overflow-wrap: anywhere;
 }
 main { max-width: 46rem; margin: 0 auto; }
@@ -40,7 +40,10 @@ ul { padding-left: 1.25rem; }
 .soft { color: var(--soft); }
 .wide { overflow-x: auto; }
 table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; border-bottom: 1px solid var(--line); }
+th, td {
+  text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; border-bottom: 1px solid var(--line);
+  unicode-bidi: isolate;
+}
 .filters { display: flex; flex-wrap: wrap; gap: 0.75rem; }
 .filters label { flex: 1 1 10rem; font-size: 0.9rem; }
 select, button, textarea {
@@ -50,7 +53,8 @@ select, button, textarea {
 select { width: 100%; display: block; }
 button { cursor: pointer; }
 button[aria-pressed="true"] {
-  background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600;
+  background: var(--accent); color: var(--on-accent); border-color: var(--accent);
+  text-decoration: underline;
 }
 button.clear { background: none; border-color: transparent; color: var(--soft); text-decoration: underline; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -65,16 +69,17 @@ summary { cursor: pointer; padding: 0.5rem 0; }
 .name { font-weight: 600; margin: 0; unicode-bidi: isolate; }
 .facts { margin: 0.25rem 0; color: var(--soft); font-size: 0.92rem; }
 .flags { list-style: none; padding: 0; margin: 0.4rem 0; }
-.flags li {
+.flags li { margin: 0.25rem 0; font-size: 0.92rem; }
+.flags li, .warn {
   background: var(--warn-back); color: var(--warn-ink); border-radius: 4px; padding: 0.2rem 0.5rem;
-  margin: 0.25rem 0; font-size: 0.92rem;
 }
 .buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
 .bar {
-  position: fixed; left: 0; right: 0; bottom: 0; max-height: 50vh; overflow-y: auto;
-  background: var(--card); border-top: 1px solid var(--line); padding: 0.6rem 1rem;
+  position: sticky; bottom: 0; z-index: 1; max-height: 50vh; overflow-y: auto;
+  margin: 1.5rem -1rem 0; padding: 0.6rem 1rem;
+  background: var(--card); border-top: 1px solid var(--line);
 }
-.bar > div { max-width: 46rem; margin: 0 auto; }
+.bar-in { max-width: 46rem; margin: 0 auto; }
 .bar p { margin: 0.25rem 0; font-size: 0.92rem; }
 textarea { width: 100%; height: 8rem; font-family: ui-monospace, monospace; font-size: 0.85rem; }
 [hidden] { display: none; }
@@ -97,7 +102,7 @@ answers as a file, and a plan is made from it for you to read first.</li>
 </ul>
 <p><strong>I was there</strong>: the item goes into that plan, to be ticked.<br>
 <strong>I was not there</strong>: the item stays unticked. It never removes anything from your profile.<br>
-<strong>I don't remember</strong>: a good final answer. The item stays unticked.</p>
+<strong>I don't remember</strong>: a final answer. The item stays unticked.</p>
 </div>
 
 <h2>What was looked at</h2>
@@ -114,6 +119,7 @@ answers as a file, and a plan is made from it for you to read first.</li>
 </details>
 
 <h2>Your list</h2>
+<p id="unused" class="warn" hidden></p>
 <div class="filters">
 <label>Series <select id="by-series" autocomplete="off"></select></label>
 <label>Distance <select id="by-km" autocomplete="off"></select></label>
@@ -129,17 +135,21 @@ answers as a file, and a plan is made from it for you to read first.</li>
 <p id="shown" class="soft" role="status"></p>
 <div id="days"></div>
 </main>
-<div class="bar" id="bar"><div>
+<div class="bar" id="bar">
+<div class="bar-in">
+<div id="news" aria-live="polite" aria-atomic="false">
 <p id="counts"></p>
+<p id="said"></p>
+<p id="kept" class="soft"></p>
+</div>
 <div class="buttons">
 <button type="button" id="download">Download answers</button>
 <button type="button" id="copy">Copy answers</button>
 <button type="button" id="show">Show the text</button>
 </div>
 <textarea id="text" readonly spellcheck="false" aria-label="Your answers, as text" hidden></textarea>
-<p id="said" role="status"></p>
-<p id="kept" class="soft"></p>
-</div></div>
+</div>
+</div>
 
 <script type="application/json" id="data">__DATA__</script>
 
@@ -163,69 +173,92 @@ const Review = (() => {
   const keyOf = (c) => c.series + ":" + c.item;
   const knownKeys = (data) => new Set(data.candidates.map(keyOf));
 
-  /* A new map. An empty value is no answer; a key or a value that is not one changes nothing. */
-  function withAnswer(answers, known, key, value) {
-    const out = new Map(answers);
-    if (value === "") out.delete(key);
-    else if (known.has(key) && VALUES.includes(value)) out.set(key, value);
-    return out;
+  /* What a catalogue string is shown as. Direction marks reorder what is beside them, and in an
+     option nothing isolates them: "Series 51" can be made to read "Series 15". The data that is
+     hashed and exported keeps them. */
+  const CONTROLS = [[0x0, 0x1f], [0x7f, 0x9f], [0x61c, 0x61c], [0x200e, 0x200f],
+    [0x202a, 0x202e], [0x2066, 0x2069]];
+
+  function shown(text, fallback = "") {
+    const plain = [...text].filter((ch) => {
+      const n = ch.codePointAt(0);
+      return !CONTROLS.some(([low, high]) => low <= n && n <= high);
+    }).join("");
+    return plain.trim() ? plain : fallback;
   }
 
-  /* Text from the browser's storage, where anything may have written. Null when unreadable. */
-  function parseStored(text, known) {
-    let raw = null;
-    try {
-      raw = JSON.parse(text);
-    } catch {
-      return null;
-    }
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-    let out = new Map();
-    for (const [key, value] of Object.entries(raw)) {
-      if (typeof value === "string" && value !== "") out = withAnswer(out, known, key, value);
-    }
-    return out;
+  const itemTitle = (c) => shown(c.name, "(no name in the catalogue)");
+
+  /* With the id, for two series may look alike. */
+  function seriesTitle(id, name) {
+    const plain = shown(name);
+    return plain ? plain + " (" + id + ")" : "Series " + id;
   }
 
-  const storedText = (answers) => JSON.stringify(Object.fromEntries(answers));
-  const storageName = (data) => "wanderfill-series-review:" + data.sha256;
-
-  /* The answers, kept under this list's own name. `where` gives the browser's storage, and it
-     and every use of it may throw: from then on this page alone has the answers, and says so.
-     Each write starts from what is stored, or a second tab of the same list would be undone. */
+  /* The answers, each kept under a name of its own, so that a press in one tab never writes what
+     another tab has changed. `where` gives the browser's storage, and it and every use of it may
+     throw. A press that could not be stored is held here: it wins over storage in this tab, as an
+     answer and as a clear, until a press on the same item is stored. */
   function openStore(where, data) {
     const known = knownKeys(data);
-    const name = storageName(data);
-    let answers = new Map();
-    let kept = true;
+    const nameOf = (key) => "wanderfill-series-review:" + data.sha256 + ":" + key;
+    const answers = new Map();
+    const held = new Set(); /* pressed here and not stored */
+    const unused = new Set(); /* stored, and no answer */
+    let readable = true;
+
+    function take(key, text) {
+      const good = VALUES.includes(text);
+      if (good) answers.set(key, text);
+      else answers.delete(key);
+      if (good || text === null) unused.delete(key);
+      else unused.add(key);
+    }
+
+    function hold(key, value) {
+      take(key, value === "" ? null : value);
+      held.add(key);
+    }
 
     function pull() {
-      if (!kept) return;
-      try {
-        answers = parseStored(where().getItem(name), known) || answers;
-      } catch {
-        kept = false;
+      readable = true;
+      for (const key of known) {
+        if (held.has(key)) continue;
+        try {
+          take(key, where().getItem(nameOf(key)));
+        } catch {
+          readable = false; /* what was read before stays */
+        }
       }
     }
-    function push() {
-      if (!kept) return;
+
+    function set(key, value) {
+      if (!known.has(key) || !(value === "" || VALUES.includes(value))) return;
+      const wanted = value === "" ? null : value;
       try {
-        where().setItem(name, storedText(answers));
-        kept = where().getItem(name) === storedText(answers);
+        const storage = where();
+        const was = storage.getItem(nameOf(key));
+        if (wanted === null) storage.removeItem(nameOf(key));
+        else storage.setItem(nameOf(key), wanted);
+        const now = storage.getItem(nameOf(key));
+        if (now !== wanted && now === was) {
+          hold(key, value);
+        } else {
+          held.delete(key);
+          take(key, now); /* which another tab may have just written */
+        }
       } catch {
-        kept = false;
+        hold(key, value);
       }
     }
+
     pull();
     return {
       answers: () => answers,
-      kept: () => kept,
+      kept: () => readable && !held.size,
+      unused: () => unused.size,
       pull,
-      set(key, value) {
-        pull();
-        answers = withAnswer(answers, known, key, value);
-        push();
-      },
+      set,
     };
   }
 
@@ -339,7 +372,7 @@ const Review = (() => {
       plural(data.candidates.length, "item") + " on this list",
       plural(data.coverage.tiles_read, "map tile") + " read, " + data.coverage.tiles_unread +
         " not read",
-      "Made " + data.created + ". List " + data.sha256.slice(0, 12),
+      "Made " + shown(data.created) + ". List " + data.sha256.slice(0, 12),
     ];
   }
 
@@ -377,7 +410,7 @@ const Review = (() => {
       ["Series", "Ticked", "On the map read", ...radii.map((r) => "Within " + Number(r) + " km"),
         "No photo near"],
       ...ids.map((id) => [
-        rows[id].name || names.get(id) || "Series " + id,
+        seriesTitle(id, rows[id].name || names.get(id) || ""),
         rows[id].ticked,
         rows[id].located,
         ...radii.map((r) => (r in rows[id].found ? rows[id].found[r] : "")),
@@ -416,10 +449,15 @@ const Review = (() => {
       "Answers are kept by this browser, for this list only.";
   }
 
+  const unusedNote = (n) => n
+    ? "What this browser had stored for " + plural(n, "item") + " of this list could not be read " +
+      "and was not used. Such an item has no answer until you give it one."
+    : "";
+
   return {
     FILE, WORDS, VALUES, about, counts, countsText, dayTitle, exportAnswers, exportNote,
-    exportText, facts, flags, incomplete, keptNote, keyOf, knownKeys, leftOut, matches,
-    openStore, parseStored, plural, recallNote, recallRows, sections, withAnswer,
+    exportText, facts, flags, incomplete, itemTitle, keptNote, keyOf, leftOut, matches,
+    openStore, plural, recallNote, recallRows, sections, seriesTitle, unusedNote,
   };
 })();
 </script>
@@ -435,6 +473,7 @@ const Review = (() => {
   const before = store.answers().size;
   const openDays = new Set();
   const OPEN_UP_TO = 40; /* so few are drawn at once; more wait for their day to be opened */
+  let drawn = ""; /* the filters the list was drawn with */
   let redraw = new Map(); /* key to function, of the items and the days that are drawn */
 
   function el(tag, cls, text) {
@@ -442,6 +481,11 @@ const Review = (() => {
     if (cls) e.className = cls;
     if (text !== undefined) e.textContent = text;
     return e;
+  }
+
+  /* Writing a text again is news to a live region, though nothing in it changed. */
+  function put(id, text) {
+    if ($(id).textContent !== text) $(id).textContent = text;
   }
 
   function button(cls, text, act) {
@@ -463,21 +507,25 @@ const Review = (() => {
     const key = Review.keyOf(c);
     const box = el("div", "item");
     const id = "name-" + key.replace(":", "-");
-    const name = el("p", "name", c.name || "(no name in the catalogue)");
+    const name = el("p", "name", Review.itemTitle(c));
     name.setAttribute("id", id);
     name.setAttribute("dir", "auto");
-    box.setAttribute("role", "group");
-    box.setAttribute("aria-labelledby", id);
     const said = el("div", "facts");
     said.append(...Review.facts(c).map((f) => el("div", "", f)));
-    const flags = el("ul", "flags");
-    flags.append(...lines(Review.flags(c)));
+    box.append(name, said);
+    if (Review.flags(c).length) {
+      const flags = el("ul", "flags");
+      flags.append(...lines(Review.flags(c)));
+      box.append(flags);
+    }
     const row = el("div", "buttons");
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-labelledby", id);
     const answer = (value) => {
       store.set(key, value);
       redrawAll(key);
       dayChanged();
-      $("said").textContent = ""; /* it was about a file without this answer */
+      put("said", ""); /* it was about a file without this answer */
     };
     const buttons = Review.VALUES.map((v) => [v, button("", Review.WORDS[v], () => answer(v))]);
     row.append(...buttons.map(([, b]) => b),
@@ -489,7 +537,7 @@ const Review = (() => {
     };
     draw();
     redraw.set(key, draw);
-    box.append(name, said, flags, row);
+    box.append(row);
     return box;
   }
 
@@ -509,7 +557,7 @@ const Review = (() => {
       let series = null;
       for (const c of items) {
         if (c.series !== series) {
-          const title = el("h3", "", c.series_name || "Series " + c.series);
+          const title = el("h3", "", Review.seriesTitle(c.series, c.series_name));
           title.setAttribute("dir", "auto");
           body.append(title);
           series = c.series;
@@ -536,10 +584,13 @@ const Review = (() => {
     return box;
   }
 
+  const picked = () => ({
+    series: $("by-series").value, km: $("by-km").value, answer: $("by-answer").value,
+  });
+
   function drawList() {
-    const filter = {
-      series: $("by-series").value, km: $("by-km").value, answer: $("by-answer").value,
-    };
+    const filter = picked();
+    drawn = JSON.stringify(filter);
     store.pull();
     const list = data.candidates.filter(
       (c) => Review.matches(c, store.answers().get(Review.keyOf(c)), filter));
@@ -553,17 +604,20 @@ const Review = (() => {
       }
     });
     $("days").replaceChildren(...nodes);
-    $("shown").textContent = list.length
+    put("shown", list.length
       ? "Showing " + list.length + " of " + Review.plural(data.candidates.length, "item") +
         ", each under the day of its nearest photo. An item you answer stays in view until you " +
         "change a filter."
-      : data.candidates.length ? "No items match these filters." : "No items on this list.";
+      : data.candidates.length ? "No items match these filters." : "No items on this list.");
     drawState();
   }
 
   function drawState() {
-    $("counts").textContent = Review.countsText(data, store.answers());
-    $("kept").textContent = Review.keptNote(store, before);
+    put("counts", Review.countsText(data, store.answers()));
+    put("kept", Review.keptNote(store, before));
+    $("kept").className = store.kept() ? "soft" : "warn";
+    put("unused", Review.unusedNote(store.unused()));
+    $("unused").hidden = !store.unused();
     if (!$("text").hidden) $("text").value = Review.exportText(data, store.answers());
   }
 
@@ -574,16 +628,18 @@ const Review = (() => {
     drawState();
   }
 
-  /* What is shown is what is exported: another tab's answers are drawn before they go out. */
-  function ready() {
+  function refresh() {
     store.pull();
     redrawAll();
+  }
+
+  /* What is shown is what is exported: another tab's answers are drawn before they go out. */
+  function ready() {
+    refresh();
     return Review.exportText(data, store.answers());
   }
 
-  const say = (text) => {
-    $("said").textContent = text + " " + Review.exportNote(data, store.answers());
-  };
+  const say = (text) => put("said", text + " " + Review.exportNote(data, store.answers()));
 
   function download() {
     const url = URL.createObjectURL(new Blob([ready()], { type: "application/json" }));
@@ -603,7 +659,7 @@ const Review = (() => {
     $("text").value = ready();
     $("text").focus();
     $("text").select();
-    say("Copy all of the text above into a file named " + Review.FILE + ".");
+    say("Copy all of the text below into a file named " + Review.FILE + ".");
   }
 
   async function copy() {
@@ -628,6 +684,7 @@ const Review = (() => {
     row.append(...cells.map((cell, i) => {
       const e = el(n && i ? "td" : "th", "", String(cell));
       if (!n || !i) e.setAttribute("scope", n ? "row" : "col");
+      if (!i) e.setAttribute("dir", "auto");
       return e;
     }));
     return row;
@@ -635,7 +692,8 @@ const Review = (() => {
 
   const series = new Map(data.candidates.map((c) => [c.series, c.series_name]));
   $("by-series").replaceChildren(option("", "All series"), ...[...series]
-    .sort((a, b) => a[0] - b[0]).map(([id, name]) => option(String(id), name || "Series " + id)));
+    .sort((a, b) => a[0] - b[0])
+    .map(([id, name]) => option(String(id), Review.seriesTitle(id, name))));
   $("by-km").replaceChildren(option("", "Any"), ...[0.2, 0.5, 1, 2, 5]
     .filter((km) => km < data.params.radius_km)
     .map((km) => option(String(km), "Within " + km + " km")));
@@ -644,10 +702,18 @@ const Review = (() => {
   $("download").addEventListener("click", download);
   $("copy").addEventListener("click", copy);
   $("show").addEventListener("click", showText);
-  window.addEventListener("storage", () => {
-    store.pull();
-    redrawAll();
+  window.addEventListener("storage", refresh);
+  /* A page the browser kept, or whose filters it put back, has seen no event. */
+  window.addEventListener("pageshow", () => {
+    if (JSON.stringify(picked()) === drawn) refresh();
+    else drawList();
   });
+  /* Focus scrolls clear of the bar, however tall it is now. */
+  if (window.ResizeObserver) {
+    new window.ResizeObserver(() => {
+      document.documentElement.style.scrollPaddingBottom = $("bar").offsetHeight + "px";
+    }).observe($("bar"));
+  }
 
   drawList();
   $("start").hidden = true;

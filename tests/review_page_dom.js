@@ -27,11 +27,15 @@ class El {
     this.open = false;
     this.value = "";
     this.className = "";
+    this.style = {};
+    this.offsetHeight = 100;
+    this.writes = 0;
   }
   get textContent() {
     return this.own + this.children.map((c) => c.textContent).join("");
   }
   set textContent(text) {
+    this.writes += 1;
     this.children = [];
     this.own = String(text);
   }
@@ -89,17 +93,39 @@ El.clicked = [];
 class Storage {
   constructor() {
     this.held = new Map();
+    this.log = [];
   }
   getItem(k) {
+    this.log.push(["getItem", k]);
     return this.held.has(k) ? this.held.get(k) : null;
   }
   setItem(k, v) {
+    this.log.push(["setItem", k]);
     this.held.set(k, String(v));
+  }
+  removeItem(k) {
+    this.log.push(["removeItem", k]);
+    this.held.delete(k);
+  }
+}
+
+/* One tab's way to a storage: `cut` is called on either side of every operation it does,
+   and what another tab does in there happens in the middle of this one's press. */
+class View {
+  constructor(storage, cut) {
+    for (const op of ["getItem", "setItem", "removeItem"]) {
+      this[op] = (...args) => {
+        cut(op, "before");
+        const out = storage[op](...args);
+        cut(op, "after");
+        return out;
+      };
+    }
   }
 }
 
 /* A page opened with this storage: `null` is a browser that refuses even to name it. */
-function open({ storage = new Storage(), clipboard = "ok" } = {}) {
+function open({ storage = new Storage(), clipboard = "ok", observer = true } = {}) {
   const byId = {};
   const order = [];
   const body = html.replace(/<(script|style)[\s\S]*?<\/\1>/g, "");
@@ -120,6 +146,20 @@ function open({ storage = new Storage(), clipboard = "ok" } = {}) {
   const window = {
     addEventListener: (type, f) => (listeners[type] = listeners[type] || []).push(f),
   };
+  const root = new El("html");
+  let resized = null;
+  let watched = null;
+  if (observer) {
+    window.ResizeObserver = class {
+      constructor(f) {
+        resized = f;
+      }
+      observe(e) {
+        watched = e;
+        resized();
+      }
+    };
+  }
   Object.defineProperty(window, "localStorage", {
     get() {
       if (storage === null) throw new Error("storage is off");
@@ -130,6 +170,7 @@ function open({ storage = new Storage(), clipboard = "ok" } = {}) {
     window,
     document: {
       createElement: (tag) => new El(tag),
+      documentElement: root,
       getElementById: (id) => byId[id] || null,
     },
     navigator:
@@ -160,7 +201,8 @@ function open({ storage = new Storage(), clipboard = "ok" } = {}) {
   vm.runInContext(cut("page"), box);
   const days = byId.days;
   return {
-    byId, order, blobs, revoked, timers, copied, storage,
+    byId, order, blobs, revoked, timers, copied, storage, root, watched,
+    resized: () => resized(),
     clicked: El.clicked,
     tell: (type, event) => (listeners[type] || []).forEach((f) => f(event)),
     days: () => days.cls("day"),
@@ -179,8 +221,8 @@ vm.runInContext(cut("logic"), alone); /* with no document and no window */
 const logic = vm.runInContext("Review", alone);
 
 const AsyncFunction = (async () => {}).constructor;
-new AsyncFunction("open", "logic", "data", "Storage", fs.readFileSync(bodyPath, "utf8"))(
-  open, logic, data, Storage,
+new AsyncFunction("open", "logic", "data", "Storage", "View", fs.readFileSync(bodyPath, "utf8"))(
+  open, logic, data, Storage, View,
 ).then(
   (result) => process.stdout.write(JSON.stringify(result)),
   (error) => {

@@ -1382,7 +1382,7 @@ def test_nothing_is_preselected_and_nothing_answers_in_bulk():
 def test_the_page_says_what_an_answer_means():
     rest = re.sub(r"\s+", " ", DATA.sub("", render_page(manifest())))
     for copy in ("I was there", "I was not there", "I don't remember", "Clear this answer",
-                 "Leaving an item blank is fine and means no answer.",
+                 ": a final answer.", "Leaving an item blank is fine and means no answer.",
                  "A photo nearby does not prove that you went inside.",
                  "never removes anything from your profile",
                  "one photo, or over 1 km away",
@@ -1429,16 +1429,15 @@ def answers_file(tmp_path, raw):
 @needs_node
 def test_the_pages_export_is_what_load_answers_reads(tmp_path):
     m = manifest(EVERYTHING)
-    text, given = run(tmp_path, m, """
-      const known = logic.knownKeys(data);
-      let a = new Map();
+    text = run(tmp_path, m, """
+      const storage = new Storage();
+      const store = logic.openStore(() => storage, data);
       for (const [k, v] of [["22:5", "q"], ["-7:1", "n"], ["22:1", "y"], ["22:2", "y"],
-                            ["22:2", ""], ["22:9", "y"], ["22:3", "yes"], ["22:4", true]]) {
-        a = logic.withAnswer(a, known, k, v);
+                            ["22:2", ""]]) {
+        store.set(k, v);
       }
-      return [logic.exportText(data, a), a.size];
+      return logic.exportText(data, store.answers());
     """)
-    assert given == 3  # what is no item and what is no answer was never taken
     assert json.loads(text) == {"format": 1, "account": 1, "manifest": m.sha256,
                                 "answers": {"22:1": "y", "22:5": "q", "-7:1": "n"}}
     assert load_answers(answers_file(tmp_path, text), m) == {
@@ -1488,7 +1487,8 @@ def test_names_and_facts_are_shown_as_they_are(tmp_path):
       return p.items().map((i) => [i.cls("name")[0].textContent, i.textContent]);
     """)
     shown = dict(got)
-    assert set(shown) == {HOSTILE, "Object 2", "Object 3", "Object 4", "Object 5",
+    hostile = HOSTILE.replace(chr(0x202E), "")
+    assert set(shown) == {hostile, "Object 2", "Object 3", "Object 4", "Object 5",
                           "(no name in the catalogue)"}
     flags = {
         "one photo, or over 1 km away": {"Object 2"},
@@ -1501,7 +1501,7 @@ def test_names_and_facts_are_shown_as_they_are(tmp_path):
         assert {n for n, text in shown.items() if flag in text} == names, flag
     for fact in ("500 m away", "2026-05-01 14:05", "by the photo's own clock",
                  "3 photos on 2 days", "your own camera"):
-        assert fact in shown[HOSTILE], fact
+        assert fact in shown[hostile], fact
     assert "1.5 km away" in shown["Object 2"] and "1 photo on 1 day" in shown["Object 2"]
     assert "AirDrop" in shown["Object 5"]
 
@@ -1591,63 +1591,248 @@ def test_without_a_clipboard_the_text_is_there_to_select(tmp_path, clipboard):
     assert load_answers(answers_file(tmp_path, got[3]), m) == {(22, 4): "y"}  # never out of date
 
 
-@needs_node
-def test_answers_come_back_on_a_reload_and_on_no_other_page(tmp_path):
-    one, two = manifest(EVERYTHING), manifest(EVERYTHING, account=2)
-    held, pressed = run(tmp_path, one, """
-      const storage = new Storage();
-      const p = open({storage});
-      p.openAll();
-      p.press(p.item("Object 4"), "I was there");
-      const again = open({storage});
-      again.openAll();
-      return [[...storage.held], [again.pressed(), again.byId.kept.textContent]];
-    """)
-    assert pressed[0] == ["I was there"] and "1 answer" in pressed[1]
-    ((key, text),) = held
-    assert one.sha256 in key and json.loads(text) == {"22:4": "y"}
+# -- one stored answer per item
 
-    def found(m, text):
-        given = f"const name = {json.dumps(key)}, text = {json.dumps(text)};"
-        return run(tmp_path, m, given + """
-          const storage = new Storage();
-          storage.setItem(name, text);
-          const p = open({storage});
-          p.openAll();
-          return p.pressed();
-        """)
 
-    assert found(two, text) == [] and found(one, text) == ["I was there"]
-    for bad in ('{"22:4": true, "22:9": "y", "__proto__": "y", "22:3": "maybe"}', "null", "[",
-                '["22:4"]', '"y"', "5", '{"22:4": ["y"]}', ""):
-        assert found(one, bad) == [], bad
+def stored(m, *keys):
+    """The names this list's answers are stored under."""
+    return [f"wanderfill-series-review:{m.sha256}:{key}" for key in keys]
 
 
 @needs_node
-def test_two_tabs_do_not_lose_each_others_answers(tmp_path):
+def test_each_answer_is_stored_on_its_own(tmp_path):
     m = manifest(EVERYTHING)
     got = run(tmp_path, m, """
       const storage = new Storage();
-      const a = open({storage}), b = open({storage});
-      a.openAll(); b.openAll();
-      a.press(a.item("Object 2"), "I was there");
-      b.press(b.item("Object 3"), "I was not there");
-      const early = a.pressed();
-      a.tell("storage", {});
-      const late = a.pressed();
-      b.press(b.item("Object 2"), "Clear this answer");
-      a.byId.download.click();
-      return [early, late, a.blobs[0].text, a.pressed()];
+      const p = open({storage});
+      p.openAll();
+      const out = [];
+      const step = (name, word) => {
+        p.press(p.item(name), word);
+        out.push(Object.fromEntries(storage.held));
+      };
+      step("Object 4", "I was there");
+      step("Object 5", "I don't remember");
+      step("Object 4", "I was not there");
+      step("Object 4", "Clear this answer");
+      step("Object 4", "Clear this answer");
+      return [out, storage.log.filter(([op]) => op !== "getItem")];
     """)
-    assert got[0] == ["I was there"] and got[1] == ["I was there", "I was not there"]
-    assert load_answers(answers_file(tmp_path, got[2]), m) == {(22, 3): "n"}
-    assert got[3] == ["I was not there"]  # the page shows what it exported
+    four, five = stored(m, "22:4", "22:5")
+    assert got[0] == [{four: "y"}, {four: "y", five: "q"}, {four: "n", five: "q"}, {five: "q"},
+                      {five: "q"}]
+    assert got[1] == [["setItem", four], ["setItem", five], ["setItem", four],
+                      ["removeItem", four], ["removeItem", four]]
+
+
+@needs_node
+def test_a_press_reads_and_writes_its_own_item_only(tmp_path):
+    m = manifest(EVERYTHING)
+    touched = run(tmp_path, m, """
+      const storage = new Storage();
+      const p = open({storage});
+      p.openAll();
+      storage.log.length = 0;
+      p.press(p.item("Object 4"), "I was there");
+      p.press(p.item("Object 4"), "Clear this answer");
+      return [...new Set(storage.log.map(([, key]) => key))];
+    """)
+    assert touched == stored(m, "22:4")
+
+
+@needs_node
+def test_answers_come_back_on_a_reload_and_on_no_other_page(tmp_path):
+    one, two = manifest(EVERYTHING), manifest(EVERYTHING, account=2)
+    (mine,), (theirs,) = stored(one, "22:4"), stored(two, "22:4")
+    given = f"const mine = {json.dumps(mine)}, theirs = {json.dumps(theirs)};"
+    body = given + """
+      const storage = new Storage();
+      storage.held.set(mine, "y");
+      storage.held.set(mine + "0", "y");
+      const p = open({storage});
+      p.openAll();
+      const first = [p.pressed(), p.byId.kept.textContent];
+      p.press(p.item("Object 4"), "I was not there");
+      p.byId.download.click();
+      return [...first, storage.held.get(mine), storage.held.get(theirs) || null,
+              Object.keys(JSON.parse(p.blobs[0].text).answers)];
+    """
+    got = run(tmp_path, one, body)
+    assert got[0] == ["I was there"] and "1 answer" in got[1]
+    assert got[2:] == ["n", None, ["22:4"]]
+    got = run(tmp_path, two, body)
+    assert got[0] == [] and "1 answer" not in got[1]
+    assert got[2:] == ["y", "n", ["22:4"]]  # the other list's answer is as it was
+
+
+@needs_node
+@pytest.mark.parametrize("text", [
+    '{"22:1":"n","22:1":"y"}', '{"22:4":"y"}', "y", "",
+])
+def test_a_map_of_answers_in_one_value_is_not_read(tmp_path, text):
+    """JSON keeps the last of two answers to one item, which nobody may have given."""
+    m = manifest(EVERYTHING)
+    name = f"wanderfill-series-review:{m.sha256}"
+    got = run(tmp_path, m, f"const name = {json.dumps(name)}, text = {json.dumps(text)};" + """
+      const storage = new Storage();
+      storage.held.set(name, text);
+      const p = open({storage});
+      p.openAll();
+      p.byId.download.click();
+      return [p.pressed(), p.blobs[0].text, storage.held.get(name)];
+    """)
+    assert got[0] == [] and json.loads(got[1])["answers"] == {} and got[2] == text
+
+
+@needs_node
+@pytest.mark.parametrize("junk", ["Y", "yes", "", " y", "y ", "y\n", "yn", "null", '"y"', "{}",
+                                  '{"22:4":"y"}', "undefined", "__proto__", "true"])
+def test_a_stored_value_that_is_no_answer_is_not_used_and_said(tmp_path, junk):
+    m = manifest(EVERYTHING)
+    (four, five) = stored(m, "22:4", "22:5")
+    given = f"const [four, five, junk] = {json.dumps([four, five, junk])};"
+    got = run(tmp_path, m, given + """
+      const storage = new Storage();
+      storage.held.set(four, junk);
+      storage.held.set(five, "n");
+      const p = open({storage});
+      p.openAll();
+      p.byId.download.click();
+      const at = [p.pressed(), p.blobs[0].text, p.byId.unused.hidden, p.byId.unused.textContent,
+                  storage.held.get(four)];
+      p.press(p.item("Object 4"), "I was there");
+      return [...at, storage.held.get(four), p.byId.unused.hidden, p.pressed()];
+    """)
+    assert got[0] == ["I was not there"]
+    assert json.loads(got[1])["answers"] == {"22:5": "n"}
+    assert got[2] is False and "could not be read" in got[3] and "1 item" in got[3]
+    assert got[4] == junk  # only a press writes
+    assert got[5:7] == ["y", True]
+    assert sorted(got[7]) == ["I was not there", "I was there"]
+
+
+@needs_node
+def test_a_page_with_nothing_odd_stored_does_not_say_so(tmp_path):
+    assert run(tmp_path, manifest(), "return open().byId.unused.hidden;") is True
+
+
+@needs_node
+def test_a_cleared_answer_does_not_come_back_from_the_other_tab(tmp_path):
+    """Tab A has read a yes; B clears it; A answers something else."""
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      const first = open({storage});
+      first.openAll();
+      first.press(first.item("Object 2"), "I was there");
+      const b = open({storage});
+      b.openAll();
+      /* B clears after whatever A reads, and before A writes. */
+      let due = true;
+      const a = open({storage: new View(storage, (op, when) => {
+        if (due && when === "before" && op !== "getItem") {
+          due = false;
+          b.press(b.item("Object 2"), "Clear this answer");
+        }
+      })});
+      a.openAll();
+      const before = a.pressed();
+      a.press(a.item("Object 3"), "I was not there");
+      a.byId.download.click();
+      const again = open({storage});
+      again.openAll();
+      return [before, a.blobs[0].text, a.pressed(), again.pressed(), a.byId.kept.textContent];
+    """)
+    assert got[0] == ["I was there"]
+    assert load_answers(answers_file(tmp_path, got[1]), m) == {(22, 3): "n"}
+    assert got[2] == got[3] == ["I was not there"] and "not being kept" not in got[4]
+
+
+@needs_node
+@pytest.mark.parametrize("word,left", [("I was not there", "n"), ("Clear this answer", None)])
+def test_two_tabs_at_once_on_two_items_both_count(tmp_path, word, left):
+    """B's whole press, at each point A's own press can be cut at."""
+    m = manifest(EVERYTHING)
+    rows = run(tmp_path, m, f"const word = {json.dumps(word)};" + """
+      const out = [];
+      for (let at = 0; at < 8; at += 1) {
+        const storage = new Storage();
+        const first = open({storage});
+        first.openAll();
+        first.press(first.item("Object 2"), "I was there");
+        const b = open({storage});
+        b.openAll();
+        let n = -1, fired = false;
+        const a = open({storage: new View(storage, () => {
+          if (n >= 0 && n++ === at) {
+            fired = true;
+            b.press(b.item("Object 2"), word);
+          }
+        })});
+        a.openAll();
+        n = 0;
+        a.press(a.item("Object 3"), "I was there");
+        n = -1;
+        if (!fired) break;
+        const value = (p) => {
+          p.byId.download.click();
+          return JSON.parse(p.blobs[0].text).answers;
+        };
+        out.push([value(a), value(b), value(open({storage})), a.byId.kept.textContent]);
+      }
+      return out;
+    """)
+    wanted = {"22:3": "y"} | ({"22:2": left} if left else {})
+    assert len(rows) >= 4
+    for a, b, again, kept in rows:
+        assert a == b == again == wanted and "not being kept" not in kept
+
+
+@needs_node
+def test_two_tabs_on_one_item_show_what_is_stored(tmp_path):
+    m = manifest(EVERYTHING)
+    rows = run(tmp_path, m, """
+      const out = [];
+      for (let at = 0; at < 8; at += 1) {
+        const storage = new Storage();
+        const b = open({storage});
+        b.openAll();
+        let n = -1, fired = false;
+        const a = open({storage: new View(storage, () => {
+          if (n >= 0 && n++ === at) {
+            fired = true;
+            b.press(b.item("Object 2"), "I was not there");
+          }
+        })});
+        a.openAll();
+        n = 0;
+        a.press(a.item("Object 2"), "I was there");
+        n = -1;
+        if (!fired) break;
+        const shown = a.pressed(), held = [...storage.held.values()];
+        const kept = a.byId.kept.textContent;
+        a.press(a.item("Object 4"), "I was there");
+        const p = open({storage});
+        p.byId.download.click();
+        out.push([shown, held, kept, Object.keys(JSON.parse(p.blobs[0].text).answers)]);
+      }
+      return out;
+    """)
+    words = {"y": "I was there", "n": "I was not there"}
+    assert {held[0] for _, held, _, _ in rows} == {"y", "n"}  # each of them last, at some cut
+    for shown, (value,), kept, later in rows[:-1]:
+        assert shown == [words[value]] and "not being kept" not in kept
+        assert later == ["22:2", "22:4"]  # and what came after was stored
+    shown, (value,), kept, later = rows[-1]  # after A's last look: the event tells it
+    assert value == "n" and shown == ["I was there"] and later == ["22:2", "22:4"]
 
 
 @needs_node
 @pytest.mark.parametrize("storage", [
-    "null", "{getItem() { throw 1; }, setItem() { throw 1; }}",
-    "{getItem: () => null, setItem() { throw 1; }}", "{getItem: () => null, setItem() {}}",
+    "null", "{getItem() { throw 1; }, setItem() { throw 1; }, removeItem() { throw 1; }}",
+    "{getItem: () => null, setItem() { throw 1; }, removeItem() {}}",
+    "{getItem: () => null, setItem() {}, removeItem() {}}",
+    "{getItem() { throw 1; }, setItem() {}, removeItem() {}}",
 ])
 def test_the_page_works_without_storage_and_says_so(tmp_path, storage):
     m = manifest(EVERYTHING)
@@ -1656,6 +1841,9 @@ def test_the_page_works_without_storage_and_says_so(tmp_path, storage):
       p.openAll();
       p.press(p.item("Object 2"), "I was there");
       p.press(p.item("Object 3"), "I was not there");
+      p.press(p.item("Object 4"), "I was there");
+      p.press(p.item("Object 4"), "Clear this answer");
+      p.tell("storage", {});
       p.byId.download.click();
       return [p.pressed(), p.blobs[0].text, p.byId.kept.textContent];
     """)
@@ -1665,19 +1853,324 @@ def test_the_page_works_without_storage_and_says_so(tmp_path, storage):
 
 
 @needs_node
-def test_storage_that_stops_working_keeps_the_answers_given_since(tmp_path):
-    got = run(tmp_path, manifest(EVERYTHING), """
+def test_storage_that_cannot_be_read_is_said_before_any_press_and_while_it_lasts(tmp_path):
+    m = manifest(EVERYTHING)
+    (four,) = stored(m, "22:4")
+    got = run(tmp_path, m, f"const four = {json.dumps(four)};" + """
+      const storage = new Storage();
+      storage.held.set(four, "y");
+      storage.getItem = () => { throw new Error("off"); };
+      const p = open({storage});
+      p.openAll();
+      const out = [];
+      const note = () => {
+        out.push([p.pressed(), p.byId.kept.textContent.includes("not being kept")]);
+      };
+      note();
+      delete storage.getItem;
+      p.tell("storage", {}); note();
+      storage.getItem = () => { throw new Error("off"); };
+      p.tell("storage", {}); note();   /* what was read stays */
+      return out;
+    """)
+    assert got == [[[], True], [["I was there"], False], [["I was there"], True]]
+
+
+@needs_node
+@pytest.mark.parametrize("op", ["getItem", "setItem", "removeItem"])
+def test_an_operation_that_starts_to_throw_holds_what_was_pressed_since(tmp_path, op):
+    """Object 2 was yes, and is cleared; Object 3 is answered; the storage keeps its old say."""
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, f"const op = '{op}';" + """
       const storage = new Storage();
       const p = open({storage});
       p.openAll();
       p.press(p.item("Object 2"), "I was there");
-      storage.setItem = () => { throw new Error("full"); };
-      p.press(p.item("Object 3"), "I was there");
-      p.press(p.item("Object 4"), "I was there");
+      p.press(p.item("Object 5"), "I don't remember");
+      const good = storage[op];
+      storage[op] = () => { throw new Error(op); };
+      p.press(p.item("Object 2"), "Clear this answer");
+      p.press(p.item("Object 3"), "I was not there");
+      p.tell("storage", {});
       p.byId.download.click();
-      return [p.pressed().length, Object.keys(JSON.parse(p.blobs[0].text).answers)];
+      const during = [p.blobs[0].text, p.pressed(), p.byId.kept.textContent];
+      storage[op] = good;
+      p.tell("storage", {});
+      p.byId.download.click();
+      return [...during, p.blobs[1].text, p.pressed(), p.byId.kept.textContent];
     """)
-    assert got == [3, ["22:2", "22:3", "22:4"]]
+    wanted = {(22, 3): "n", (22, 5): "q"}
+    for text in (got[0], got[3]):
+        assert load_answers(answers_file(tmp_path, text), m) == wanted
+    assert sorted(got[1]) == sorted(got[4]) == ["I don't remember", "I was not there"]
+    # What was asked of the operation that threw is held; with setItem the clear went through.
+    assert "not being kept" in got[2] and "not being kept" in got[5]
+
+
+@needs_node
+def test_a_quota_that_fails_one_item_holds_that_item_and_stores_the_rest(tmp_path):
+    m = manifest(EVERYTHING)
+    (two, three, four) = stored(m, "22:2", "22:3", "22:4")
+    got = run(tmp_path, m, f"const [two, three, four] = {json.dumps([two, three, four])};" + """
+      const storage = new Storage();
+      const full = {on: true};
+      const set = Storage.prototype.setItem;
+      storage.setItem = function (k, v) {
+        if (full.on && k === three) throw new Error("full");
+        set.call(this, k, v);
+      };
+      const p = open({storage});
+      p.openAll();
+      p.press(p.item("Object 2"), "I was there");
+      p.press(p.item("Object 3"), "I was there");
+      p.press(p.item("Object 4"), "I was not there");
+      const held = Object.fromEntries(storage.held);
+      storage.held.set(three, "n");   /* another tab, which had room */
+      storage.held.set(two, "q");
+      p.tell("storage", {});
+      p.byId.download.click();
+      const during = [p.blobs[0].text, p.byId.kept.textContent];
+      full.on = false;
+      p.press(p.item("Object 3"), "I don't remember");
+      return [held, ...during, storage.held.get(three), p.byId.kept.textContent, p.pressed()];
+    """)
+    assert got[0] == {two: "y", four: "n"}
+    assert load_answers(answers_file(tmp_path, got[1]), m) == {
+        (22, 2): "q", (22, 3): "y", (22, 4): "n"}
+    assert list(json.loads(got[1])["answers"]) == ["22:2", "22:3", "22:4"]  # the list's order
+    assert "not being kept" in got[2]
+    assert got[3] == "q" and "not being kept" not in got[4]  # it is kept once it can be
+
+
+@needs_node
+def test_a_write_that_does_not_take_is_held_and_one_that_another_tab_changed_is_not(tmp_path):
+    m = manifest(EVERYTHING)
+    (two, three) = stored(m, "22:2", "22:3")
+    got = run(tmp_path, m, f"const [two, three] = {json.dumps([two, three])};" + """
+      const storage = new Storage();
+      const set = Storage.prototype.setItem, drop = Storage.prototype.removeItem;
+      storage.held.set(two, "y");
+      storage.setItem = function (k, v) { if (k !== two) set.call(this, k, v); };
+      storage.removeItem = function (k) { if (k !== two) drop.call(this, k); };
+      const p = open({storage});
+      p.openAll();
+      const out = [];
+      const note = () => {
+        p.tell("storage", {});
+        p.byId.download.click();
+        out.push([JSON.parse(p.blobs[p.blobs.length - 1].text).answers,
+                  p.byId.kept.textContent.includes("not being kept")]);
+      };
+      p.press(p.item("Object 2"), "I was there"); note();       /* as it was stored */
+      p.press(p.item("Object 2"), "Clear this answer"); note(); /* did not take */
+      p.press(p.item("Object 2"), "I was not there"); note();   /* nor did this */
+      delete storage.setItem;
+      p.press(p.item("Object 2"), "I was not there"); note();
+      storage.setItem = function (k, v) { set.call(this, k, v); this.held.set(k, "q"); };
+      p.press(p.item("Object 3"), "I was there"); note();       /* another tab's, over ours */
+      delete storage.setItem;
+      p.press(p.item("Object 4"), "I was there"); note();
+      return [out, storage.held.size];
+    """)
+    assert got[0] == [
+        [{"22:2": "y"}, False], [{}, True], [{"22:2": "n"}, True], [{"22:2": "n"}, False],
+        [{"22:2": "n", "22:3": "q"}, False],
+        [{"22:2": "n", "22:3": "q", "22:4": "y"}, False],
+    ]
+    assert got[1] == 3
+
+
+@needs_node
+def test_a_store_takes_only_items_and_answers(tmp_path):
+    m = manifest(EVERYTHING)
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      const store = logic.openStore(() => storage, data);
+      for (const [k, v] of [["22:9", "y"], ["__proto__", "y"], ["22:3", "yes"], ["22:3", true],
+                            ["22:3", null], ["22:3", "toString"], ["22:9", ""]]) {
+        store.set(k, v);
+      }
+      return [store.answers().size, storage.held.size, store.kept()];
+    """)
+    assert got == [0, 0, True]
+
+
+@needs_node
+def test_a_page_brought_back_by_the_browser_is_drawn_again(tmp_path):
+    """Back and forward, or a restored filter: no event says what changed in between."""
+    m = manifest(EVERYTHING)
+    (four,) = stored(m, "22:4")
+    got = run(tmp_path, m, f"const four = {json.dumps(four)};" + """
+      const storage = new Storage();
+      const p = open({storage});
+      p.openAll();
+      storage.held.set(four, "y");
+      p.tell("pageshow", {persisted: true});
+      const same = p.items().length, pressed = p.pressed();
+      p.byId["by-answer"].value = "y";
+      p.tell("pageshow", {persisted: false});
+      p.openAll();
+      return [same, pressed, p.byId.counts.textContent,
+              p.items().map((i) => i.cls("name")[0].textContent)];
+    """)
+    assert got[:2] == [6, ["I was there"]] and "1 there" in got[2] and got[3] == ["Object 4"]
+
+
+# -- names that rearrange what is around them
+
+CONTROLS = [0x00, 0x09, 0x0A, 0x1F, 0x7F, 0x85, 0x9F, 0x061C, 0x200E, 0x200F,
+            *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+
+
+@needs_node
+@pytest.mark.parametrize("code", CONTROLS, ids=hex)
+def test_controls_are_taken_out_of_every_name_shown(tmp_path, code):
+    bad = chr(code)
+    name = f"Series {bad}51{bad}"
+    m = manifest([candidate(1, series=51, series_name=name, name=f"{bad}Ob{bad}ject"),
+                  candidate(2, series=15, series_name=bad, name=bad + bad),
+                  candidate(3, series=7, series_name="", name="")],
+                 coverage=COVERAGE | {"recall": {51: RECALL[22], 8: RECALL[22] | {"name": name},
+                                                 9: RECALL[22] | {"name": bad}}})
+    got = run(tmp_path, m, """
+      const p = open();
+      p.openAll();
+      const texts = (nodes) => nodes.map((n) => n.textContent);
+      return {
+        options: texts(p.byId["by-series"].children),
+        heads: texts(p.byId.days.all((e) => e.tag === "h3")),
+        names: texts(p.byId.days.cls("name")),
+        recall: p.byId.recall.children.slice(1).map((r) => r.children[0].textContent),
+        all: p.order.filter((id) => id !== "data").map((id) => p.byId[id].textContent).join(""),
+        data: data.candidates.map((c) => c.series_name),
+      };
+    """)
+    assert got["options"] == ["All series", "Series 7", "Series 15", "Series 51 (51)"]
+    assert got["heads"] == ["Series 7", "Series 15", "Series 51 (51)"]
+    assert got["names"] == ["(no name in the catalogue)"] * 2 + ["Object"]
+    assert got["recall"] == ["Series 51 (8)", "Series 9", "Series 51 (51)"]
+    assert bad not in got["all"]
+    assert got["data"] == [name, bad, ""]  # what is hashed and exported is as it was
+    assert bad in json.loads(embedded(render_page(m)))["candidates"][0]["name"]
+
+
+@needs_node
+def test_two_series_that_look_alike_are_told_apart_by_id(tmp_path):
+    m = manifest([candidate(1, series=5, series_name="Bridges"),
+                  candidate(1, series=6, series_name="Bridges" + chr(0x200F))])
+    got = run(tmp_path, m, """
+      return open().byId["by-series"].children.map((o) => o.textContent);
+    """)
+    assert got == ["All series", "Bridges (5)", "Bridges (6)"]
+
+
+@needs_node
+def test_names_are_isolated_where_they_stand_beside_other_text(tmp_path):
+    got = run(tmp_path, manifest(), """
+      const p = open();
+      p.openAll();
+      return [p.byId.recall.children[1].children[0].getAttribute("dir"),
+              p.byId.days.cls("name")[0].getAttribute("dir"),
+              p.byId.days.all((e) => e.tag === "h3")[0].getAttribute("dir")];
+    """)
+    assert got == ["auto"] * 3
+    style = render_page(manifest()).split("<style>")[1].split("</style>")[0]
+    for selector in (r"h3", r"\.name", r"th, td"):
+        assert re.search(rf"^{selector} {{[^}}]*unicode-bidi: isolate", style, re.M), selector
+
+
+# -- the buttons and the bar
+
+
+def rule(selector):
+    style = render_page(manifest()).split("<style>")[1].split("</style>")[0]
+    (found,) = re.findall(rf"^{re.escape(selector)} {{(.*?)}}", style, re.M | re.S)
+    return found
+
+
+def test_a_pressed_button_keeps_its_size():
+    """Wider when pressed, the second click of a double click could land on its neighbour."""
+    pressed = rule('button[aria-pressed="true"]')
+    for word in ("font", "padding", "border-width", "border:", "letter", "width", "margin"):
+        assert word not in pressed, word
+
+
+@needs_node
+def test_the_bar_covers_neither_the_last_item_nor_the_focus(tmp_path):
+    assert "position: sticky" in rule(".bar")  # it takes its own room at the end of the page
+    assert "position: fixed" not in render_page(manifest())
+    body = DATA.sub("", render_page(manifest())).split("<body>")[1]
+    assert body.index('id="bar"') > body.index("</main>")
+    got = run(tmp_path, manifest(), """
+      const p = open();
+      const first = p.root.style.scrollPaddingBottom;
+      p.byId.bar.offsetHeight = 333;
+      p.resized();
+      return [first, p.root.style.scrollPaddingBottom, p.watched === p.byId.bar];
+    """)
+    assert got == ["100px", "333px", True]
+
+
+@needs_node
+def test_a_page_without_a_resize_observer_still_starts(tmp_path):
+    assert run(tmp_path, manifest(), """
+      return open({observer: false}).byId.start.hidden;
+    """) is True
+
+
+@needs_node
+def test_flags_are_a_list_only_where_there_are_some(tmp_path):
+    got = run(tmp_path, manifest(EVERYTHING), """
+      const p = open();
+      p.openAll();
+      return p.items().map((i) => i.cls("flags").map((f) => f.children.length));
+    """)
+    assert sorted(got) == [[], [], [1], [1], [1], [1]]
+
+
+@needs_node
+def test_each_row_of_buttons_is_named_by_its_item(tmp_path):
+    got = run(tmp_path, manifest(EVERYTHING), """
+      const p = open();
+      p.openAll();
+      return p.items().map((i) => {
+        const [row] = i.cls("buttons"), [name] = i.cls("name");
+        return [row.getAttribute("role"), row.getAttribute("aria-labelledby"),
+                name.getAttribute("id"), i.all((e) => e.getAttribute("role") === "group").length,
+                row.all((e) => e.getAttribute("aria-pressed") !== null).length];
+      });
+    """)
+    assert len({name for _, _, name, _, _ in got}) == 6
+    for role, by, name, groups, pressable in got:
+        assert role == "group" and by == name and groups == 1 and pressable == 3
+
+
+@needs_node
+def test_the_counts_are_said_once(tmp_path):
+    """One polite region holds both, and a text that did not change is not written again."""
+    page = DATA.sub("", render_page(manifest()))
+    (region,) = re.findall(r'<div id="news" aria-live="polite" aria-atomic="false">(.*?)</div>',
+                           page, re.S)
+    for inside in ("counts", "said", "kept"):
+        (tag,) = re.findall(rf'<p id="{inside}"[^>]*>', region)
+        assert "role=" not in tag and "aria-live" not in tag
+    got = run(tmp_path, manifest(EVERYTHING), """
+      const p = open();
+      p.openAll();
+      const writes = () => [p.byId.counts.writes, p.byId.said.writes, p.byId.kept.writes];
+      const out = [writes()];
+      p.press(p.item("Object 2"), "I was there"); out.push(writes());
+      p.press(p.item("Object 2"), "I was there"); out.push(writes());
+      p.byId.download.click(); out.push(writes());
+      p.tell("storage", {}); out.push(writes());
+      return out;
+    """)
+    (c, s, k), pressed, again, saved, told = got
+    assert pressed == again == [c + 1, s, k]
+    assert saved == told == [c + 1, s + 1, k]
+
+
+# -- what it says
 
 
 @needs_node
@@ -1776,7 +2269,7 @@ def test_filters_narrow_the_list_and_never_move_an_item_being_answered(tmp_path)
     assert got["gone"] == ["Object 4", "Object 3", "Object 2"]
     assert got["there"] == got["answered"] == ["Object 1"] and got["not"] == []
     assert got["exported"] == ["22:2"] and "3 with no answer" in got["counts"]
-    assert got["options"] == ["All series", "Series 5", "Series 22"]
+    assert got["options"] == ["All series", "Series 5 (5)", "Series 22 (22)"]
 
 
 # ------------------------------------------------------------------ the answers
