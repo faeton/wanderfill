@@ -253,6 +253,17 @@ Why the last one: Task 4's review showed that a plan rebuilt after its trip land
 
 ---
 
+## Left for later, from the Phase 1 reviews
+
+- `history`: `_airborne_flags` is diluted by a frozen fix as `grade` was, and takes speed from local time, not UTC. Do this before Task 10 reuses any of it.
+- `evidence --no-resolve` says "No region here was small enough" though nothing was measured.
+- An interrupt inside the verify file's own write can leave `partial` false or the file short.
+- A row with a year and month but no day reads as a bare year in both readers. None of 946 live rows has that shape.
+- What `updateMQP`, the delete endpoints and `update-trip` answer on success is not recorded. Record it at the next live use.
+- The package is installed editable, so an apply in another session runs whatever is checked out here. On 2026-11-24 one did, between two gates. Use a worktree for Phase 2, or keep other sessions from applying.
+
+---
+
 # Phase 2: features
 
 ## Task 10: `wanderfill series review`
@@ -268,7 +279,11 @@ Why the last one: Task 4's review showed that a plan rebuilt after its trip land
 
 Rules: own camera by default. Fast legs use `taken_utc` over the full photo sequence, before any filtering by place. Photos after `--until` are ignored, which is how an unfinished stay is held back. The recall curve at 0.2, 0.5, 1 and 2 km is printed per series before the page is written, with the number of already-ticked items that had no photo. `memory` proof comes only from a separate free-text field the owner fills, never from clicking yes.
 
-- [ ] **Tests:** no answer preselected; names containing `</script>` and `"` are escaped; the page has no `http` resource or `fetch`; blank items are absent from the export; `no` never becomes an op; unknown item, duplicate item, wrong account, wrong format and wrong manifest hash are each refused; a regenerated manifest invalidates old answers; already-ticked items are dropped on the live read; `series plan` without `--series` is refused; a failed tile is reported as incomplete coverage and listed in `params`; a photo next to a fast leg is excluded; own-camera default excludes `unknown` and prints how many; `confidence` stays 0.0.
+Two more rules:
+- **Spoofed GPS.** A coordinate can be spoofed, and nothing in it shows that. `--not-evidence FILE` takes the owner's list of `{from, to, bbox, why}` spans; photos inside one are never proof and the page says how many were left out. A day whose own-camera photos are in two places no ground or air leg joins at a possible speed is offered last, marked `conflict`.
+- **No list without photos.** The page shows only objects with a photo. Unticked objects without one are never printed, which would be the prompting AGENTS.md rule 7 forbids; a place the owner names unprompted goes in as `memory` through `series plan --named`, which takes the owner's words and shows no candidates.
+
+- [ ] **Tests:** a photo in a `--not-evidence` span is never proof and is counted; `--named` prints no suggestions and refuses an item it cannot match exactly; no answer preselected; names containing `</script>` and `"` are escaped; the page has no `http` resource or `fetch`; blank items are absent from the export; `no` never becomes an op; unknown item, duplicate item, wrong account, wrong format and wrong manifest hash are each refused; a regenerated manifest invalidates old answers; already-ticked items are dropped on the live read; `series plan` without `--series` is refused; a failed tile is reported as incomplete coverage and listed in `params`; a photo next to a fast leg is excluded; own-camera default excludes `unknown` and prints how many; `confidence` stays 0.0.
 - [ ] Run; expect failures. **Implement.** Progress is printed every 200 tiles. Tile bytes are already cached, so a rerun after Task 8 retries only failures; no second cache.
 - [ ] Full suite, ruff; README section; AGENTS.md section 6. Commit `series: review candidates offline, plan one series at a time`.
 
