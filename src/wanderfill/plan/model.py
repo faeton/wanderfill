@@ -23,10 +23,13 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
+
+from ..api.errors import PlanInvalid
 
 SCHEMA = 1
 
@@ -103,9 +106,31 @@ class Plan:
 
     @classmethod
     def load(cls, path: str | Path) -> Plan:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        ops = [Op(**o) for o in raw.pop("ops", [])]
-        return cls(ops=ops, **raw)
+        """Read a plan file, or raise :class:`PlanInvalid` saying what is wrong with it.
+
+        Only the *shape* is checked here: a file that is not JSON, has a field
+        this version does not know, or lacks its account. What the ops say is
+        :func:`validate`'s business, so that ``show`` can still open a plan that
+        is wrong.
+        """
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except ValueError as exc:  # not JSON, or not UTF-8
+            raise PlanInvalid(f"{path}: not a readable plan file ({exc})") from None
+        if not isinstance(raw, dict):
+            raise PlanInvalid(f"{path}: a plan file is a JSON object, not {type(raw).__name__}")
+        raw_ops = raw.pop("ops", [])
+        if not isinstance(raw_ops, list):
+            raise PlanInvalid(f"{path}: 'ops' must be a list, not {type(raw_ops).__name__}")
+        try:
+            ops = []
+            for i, o in enumerate(raw_ops):
+                if not isinstance(o, dict):
+                    raise PlanInvalid(f"{path}: ops[{i}] is not an object")
+                ops.append(Op(**o))
+            return cls(ops=ops, **raw)
+        except TypeError as exc:  # an unknown or missing field
+            raise PlanInvalid(f"{path}: {exc}") from None
 
     # -- reading ----------------------------------------------------------
 
@@ -180,3 +205,202 @@ def basis_of(snapshot: dict, regions: Iterable[int]) -> dict:
     if "visited_tcc" in snapshot:
         basis["tcc"] = sorted(snapshot["visited_tcc"])
     return basis
+
+
+# -- validation ---------------------------------------------------------------
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_PARTS = ("year", "month", "day")
+
+
+def _is_id(value: object) -> bool:
+    """An int that is not a bool: ``True`` is ``1`` to Python and to no server."""
+    return type(value) is int
+
+
+def _when_of(text: object, *, full: bool = False) -> tuple[str, Any] | str | None:
+    """A plan date as ``("date", date)``, ``("year", int)`` or ``None``; an error is a ``str``.
+
+    The forms are the ones ``apply._when`` executes: ``YYYY-MM-DD``, a bare
+    ``YYYY``, or nothing. ``full`` accepts only the first.
+    """
+    if text is None:
+        return None
+    if isinstance(text, str):
+        if _ISO_DAY.fullmatch(text):
+            try:
+                return ("date", dt.date.fromisoformat(text))
+            except ValueError:
+                pass
+        elif not full and len(text) == 4 and text.isdecimal() and int(text) > 0:
+            return ("year", int(text))
+    expected = "YYYY-MM-DD" if full else "YYYY-MM-DD or a bare YYYY"
+    return f"{text!r} is not {expected}"
+
+
+def _backwards(a: tuple[str, Any], b: tuple[str, Any]) -> bool:
+    """Start after end, where both are precise, and by year where either is not."""
+    if a[0] == b[0]:
+        return a[1] > b[1]
+    year = lambda w: w[1].year if w[0] == "date" else w[1]  # noqa: E731
+    return year(a) > year(b)
+
+
+def _span_problem(start: object, end: object) -> str | None:
+    pair = [_when_of(start), _when_of(end)]
+    for w in pair:
+        if isinstance(w, str):
+            return w
+    if None not in pair and _backwards(*pair):
+        return f"starts {start} after it ends {end}"
+    return None
+
+
+def _number(value: object) -> int | None:
+    """An int, or the digits of one: the site's own forms send both."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
+
+
+def _side_of(region: dict, which: str) -> tuple[tuple[str, Any] | None, str | None]:
+    """One end of a trip region's own dates: the year is the anchor, month and day a pair."""
+    got = {p: region.get(f"{p}_{which}") for p in _PARTS}
+    given = {p: v for p, v in got.items() if v is not None and v != ""}
+    if not given:
+        return None, None
+    names = ", ".join(f"{p}_{which}" for p in given)
+    if "year" not in given:
+        return None, f"has {names} but no year_{which}"
+    if ("month" in given) != ("day" in given):
+        return None, f"month_{which} and day_{which} come together, not one without the other"
+    nums = {p: _number(v) for p, v in given.items()}
+    if None in nums.values():
+        return None, f"{names} must be whole numbers"
+    if "month" not in nums:
+        return (("year", nums["year"]), None) if nums["year"] > 0 else (None, "year must be > 0")
+    try:
+        return ("date", dt.date(nums["year"], nums["month"], nums["day"])), None
+    except ValueError:
+        return None, f"{nums['year']}-{nums['month']}-{nums['day']} is not a real date"
+
+
+def _trip_problems(op: Op) -> list[str]:
+    out = []
+    # client.create_trip calls .isoformat() on both, and the site needs both.
+    for name in ("date_from", "date_to"):
+        if (w := _when_of(getattr(op, name), full=True)) is None:
+            out.append(f"{name} is required (YYYY-MM-DD)")
+        elif isinstance(w, str):
+            out.append(f"{name}: {w}")
+    if not out and _backwards(_when_of(op.date_from), _when_of(op.date_to)):
+        out.append(f"starts {op.date_from} after it ends {op.date_to}")
+    if not isinstance(op.regions, list) or not op.regions:
+        return [*out, "has no regions"]
+    seen: set[int] = set()
+    for n, r in enumerate(op.regions):
+        at = f"regions[{n}]"
+        if not isinstance(r, dict):
+            out.append(f"{at} is not an object")
+            continue
+        if not _is_id(r.get("id")):
+            out.append(f"{at} has no integer id")
+        elif r["id"] in seen:
+            out.append(f"{at}: region {r['id']} is listed twice")
+        else:
+            seen.add(r["id"])
+        q = r.get("quality")
+        if not _is_id(q) or not 1 <= q <= 6:
+            out.append(f"{at} needs a quality from 1 to 6, not {q!r}")
+        sides = {w: _side_of(r, w) for w in ("from", "to")}
+        bad = [f"{at}: {why}" for _, why in sides.values() if why]
+        out += bad
+        a, b = sides["from"][0], sides["to"][0]
+        if not bad and a and b and _backwards(a, b):
+            out.append(f"{at} starts after it ends")
+    return out
+
+
+def _op_problems(op: Op) -> list[str]:
+    """What is wrong with one apply-bucket op on its own, as short phrases."""
+    out: list[str] = []
+
+    def need(field_name: str) -> None:
+        if not _is_id(getattr(op, field_name)):
+            out.append(f"needs an integer {field_name}")
+
+    if op.kind == "create_trip":
+        return _trip_problems(op)
+    if op.kind in ("add_visit", "update_visit", "mark_dare"):
+        need("region")
+    if op.kind == "update_visit":
+        need("visit_id")
+    if op.kind in ("mark_kye", "mark_tcc", "tick_series"):
+        need("item")
+    if op.kind == "tick_series":
+        need("series")
+    if op.kind in ("add_visit", "update_visit"):
+        # 0 is "no visit", and an absent quality is a broken plan, not a default 3.
+        if not _is_id(op.quality) or not 1 <= op.quality <= 6:
+            out.append(f"needs a quality from 1 to 6, not {op.quality!r}")
+        if why := _span_problem(op.date_from, op.date_to):
+            out.append(f"dates: {why}")
+    return out
+
+
+def validate(plan: Plan) -> list[str]:
+    """Everything wrong with a plan that can be known without the server.
+
+    Empty means valid. Pure: no network, no clock. The schema and each op's kind
+    and bucket are checked for the whole file; only ops a human has left in the
+    ``apply`` bucket are checked for content and for duplicating each other,
+    since only those execute. Each message names the op by its index in the file,
+    its kind and its label, so a person can find it.
+
+    This exists because a malformed op used to fail when it was reached, after
+    every earlier op had already been written to a real profile.
+    """
+    out: list[str] = []
+    if type(plan.schema) is not int or plan.schema != SCHEMA:
+        out.append(f"plan schema is {plan.schema!r}; this version reads schema {SCHEMA} only")
+    if not _is_id(plan.account):
+        out.append(f"plan account must be an integer, not {plan.account!r}")
+
+    kinds, buckets = get_args(OpKind), get_args(Bucket)
+    seen_key: dict[str, int] = {}
+    adds: dict[tuple, int] = {}
+    updated: dict[int, int] = {}
+
+    for i, op in enumerate(plan.ops):
+        who = f"ops[{i}] {op.kind} {op.label!r}"
+        if op.kind not in kinds:
+            out.append(f"{who}: unknown kind")
+            continue
+        if op.bucket not in buckets:
+            out.append(f"{who}: unknown bucket {op.bucket!r}")
+            continue
+        if op.bucket != "apply":
+            continue
+        if own := _op_problems(op):
+            out += [f"{who}: {p}" for p in own]
+            continue
+
+        if op.key in seen_key:
+            out.append(f"{who}: the same write twice: it has the same key {op.key} as "
+                       f"ops[{seen_key[op.key]}]. Remove one and re-plan.")
+            continue
+        seen_key[op.key] = i
+        if op.kind == "add_visit":
+            same = (op.region, op.date_from, op.date_to)
+            if same in adds:
+                out.append(f"{who}: adds region {op.region} for {op.date_from}..{op.date_to} "
+                           f"a second time (ops[{adds[same]}]), which would duplicate the visit")
+            adds.setdefault(same, i)
+        elif op.kind == "update_visit":
+            if op.visit_id in updated:
+                out.append(f"{who}: visit {op.visit_id} is already updated by "
+                           f"ops[{updated[op.visit_id]}]; the second would replace the first")
+            updated.setdefault(op.visit_id, i)
+    return out

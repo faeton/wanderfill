@@ -27,12 +27,13 @@ from ..api.errors import (
     AuthError,
     DriftError,
     JournalCorrupt,
+    PlanInvalid,
     PrecisionLoss,
     TransportError,
     UnknownWriteOutcome,
     VerificationFailed,
 )
-from .model import Op, Plan, basis_of, fingerprint, regions_touched
+from .model import Op, Plan, basis_of, fingerprint, regions_touched, validate
 
 # The Op fields that say why, not what: they stay out of `Op.key` and the journal's payload.
 PROVENANCE = frozenset({"label", "confidence", "method", "evidence"})
@@ -273,35 +274,32 @@ def apply_plan(
 
     Preconditions, in order, each of which aborts rather than warns:
 
-    1. ``confirm`` must be true. Without it this prints and exits — the default
+    1. The whole plan must validate (:func:`~wanderfill.plan.model.validate`): its
+       schema, and every apply-bucket op's ids, quality, dates and duplicates.
+       It needs no network, so it comes first and a dry run reports it too; a
+       malformed op used to be found only when reached, after earlier ones had
+       been written.
+    2. ``confirm`` must be true. Without it this prints and exits — the default
        is always the safe one.
-    2. The logged-in account must match the plan's. This is the guard against
+    3. The logged-in account must match the plan's. This is the guard against
        writing somebody's history onto the wrong profile.
-    3. No other run may hold the account's lock, from here to the read-back.
-    4. No write may be open in any of the account's journals, this plan's or not.
-    5. A snapshot must be taken successfully. If state cannot be captured, it
+    4. No other run may hold the account's lock, from here to the read-back.
+    5. No write may be open in any of the account's journals, this plan's or not.
+    6. A snapshot must be taken successfully. If state cannot be captured, it
        cannot be compared afterwards, so the run does not start.
-    6. Live state must match the fingerprint taken at plan time. A profile that
+    7. Live state must match the fingerprint taken at plan time. A profile that
        moved needs a new plan, not an optimistic write.
-    7. The op count must fit under ``max_writes``. A ceiling means a logic bug
+    8. The op count must fit under ``max_writes``. A ceiling means a logic bug
        cannot rewrite an entire profile in one go.
     """
     report = ApplyReport()
     ops = plan.to_apply()
 
-    # Structural validation first: it needs no network, no auth and no snapshot,
-    # so a malformed plan fails before anything touches the profile. Two ops with
-    # the same key would both run — `already` is read once, so the first success
-    # cannot suppress the second — and a plan containing the same write twice is
-    # a plan whose author is confused.
-    seen: dict[str, Op] = {}
-    for op in ops:
-        if op.key in seen:
-            raise ValueError(
-                f"plan contains the same write twice: {op.kind} {op.label!r} and "
-                f"{seen[op.key].label!r} share key {op.key}. Remove one and re-plan."
-            )
-        seen[op.key] = op
+    if problems := validate(plan):
+        raise PlanInvalid(
+            f"plan is not valid, so nothing was sent ({len(problems)} problem(s)):\n  "
+            + "\n  ".join(problems)
+        )
 
     if not confirm:
         report.skipped = len(ops)

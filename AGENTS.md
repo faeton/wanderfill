@@ -592,6 +592,10 @@ the same kind rather than inventing the fields; `regions_touched()` in
 
 At apply time:
 
+- Refuse a plan that does not validate, before the first request and before
+  `--confirm` matters: `plan.model.validate` checks the schema and, for every
+  apply-bucket op, its ids, quality 1–6, dates, and duplicates. `check`, `apply`
+  (dry run too) and `show` all print its problems.
 - Refuse if the authenticated account id differs from the plan's.
 - Refuse if another run holds the account's lock, or if any of the account's
   journals has an open entry or a line that cannot be read. Re-planning does not

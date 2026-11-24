@@ -94,3 +94,11 @@ class AccountMismatch(WanderfillError):
     history onto another person's profile. This exists so that cannot happen
     quietly.
     """
+
+
+class PlanInvalid(WanderfillError, ValueError):
+    """A plan file is malformed, or says something no write can honestly carry out.
+
+    A ``ValueError`` as well, so a caller written before plans were validated as
+    a whole, and which caught that, still catches this.
+    """

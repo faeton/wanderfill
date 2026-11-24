@@ -761,7 +761,7 @@ def cmd_history(args) -> int:
 
 
 def cmd_show(args) -> int:
-    from ..plan.model import Plan
+    from ..plan.model import Plan, validate
 
     plan = Plan.load(args.plan)
     print(f"plan for account {plan.account}, made {plan.created}")
@@ -795,23 +795,38 @@ def cmd_show(args) -> int:
                 bits.append("ALLOW_VAGUER — this may erase precision")
             if op.regions:
                 bits.append(f"{len(op.regions)} trip region(s): "
-                            + ",".join(str(r.get('id')) for r in op.regions))
+                            + ",".join(str(r.get('id') if isinstance(r, dict) else r)
+                                       for r in op.regions))
             print(f"      {'  '.join(bits)}")
             print(f"      confidence {op.confidence}  |  {op.method}")
             for e in op.evidence:
                 print(f"        - {e}")
     elif plan.ops:
         print("Run with -v to see dates, ids, quality and the evidence behind each op.")
+    if problems := validate(plan):
+        print(f"\nINVALID, and apply would refuse it ({len(problems)} problem(s)):")
+        for p in problems:
+            print(f"  ✗ {p}")
     return 0
 
 
 def cmd_check(args) -> int:
     """Read-only: does this plan still match the profile it was built against?"""
     from ..plan.apply import Journal, describe_open, open_entries
-    from ..plan.model import Plan, basis_of, fingerprint, regions_touched
+    from ..plan.model import Plan, basis_of, fingerprint, regions_touched, validate
+
+    plan = Plan.load(args.plan)
+    if bad := validate(plan):
+        # The account, drift and journal checks read the ops' ids, which a plan
+        # like this may not have; and apply refuses it before any of them.
+        print("BLOCKERS:")
+        for p in bad:
+            print(f"  ✗ {p}")
+        print("\nAccount, drift and journal were not checked: the plan is not valid. "
+              "This wrote nothing.")
+        return 1
 
     c = _client(args)
-    plan = Plan.load(args.plan)
     ops = plan.to_apply()
     problems = []
 
@@ -820,10 +835,6 @@ def cmd_check(args) -> int:
           f"{'  ✓' if live == plan.account else '  ✗ MISMATCH'}")
     if live != plan.account:
         problems.append("account mismatch")
-
-    keys = [o.key for o in ops]
-    if len(keys) != len(set(keys)):
-        problems.append("the plan contains the same write twice")
 
     regions = sorted(regions_touched(ops))
     snap = c.snapshot(regions or None, tcc=any(o.kind == "mark_tcc" for o in ops))
@@ -976,12 +987,17 @@ def cmd_share(args) -> int:
 
 def cmd_apply(args) -> int:
     from ..plan.apply import apply_plan
-    from ..plan.model import Plan
+    from ..plan.model import Plan, validate
 
-    c = _client(args)
     plan = Plan.load(args.plan)
     ops = plan.to_apply()
     print(f"plan {args.plan}: {len(ops)} op(s) in the apply bucket")
+    if problems := validate(plan):
+        print(f"\nThis plan is not valid; nothing was sent ({len(problems)} problem(s)):")
+        for p in problems:
+            print(f"  ✗ {p}")
+        return 1
+    c = _client(args)
     if not args.confirm:
         print(
             "\nDry run. Nothing was sent.\n"

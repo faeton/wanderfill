@@ -1916,6 +1916,7 @@ def test_apply_refuses_a_plan_containing_the_same_write_twice():
     import pathlib
     import tempfile
 
+    from wanderfill.api.errors import PlanInvalid
     from wanderfill.plan.apply import apply_plan
     twice = [Op(kind="mark_dare", bucket="apply", region=7),
              Op(kind="mark_dare", bucket="apply", region=7)]
@@ -1924,9 +1925,8 @@ def test_apply_refuses_a_plan_containing_the_same_write_twice():
                    "maps/get-visited-regions-ids-simple": {"result": "OK", "ids": []},
                    "maps/get-visited-dare-ids-simple": {"result": "OK", "ids": []}})
     with tempfile.TemporaryDirectory() as td:
-        with pytest.raises((ValueError, DriftError)) as e:
+        with pytest.raises(PlanInvalid, match="twice"):
             apply_plan(c, plan, workdir=pathlib.Path(td), confirm=True)
-        assert "twice" in str(e.value) or "drift" in str(e.value).lower()
 
 
 def test_regions_touched_includes_trip_members():
@@ -2378,3 +2378,166 @@ def test_update_trip_two_regions_span_min_to_max():
 
 def test_update_trip_is_a_single_attempt_write():
     assert Transport._is_write("trips/update-trip")
+
+
+# --------------------------------------------------------------------------
+# a malformed plan is refused whole, before its first request
+# --------------------------------------------------------------------------
+
+def _vplan(*ops, **kw):
+    return Plan(account=7, ops=list(ops), basis={"fingerprint": "x"}, **kw)
+
+
+def _vop(kind="add_visit", **kw):
+    return Op(kind=kind, bucket="apply", **({"label": "the op"} | kw))
+
+
+def _vtrip(**kw):
+    base = {"date_from": "2024-01-01", "date_to": "2024-01-05",
+            "regions": [{"id": 1, "quality": 3}, {"id": 2, "quality": 3}]}
+    return _vop("create_trip", **(base | kw))
+
+
+REJECTED = {
+    "schema 99": lambda: _vplan(_vop(region=1, quality=3), schema=99),
+    "unknown kind": lambda: _vplan(_vop("delete_visit", region=1)),
+    "unknown bucket": lambda: _vplan(Op(kind="mark_dare", bucket="maybe", region=1)),
+    "add_visit without region": lambda: _vplan(_vop(quality=3)),
+    "add_visit without quality": lambda: _vplan(_vop(region=1)),
+    "quality 0": lambda: _vplan(_vop(region=1, quality=0)),
+    "quality 7": lambda: _vplan(_vop(region=1, quality=7)),
+    "a bool is not an id": lambda: _vplan(_vop(region=True, quality=3)),
+    "update_visit without visit_id": lambda: _vplan(_vop("update_visit", region=1, quality=3)),
+    "trip with no regions": lambda: _vplan(_vtrip(regions=[])),
+    "trip region twice": lambda: _vplan(_vtrip(regions=[{"id": 1, "quality": 3}] * 2)),
+    "trip region without id": lambda: _vplan(_vtrip(regions=[{"quality": 3}])),
+    "trip region without quality": lambda: _vplan(_vtrip(regions=[{"id": 1}])),
+    "trip without header dates": lambda: _vplan(_vtrip(date_from=None)),
+    "trip header a bare year": lambda: _vplan(_vtrip(date_from="2024", date_to="2024")),
+    "trip region month without day": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 2}])),
+    "trip region month without year": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "month_from": 2, "day_from": 3}])),
+    "trip region 30 February": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 2, "day_from": 30}])),
+    "trip region ends before it starts": lambda: _vplan(_vtrip(regions=[
+        {"id": 1, "quality": 3, "year_from": 2024, "month_from": 3, "day_from": 2,
+         "year_to": 2024, "month_to": 3, "day_to": 1}])),
+    "mark_kye without item": lambda: _vplan(_vop("mark_kye")),
+    "mark_tcc without item": lambda: _vplan(_vop("mark_tcc")),
+    "tick_series without item": lambda: _vplan(_vop("tick_series", series=22)),
+    "tick_series without series": lambda: _vplan(_vop("tick_series", item=5)),
+    "mark_dare without region": lambda: _vplan(_vop("mark_dare")),
+    "unparseable date": lambda: _vplan(_vop(region=1, quality=3, date_from="March 2024")),
+    "start after end": lambda: _vplan(_vop(region=1, quality=3, date_from="2024-05-02",
+                                     date_to="2024-05-01")),
+    "year after year": lambda: _vplan(_vop(region=1, quality=3, date_from="2025", date_to="2024")),
+    "year after a date": lambda: _vplan(_vop(region=1, quality=3, date_from="2025",
+                                       date_to="2024-05-01")),
+    "same add, other quality": lambda: _vplan(
+        _vop(region=1, quality=2, date_from="2024-01-01", date_to="2024-01-02"),
+        _vop(region=1, quality=3, date_from="2024-01-01", date_to="2024-01-02")),
+    "one visit updated twice": lambda: _vplan(
+        _vop("update_visit", region=1, visit_id=9, quality=3, date_from="2024"),
+        _vop("update_visit", region=1, visit_id=9, quality=4, date_from="2025")),
+    "one key twice": lambda: _vplan(_vop("mark_dare", region=1), _vop("mark_dare", region=1)),
+}
+
+
+@pytest.mark.parametrize("name", REJECTED)
+def test_plan_validation_rejects(name):
+    from wanderfill.plan.model import validate
+
+    plan = REJECTED[name]()
+    problems = validate(plan)
+    assert problems, name
+    if name not in ("schema 99",):
+        assert any("ops[" in m for m in problems), problems
+
+
+def test_plan_validation_names_the_op():
+    from wanderfill.plan.model import validate
+
+    (msg,) = validate(_vplan(_vop("mark_dare", region=1), _vop("mark_kye", label="Q 12")))
+    assert "ops[1]" in msg and "mark_kye" in msg and "Q 12" in msg
+
+
+def test_plan_validation_accepts_year_only_and_undated_visits():
+    from wanderfill.plan.model import validate
+
+    plan = _vplan(
+        _vop(region=1, quality=1),
+        _vop(region=2, quality=6, date_from="2013", date_to="2013"),
+        _vop(region=3, quality=3, date_from="2013", date_to="2014-02-01"),
+        _vop("update_visit", region=4, visit_id=8, quality=3, date_from="2020-01-01",
+           date_to="2020-01-01"),
+        _vtrip(regions=[{"id": 5, "quality": 2},
+                       {"id": 6, "quality": 3, "year_from": 2024, "year_to": 2024},
+                       {"id": 7, "quality": 3, "year_from": "2024", "month_from": "1",
+                        "day_from": "2", "year_to": 2024, "month_to": 1, "day_to": 2}]),
+        _vop("mark_dare", region=9), _vop("mark_kye", item=9), _vop("mark_tcc", item=3),
+        _vop("tick_series", series=22, item=5),
+        Op(kind="add_visit", bucket="review"),  # not executed, so not checked for content
+    )
+    assert validate(plan) == []
+
+
+def test_an_invalid_late_op_sends_nothing(tmp_path):
+    """A malformed op was found only when reached, after the earlier writes had landed."""
+    from wanderfill.api.errors import PlanInvalid
+    from wanderfill.plan.apply import apply_plan
+
+    c, t = client({"user/status-quick": {"result": "OK", "uid": 7}})
+    plan = _vplan(_vop("mark_dare", region=1), _vop(region=2))  # the add_visit has no quality
+    with pytest.raises(PlanInvalid, match=r"ops\[1\]"):
+        apply_plan(c, plan, workdir=tmp_path, confirm=True)
+    assert t.sent == []
+    with pytest.raises(PlanInvalid):  # a dry run reports it too
+        apply_plan(c, plan, workdir=tmp_path)
+    assert t.sent == [] and list(tmp_path.iterdir()) == []
+
+
+def test_dry_run_apply_reports_invalid_plans(monkeypatch, tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    c, t = client()
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    path = _vplan(_vop(region=2)).save(tmp_path / "p.json")
+    assert cli.main(["apply", str(path), "--workdir", str(tmp_path / "w")]) == 1
+    assert "ops[0]" in capsys.readouterr().out and t.sent == []
+    good = _vplan(_vop("mark_dare", region=1)).save(tmp_path / "good.json")
+    assert cli.main(["apply", str(good), "--workdir", str(tmp_path / "w")]) == 0
+
+
+def test_check_lists_validation_problems_as_blockers(monkeypatch, tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    c, t = client()
+    monkeypatch.setattr(cli, "_client", lambda args: c)
+    path = _vplan(_vop(region=2)).save(tmp_path / "p.json")
+    assert cli.main(["check", str(path), "--workdir", str(tmp_path)]) == 1
+    assert "ops[0]" in capsys.readouterr().out and t.sent == []
+
+
+def test_show_still_prints_an_invalid_plan_and_says_why(tmp_path, capsys):
+    from wanderfill.cli import main as cli
+
+    path = _vplan(_vop(region=2), schema=99).save(tmp_path / "p.json")
+    assert cli.main(["show", str(path), "-v"]) == 0
+    out = capsys.readouterr().out
+    assert "schema 99" in out and "ops[0]" in out
+
+
+@pytest.mark.parametrize("text", [
+    "{", "[]", '{"ops": []}', '{"account": 7, "ops": {}}', '{"account": 7, "ops": [3]}',
+    '{"account": 7, "ops": [{"kind": "mark_dare", "sneaky": 1}]}',
+    '{"account": 7, "surprise": 1}', '{"account": 7, "ops": [{"bucket": "apply"}]}',
+])
+def test_a_plan_file_that_cannot_load_says_so_plainly(tmp_path, text):
+    from wanderfill.api.errors import PlanInvalid
+
+    path = tmp_path / "p.json"
+    path.write_text(text)
+    with pytest.raises(PlanInvalid) as e:
+        Plan.load(path)
+    assert str(path) in str(e.value)
