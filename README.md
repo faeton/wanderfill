@@ -232,6 +232,9 @@ country out is the dangerous mistake:
 - A country seen only at aircraft speed goes on a separate
   "overflight — you decide" list.
 - "No" is never bare: it is "no evidence in sources covering 2018 → 2026".
+- A day whose map tile did not arrive is **not read**, never "no data" and never
+  a day away. It is listed on its own, and until a re-run reads it no count,
+  absence or trip edge it touches is given as final.
 - A short gap with the same country on both sides is filled and labelled
   `bridged`; a gap between two countries is left open ("left between Mar 3
   and Mar 9") rather than guessed.
@@ -532,6 +535,7 @@ cost a wrong write or a wrong number the first time.
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |
 | A tile that timed out read as an empty tile, so a point in it was given to a polygon in the next tile over, and that answer was cached for good | `TileReader.failed` holds every tile that did not arrive, and a point with one in its neighbourhood and no polygon around it is `tile_error`: no region, never cached, counted by `history` and `evidence` in the terminal and in their files, and asked again by the next run. A body that does not decode is not kept, and one already on disk is fetched again. Wrong `tile_nearest` answers cached by earlier versions cannot be told from right ones: `--refresh` asks again only about points with **no** region, so delete the coordinate cache (`~/.local/share/wanderfill/coords.json` by default) to re-ask them all; `test_a_failed_home_tile_is_not_answered_by_its_neighbour`, `test_tile_errors_are_not_saved_to_the_coordinate_cache`, `test_history_and_evidence_say_how_many_points_could_not_be_read` |
+| A day that could not be read counted as a day with no data, so `days` printed "under 183 even if every day with no data was here" and `absences` closed a run across it | `history` keeps "not read" apart from "no data", also on a day that has a placed point: it widens the `days` ceiling and removes the verdict, leaves an absence and the 365-day maximum "not settled", reopens an exact trip edge, and is listed in every rendering; `test_days_never_reassures_while_a_day_is_unread`, `test_an_unread_day_inside_an_absence_leaves_it_unsettled`, `test_a_trip_edge_beside_an_unread_day_is_not_exact`, `test_a_fully_read_run_prints_what_it_always_printed` |
 | `location/get-region` doubles as a live-location beacon | `share=0` is hardcoded, not a parameter |
 | UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
 | A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |

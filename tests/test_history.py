@@ -7,6 +7,8 @@ No network. Regions are hand-made: 1 and 2 in Turkey, 3 in Greece, 4 in Spain,
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 
 import pytest
 
@@ -559,6 +561,203 @@ def test_render_markdown_has_header_and_notes():
     )
     md = h.render_markdown(h.query_trips(lg, since=None, until=None, hdr=hdr))
     assert "**command:**" in md and "Read this before copying" in md and "| Spain |" in md
+
+
+# ------------------------------------------------- days that could not be read
+
+
+def lost(day):
+    """A point whose map tile did not arrive."""
+    return h.Point(day, 0.0, 0.0, None, "track", unread=True)
+
+
+J = [D(2024, 1, i) for i in range(1, 32)]  # J[0] is 1 January
+
+
+def every_query(lg, hdr=None):
+    window = {"since": D(2024, 1, 1), "until": D(2024, 1, 31), "hdr": hdr}
+    return {
+        "trips": h.query_trips(lg, **window),
+        "first": h.query_trips(lg, first=True, exclude={"DK"}, **window),
+        "list": h.query_list(lg, **window),
+        "check": h.query_check(lg, countries={"ES", "IR", "GR", "PT"}, **window),
+        "days": h.query_days(lg, year=2024, today=D(2024, 6, 30), hdr=hdr),
+        "absences": h.query_absences(lg, home={"PT"}, **window),
+        "where": h.query_where(lg, **window),
+    }
+
+
+def renderings(report):
+    return (h.render_markdown(report), h.render_csv(report),
+            json.dumps(h.render_json(report), indent=1, ensure_ascii=False, default=str))
+
+
+# sha256 over the three renderings, taken before days could be "not read".
+PINNED = {
+    "trips": "9ef18b9226ba37f6a357b5b4f0cc48a263db7a777558d09301fd4eed24209baa",
+    "first": "fc4e871dac753e905dde33f3c2bd70fc966ef92a8691f511483a1005a93f5877",
+    "list": "1c9a08d63528ecb7db49b438fcd7d40d3567fa16b7958a2f58db09ab96f73df4",
+    "check": "984af3cdabf8b9666cb41e4b74a24e6219de7f5c84276d891ce4e9dbce3d33a0",
+    "days": "b8f853ec47b4d0b289bcfbd9d59ed0565e78d7dd3353151be0c654a82cb924f3",
+    "absences": "5184e4f12d23a1fdb628187d76607f7d1173c56d8c64fddfc777d9ea2089ceb3",
+    "where": "3cb49356006abf4499f8cf93ed54eb26ccf69957cd0b07ea2468c1e57d4e8f65",
+}
+
+
+@pytest.mark.parametrize("query", sorted(PINNED))
+def test_a_fully_read_run_prints_what_it_always_printed(query):
+    at = [dt.datetime(2024, 1, 20, 8), dt.datetime(2024, 1, 20, 9)]
+    lg = ledger(
+        [*days_of(J[0], 2, PT), pt(J[2], ES), pt(J[4], ES), pt(J[5], ES, "photos"),
+         pt(J[7], None), pt(J[8], ES), pt(J[8], PT), pt(J[11], GL), pt(J[14], PT),
+         pt(J[19], GR, "photos", at[0], 40.0, 23.0), pt(J[19], GR, "photos", at[1], 45.0, 23.0)],
+        [visit(IR, YearOnly(2024), None, 7), visit(TR1, J[24], J[26], 8)],
+    )
+    hdr = h.header(lg, command="x", since=J[0], until=J[30], territories="separate",
+                   today=D(2024, 6, 30))
+    text = "\x00".join(renderings(every_query(lg, hdr)[query]))
+    assert hashlib.sha256(text.encode()).hexdigest() == PINNED[query]
+
+
+@pytest.mark.parametrize("partly", [False, True], ids=["only unread", "also placed"])
+@pytest.mark.parametrize("query", sorted(PINNED))
+def test_every_rendering_of_every_query_carries_the_unread_day(query, partly):
+    """A copied table must not lose it, and the CSV has no header to fall back on."""
+    lg = ledger([pt(J[0], PT), pt(J[1], ES), lost(J[2]), pt(J[3], ES), pt(J[4], PT),
+                 *([pt(J[2], ES)] if partly else [])])
+    report = every_query(lg)[query]
+    section = next(s for s in report.sections if s.title == "days that could not be fully read")
+    assert section.rows == [{"from": "2024-01-03", "to": "2024-01-03", "days": 1, "points": 1,
+                             "also placed in": "Spain" if partly else ""}]
+    for text in renderings(report):
+        assert "days that could not be fully read" in text
+        assert "1 day(s) in this period could not be fully read" in text
+        assert "e-running" in text
+
+
+def test_an_unread_day_outside_the_window_is_not_listed_in_it():
+    lg = ledger([pt(J[0], PT), pt(J[1], PT), lost(D(2023, 5, 1))])
+    for query, report in every_query(lg).items():
+        assert not any("could not be fully read" in s.title for s in report.sections), query
+
+
+def test_days_never_reassures_while_a_day_is_unread():
+    """"Under 183 even if every day with no data was here", with days it had not read
+    counted as days with no data, or as full days in the country beside them."""
+    lg = ledger([pt(J[0], ES), pt(J[1], ES), lost(J[2]), pt(J[3], PT), lost(J[3])])
+
+    def statuses(threshold):
+        r = h.query_days(lg, year=2024, threshold=threshold, today=J[4])
+        return r, {row["iso"]: row for row in r.sections[0].rows}
+
+    r, rows = statuses(5)
+    # 1 day with no data (the 5th), 1 not read (3rd), 1 placed and not fully read (4th)
+    assert rows["ES"]["vs 5"] == (
+        "could reach 5: 2 counted + 1 days with no data + 2 days not fully read")
+    assert rows["PT"]["vs 5"] == (
+        "incomplete: 1 counted + 1 days with no data + 1 days not fully read")
+    assert (rows["ES"]["not fully read"], rows["PT"]["not fully read"]) == (2, 1)
+    assert "not fully read" in r.sections[0].columns
+    assert any(n.startswith("1 day(s) in this period have no data") for n in r.notes)
+    assert any("1 not read at all, 1 placed" in n and "incomplete" in n and "e-running" in n
+               for n in r.notes)
+    # Here and unread elsewhere in the same day adds nothing to here, and still no verdict.
+    _, rows = statuses(50)
+    assert all("even if" not in row["vs 50"] for row in rows.values())
+    _, rows = statuses(2)
+    assert rows["ES"]["vs 2"] == "2+ on this evidence, 2 days not fully read"
+
+
+def test_an_unread_day_inside_an_absence_leaves_it_unsettled():
+    """It may have been a day at home, which ends one absence and starts another."""
+    lg = ledger([pt(J[0], PT), pt(J[1], ES), lost(J[2]), pt(J[3], ES), lost(J[3]), pt(J[4], PT),
+                 pt(J[5], ES), pt(J[6], PT)])
+    r = h.query_absences(lg, home={"PT"}, since=J[0], until=J[6])
+    a, b = r.sections[0].rows
+    assert (a["from"], a["to"], a["away"], a["no data"], a["not read"], a["partly read"]) == (
+        "2024-01-02", "2024-01-04", 2, 0, 1, 1)
+    assert "may be a day at home" in a["not settled"] and b["not settled"] == ""
+    assert "not settled" in r.sections[0].columns
+    year = r.sections[1].rows[0]
+    assert (year["home"], year["away"], year["no data"], year["not read"], year["partly read"]) == (
+        3, 3, 0, 1, 1)
+    most = next(n for n in r.notes if "365-day window" in n)
+    assert most == ("Most days away in any 365-day window is not settled: 2 on fully read days; "
+                    "up to 4 if every no-data and not-read day was also away.")
+
+
+def test_an_absence_is_not_settled_by_a_home_day_nobody_read():
+    """Home may be what the unread day was: not away, not silent, not a longest run."""
+    lg = ledger([pt(J[0], PT), lost(J[2]), pt(J[4], PT)])
+    r = h.query_absences(lg, home={"PT"}, since=J[0], until=J[4])
+    assert r.sections[0].rows == []
+    silent = next(s for s in r.sections if s.title == "stretches with no data at all")
+    assert [(x["from"], x["to"], x["days"]) for x in silent.rows] == [
+        ("2024-01-02", "2024-01-02", 1), ("2024-01-04", "2024-01-04", 1)]
+
+
+def test_a_home_day_stays_a_home_day_with_an_unread_point_on_it():
+    lg = ledger([pt(J[0], ES), pt(J[1], PT), lost(J[1]), pt(J[2], ES)])
+    r = h.query_absences(lg, home={"PT"}, since=J[0], until=J[2])
+    assert [x["not settled"] for x in r.sections[0].rows] == ["", ""]
+    assert r.sections[1].rows[0]["partly read"] == 1
+
+
+def test_an_absence_with_a_day_read_in_part_is_not_settled_either():
+    """Spain in the morning; the unread point may be home that evening."""
+    lg = ledger([pt(J[0], PT), pt(J[1], ES), lost(J[1]), pt(J[2], PT)])
+    row = h.query_absences(lg, home={"PT"}, since=J[0], until=J[2]).sections[0].rows[0]
+    assert (row["not read"], row["partly read"]) == (0, 1) and row["not settled"]
+
+
+def test_where_keeps_the_placed_label_and_adds_not_read():
+    lg = ledger([pt(J[0], ES), pt(J[1], ES), lost(J[1]), lost(J[2])])
+    for by, name in (("region", "Spain: Madrid"), ("country", "Spain")):
+        rows = h.query_where(lg, since=J[0], until=J[3], by=by).sections[0].rows
+        assert [r["where"] for r in rows] == [name, f"{name} · not read", "not read", "no data"]
+
+
+def test_a_trip_edge_beside_an_unread_day_is_not_exact():
+    """Spain and Portugal on the 3rd is an exact entry, unless the 2nd was Portugal too."""
+    pts = [pt(J[0], ES), pt(J[2], ES), pt(J[2], PT), pt(J[3], PT)]
+    rows = {r["iso"]: r for r in h.query_trips(ledger(pts), since=None, until=None)
+            .sections[0].rows}
+    assert rows["PT"]["entry"] == "2024-01-03"
+    r = h.query_trips(ledger([*pts, lost(J[1]), lost(J[5])]), since=None, until=None)
+    portugal = next(x for x in r.sections[0].rows if x["iso"] == "PT")
+    assert portugal["entry"] == (
+        "2024-01-03 (entered between 2024-01-01 and 2024-01-03; 1 day in that range not read)")
+    assert portugal["exit"] == "2024-01-04 (or later: 1 day after it not read)"
+    assert "not settled" in portugal["flags"] and "2 day(s)" in portugal["flags"]
+
+
+def test_an_unread_point_on_the_day_before_an_exact_crossing_reopens_it():
+    lg = ledger([pt(J[1], ES), lost(J[1]), pt(J[2], ES), pt(J[2], PT), pt(J[3], PT)])
+    portugal = next(t for t in h.trips(lg) if t.iso == "PT")
+    assert portugal.entry_open and portugal.entry_earliest == J[1]
+
+
+def test_an_earlier_unread_day_means_first_may_not_be_first():
+    lg = ledger([lost(J[0]), pt(J[4], PT), pt(J[5], PT), pt(J[9], ES)])
+    r = h.query_trips(lg, since=J[0], until=None, first=True)
+    spain = next(x for x in r.sections[0].rows if x["iso"] == "ES")
+    assert "may not be the first" in spain["flags"]
+
+
+def test_check_yes_does_not_close_dates_beside_an_unread_day():
+    lg = ledger([pt(J[0], ES), pt(J[1], ES), lost(J[2])], [visit(IR, YearOnly(2024), None, 9)])
+    assert "dates not settled" in str(
+        h.query_check(lg, countries={"ES"}, since=None, until=J[1]).sections[0].rows)
+    r = h.query_check(lg, countries={"ES", "IR"}, since=None, until=None)
+    rows = {x["iso"]: x for x in r.sections[0].rows}
+    assert rows["ES"]["answer"] == "YES" and rows["IR"]["answer"] == "CHECK"
+    for row in rows.values():
+        assert "incomplete" in row["evidence"] and "could not be fully read" in row["evidence"]
+
+
+def test_an_empty_window_with_an_unread_day_is_not_called_empty():
+    r = h.query_trips(ledger([lost(J[0])]), since=None, until=None)
+    assert not any(n.startswith("Nothing in the window.") for n in r.notes)
 
 
 # ---------------------------------------------------------------------- CLI

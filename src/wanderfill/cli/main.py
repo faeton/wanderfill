@@ -466,14 +466,16 @@ def cmd_evidence(args) -> int:
         if inside and diameter_km(inside) < rules.spread_km:
             candidates[rid] = (inside[0].asset.lat, inside[0].asset.lon)
     small: set[int] = set()
+    tiles_unread = 0
     if candidates and not args.no_resolve:
         print(f"measuring {len(candidates)} tightly-clustered regions...", file=sys.stderr)
         reader = RegionResolver(catalogue, zoom=args.zoom).reader
         small = small_regions(reader, candidates, threshold_km=args.small_region_km)
-        if reader.failed:
+        tiles_unread = len(reader.failed)
+        if tiles_unread:
             print(
-                f"  {len(reader.failed)} map tiles could not be read; a region measured across "
-                "one is graded as not small. Re-running retries them.",
+                f"  {tiles_unread} map tile{'s' * (tiles_unread != 1)} could not be read; a region "
+                "measured across one is graded as not small. Re-running retries them.",
                 file=sys.stderr,
             )
         if small:
@@ -505,6 +507,7 @@ def cmd_evidence(args) -> int:
         assets_seen=len(assets),
         assets_unplaced=unplaced,
         assets_unread=unread,
+        tiles_unread=tiles_unread,
         params={
             "since": args.since, "until": args.until, "zoom": args.zoom,
             "tolerance_deg": args.tolerance, "exhibits": args.exhibits,

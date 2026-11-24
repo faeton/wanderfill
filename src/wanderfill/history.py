@@ -50,7 +50,7 @@ import io
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from itertools import pairwise
+from itertools import groupby, pairwise
 from typing import Any
 
 from .api.client import Visit, YearOnly
@@ -210,6 +210,10 @@ class Ledger:
         days = len(self.unread)
         return (f"{n} point{'s' * (n != 1)} on {days} day{'s' * (days != 1)} ({span}) "
                 "could not be read: no map tile")
+
+    def unread_days(self, since: dt.date | None, until: dt.date | None) -> list[dt.date]:
+        """Days in a window with a point that was not read, whatever else they hold."""
+        return sorted(d for d in self.unread if _in_window(d, d, since, until))
 
     # -- country days, per territory mode, with bridging applied --------------
 
@@ -446,6 +450,15 @@ class Trip:
     sources: dict[str, tuple[dt.date, dt.date]]  # source -> (first, last) inside trip
     entry_earliest: dt.date | None  # None: no data at all before it
     exit_latest: dt.date | None
+    # Days that could not be fully read: between the neighbouring day with data
+    # and an edge, and inside the trip.
+    unread_before: int = 0
+    unread_after: int = 0
+    unread_inside: int = 0
+
+    @property
+    def unread(self) -> int:
+        return self.unread_before + self.unread_after + self.unread_inside
 
     @property
     def days(self) -> int:
@@ -497,13 +510,13 @@ def trips(ledger: Ledger, territories: str = "separate") -> list[Trip]:
                 run.append(d)
                 continue
             if run:
-                out.append(_trip(run, prev_known, next_known, keys_on))
+                out.append(_trip(run, prev_known, next_known, keys_on, ledger.unread))
             run = [d] if d is not None else []
     out.sort(key=lambda t: (t.entry, t.key))
     return out
 
 
-def _trip(run: list[Day], prev_known, next_known, keys_on) -> Trip:
+def _trip(run: list[Day], prev_known, next_known, keys_on, unread) -> Trip:
     """One trip, with edges only as exact as the sources make them.
 
     An edge is exact only when its own day also shows another country — the
@@ -511,6 +524,9 @@ def _trip(run: list[Day], prev_known, next_known, keys_on) -> Trip:
     between the neighbouring day with data and this one, *both included*: a
     day-level record of Spain on the 1st and Portugal on the 2nd cannot say
     whether the 1st or the 2nd was the travel day.
+
+    An unread day from the neighbouring day with data up to the edge may be a
+    day in this country, so with one there even a recorded crossing is open.
     """
     first, last = run[0], run[-1]
     sources: dict[str, list[dt.date]] = defaultdict(list)
@@ -519,8 +535,11 @@ def _trip(run: list[Day], prev_known, next_known, keys_on) -> Trip:
             sources[s].append(d.date)
     crossed_in = len(keys_on.get(first.date, ())) > 1
     crossed_out = len(keys_on.get(last.date, ())) > 1
-    before = first.date if crossed_in else prev_known(first.date)
-    after = last.date if crossed_out else next_known(last.date)
+    prev, nxt = prev_known(first.date), next_known(last.date)
+    unread_before = sum((prev is None or prev <= d) and d < first.date for d in unread)
+    unread_after = sum(last.date < d and (nxt is None or d <= nxt) for d in unread)
+    before = first.date if crossed_in and not unread_before else prev
+    after = last.date if crossed_out and not unread_after else nxt
     return Trip(
         key=first.key,
         label=first.label,
@@ -533,6 +552,9 @@ def _trip(run: list[Day], prev_known, next_known, keys_on) -> Trip:
         sources={s: (min(v), max(v)) for s, v in sorted(sources.items())},
         entry_earliest=before,
         exit_latest=after,
+        unread_before=unread_before,
+        unread_after=unread_after,
+        unread_inside=sum(first.date <= d <= last.date for d in unread),
     )
 
 
@@ -604,6 +626,50 @@ def unread_note(ledger: Ledger) -> str:
     )
 
 
+def _unread_parts(
+    ledger: Ledger, since: dt.date | None, until: dt.date | None, territories: str
+) -> tuple[list[Section], list[str]]:
+    """The days of a window that could not be fully read, as a table and a note.
+
+    Both, because a section's own note is not in the CSV and a table can be
+    copied without the notes. Empty, and so invisible, when there are none.
+    """
+    dates = ledger.unread_days(since, until)
+    if not dates:
+        return [], []
+    placed: dict[dt.date, list[str]] = defaultdict(list)
+    grounded = set()
+    for d in ledger.days(territories):
+        placed[d.date].append(d.label + (" (airborne)" if d.kind == AIRBORNE else ""))
+        if d.kind != AIRBORNE:
+            grounded.add(d.date)
+    rows: list[dict[str, Any]] = []
+    for d in dates:
+        where, n = ", ".join(sorted(placed[d])), ledger.unread[d]
+        last = rows[-1] if rows else None
+        if (last and last["also placed in"] == where
+                and (d - dt.date.fromisoformat(last["to"])).days == 1):
+            last.update({"to": str(d), "days": last["days"] + 1, "points": last["points"] + n})
+        else:
+            rows.append({"from": str(d), "to": str(d), "days": 1, "points": n,
+                         "also placed in": where})
+    partly = sum(d in grounded for d in dates)
+    note = (
+        f"{len(dates)} day(s) in this period could not be fully read: {len(dates) - partly} not "
+        f"read at all, {partly} placed and not read in full. Any country, listed or not, may "
+        "gain them: everything here is incomplete until they are read. Re-running (without "
+        "--no-resolve) retries them."
+    )
+    section = Section(
+        "days that could not be fully read",
+        ["from", "to", "days", "points", "also placed in"],
+        rows,
+        note="Not 'no data': there are points on these days, and their map tiles were not read. "
+        "Re-running (without --no-resolve) retries them.",
+    )
+    return [section], [note]
+
+
 def describe_groups(names: Iterable[str]) -> dict[str, str]:
     out = {}
     for n in names:
@@ -628,20 +694,33 @@ def _wanted(iso: str, territory: bool, include: set[str] | None, exclude: set[st
     return not (iso in exclude and not territory)
 
 
-def _edge(day: dt.date, open_: bool, bound: dt.date | None, side: str) -> str:
+def _edge(
+    day: dt.date, open_: bool, bound: dt.date | None, side: str, unread: int = 0
+) -> str:
     """``2024-03-09``, or the range the sources leave it in — never a guess inside it."""
     if not open_:
         return str(day)
+    days = f"{unread} day{'s' * (unread != 1)}"
+    if bound is None and unread:
+        # There is data out there. It was not read.
+        earlier, side_of = ("earlier", "before") if side == "entry" else ("later", "after")
+        return f"{day} (or {earlier}: {days} {side_of} it not read)"
     if bound is None:
         return f"{day} (no data {'earlier' if side == 'entry' else 'later'} in any source)"
     lo, hi = (bound, day) if side == "entry" else (day, bound)
-    return f"{day} ({'entered' if side == 'entry' else 'left'} between {lo} and {hi})"
+    edge = f"{day} ({'entered' if side == 'entry' else 'left'} between {lo} and {hi}"
+    return edge + (f"; {days} in that range not read)" if unread else ")")
 
 
 def _trip_row(t: Trip, ledger: Ledger, since, until) -> dict[str, Any]:
-    entry = _edge(t.entry, t.entry_open, t.entry_earliest, "entry")
-    exit_ = _edge(t.exit, t.exit_open, t.exit_latest, "exit")
+    entry = _edge(t.entry, t.entry_open, t.entry_earliest, "entry", t.unread_before)
+    exit_ = _edge(t.exit, t.exit_open, t.exit_latest, "exit", t.unread_after)
     flags = []
+    if t.unread:
+        flags.append(
+            f"{t.unread} day(s) in or beside this trip could not be fully read — its dates, "
+            "days, 'agreement' and 'not seen by' are not settled"
+        )
     if since and t.entry < since:
         flags.append("began before the window")
     if until and t.exit > until:
@@ -805,6 +884,12 @@ def query_trips(
         for ts in sorted(by_key.values(), key=lambda ts: ts[0].entry):
             row = _trip_row(ts[0], ledger, since, until)
             row["trips in window"] = len(ts)
+            if earlier := [d for d in ledger.unread_days(since, until) if d < ts[0].entry]:
+                row["flags"] = "; ".join(filter(None, [
+                    row["flags"],
+                    f"{len(earlier)} earlier day(s) could not be fully read — this may not be "
+                    "the first trip",
+                ]))
             rows.append(row)
     else:
         rows = [_trip_row(t, ledger, since, until) for t in all_trips]
@@ -817,7 +902,8 @@ def query_trips(
     rows.extend(_undated_row(u, territories) for u in check_rows)
 
     columns = TRIP_COLUMNS + (["trips in window"] if first else [])
-    sections = [Section(title, columns, rows)]
+    unread, unread_notes = _unread_parts(ledger, since, until, territories)
+    sections = [Section(title, columns, rows), *unread]
     if also:
         sections.append(
             Section(
@@ -841,11 +927,14 @@ def query_trips(
         )
     notes = [
         "CHECK rows are profile visits that carry no day; they are listed, not guessed.",
-        "Open edges ('entered between …') mean the sources have no day in between — the tool "
+        "Open edges ('entered between …') mean the sources have no day in between"
+        + (", or none that was read" if unread else "") + " — the tool "
         "does not pick a date inside that range, and neither should anyone helping you.",
+        *unread_notes,
     ]
     if not rows and not air:
-        notes.insert(0, f"Nothing in the window. Sources: {ledger.coverage_text() or 'none'}.")
+        nothing = "Nothing could be placed in the window" if unread else "Nothing in the window"
+        notes.insert(0, f"{nothing}. Sources: {ledger.coverage_text() or 'none'}.")
     return Report(title, hdr or {}, sections, notes)
 
 
@@ -867,7 +956,11 @@ def query_check(
     ts = [t for t in trips(ledger, territories) if _in_window(t.entry, t.exit, since, until)]
     days = ledger.days(territories)
     # A point nobody could place may be in any of them.
-    unread = any(_in_window(d, d, since, until) for d in ledger.unread)
+    unread, unread_notes = _unread_parts(ledger, since, until, territories)
+    incomplete = (
+        f"; this run is incomplete: {len(ledger.unread_days(since, until))} day(s) in the window "
+        "could not be fully read"
+    ) if unread else ""
     rows = []
     for iso in sorted(set(countries) - set(exclude)):
         mine = [t for t in ts if t.iso == iso]
@@ -879,7 +972,10 @@ def query_check(
         und = [u for u in _undated_in(ledger, since, until, {iso}, set(), territories)]
         if mine:
             answer = "YES"
-            detail = "; ".join(f"{t.label} {t.entry} → {t.exit}" for t in mine[:6])
+            detail = "; ".join(
+                f"{t.label} {t.entry} → {t.exit}" + (" (dates not settled)" if t.unread else "")
+                for t in mine[:6]
+            )
             if len(mine) > 6:
                 detail += f"; … {len(mine) - 6} more"
         elif air or und:
@@ -891,16 +987,18 @@ def query_check(
             detail = "; ".join(parts)
         elif unread:
             answer = "CHECK"
-            detail = f"this run is incomplete; in sources covering: {ledger.coverage_text()}"
+            detail = f"in sources covering: {ledger.coverage_text()}"
         else:
             answer = "no evidence"
             detail = f"in sources covering: {ledger.coverage_text() or 'nothing'}"
-        rows.append({"country": name_of(iso), "iso": iso, "answer": answer, "evidence": detail})
+        rows.append({"country": name_of(iso), "iso": iso, "answer": answer,
+                     "evidence": detail + incomplete})
     return Report(
         "check",
         hdr or {},
-        [Section("check", ["country", "iso", "answer", "evidence"], rows)],
-        ["'no evidence' is not 'no': it says what the sources could see, and nothing more."],
+        [Section("check", ["country", "iso", "answer", "evidence"], rows), *unread],
+        ["'no evidence' is not 'no': it says what the sources could see, and nothing more.",
+         *unread_notes],
     )
 
 
@@ -925,12 +1023,20 @@ def query_days(
     today: dt.date | None = None,
     hdr: dict[str, str] | None = None,
 ) -> Report:
+    """Days present per country in one tax year, and how far each is from ``threshold``.
+
+    A day is present, or has no data, or was **not read**; a present day can
+    also hold a point that was not read. While any day could not be fully read
+    no country is told it stays under the threshold, and each could still gain
+    every such day it does not already have.
+    """
     today = today or dt.date.today()
     begin, end, label = tax_year_bounds(year, scheme, start)
     last = min(end, today)
     days = [d for d in ledger.days(territories) if begin <= d.date <= last]
     counts: dict[str, dict[str, Any]] = {}
     present: set[dt.date] = set()
+    here: dict[str, set[dt.date]] = defaultdict(set)
     for d in days:
         c = counts.setdefault(
             d.key, {"country": d.label, "iso": d.iso, OBSERVED: 0, BRIDGED: 0, AIRBORNE: 0}
@@ -938,18 +1044,32 @@ def query_days(
         c[d.kind] += 1
         if d.kind != AIRBORNE:
             present.add(d.date)
+            here[d.key].add(d.date)
+    unread = set(ledger.unread_days(begin, last))
     span = (last - begin).days + 1 if last >= begin else 0
-    unobserved = span - len(present)
+    unobserved = span - len(present) - len(unread - present)
     rows = []
-    for c in sorted(counts.values(), key=lambda c: -(c[OBSERVED] + c[BRIDGED])):
+    for key, c in sorted(counts.items(), key=lambda kv: -(kv[1][OBSERVED] + kv[1][BRIDGED])):
         n = c[OBSERVED] + c[BRIDGED]
+        more = len(unread - here[key])
+        counted = f"{n} counted + {unobserved} days with no data"
         if n >= threshold:
             status = f"{threshold}+ on this evidence"
-        elif n + unobserved >= threshold:
-            status = f"could reach {threshold}: {n} counted + {unobserved} days with no data"
+            if unread:
+                status += f", {more} days not fully read"
+        elif n + unobserved + more >= threshold:
+            status = f"could reach {threshold}: {counted}"
+            if unread:
+                status += f" + {more} days not fully read"
+        elif unread:
+            status = f"incomplete: {counted} + {more} days not fully read"
         else:
             status = f"under {threshold} even if every day with no data was here"
-        rows.append({**c, "present": n, f"vs {threshold}": status})
+        row = {**c, "present": n, f"vs {threshold}": status}
+        if unread:
+            row["not fully read"] = more
+        rows.append(row)
+    unread_sections, unread_notes = _unread_parts(ledger, begin, last, territories)
     notes = [
         f"Tax year {label}: {begin} → {end}"
         + (f" (counted to {last}, today)" if last < end else ""),
@@ -959,9 +1079,12 @@ def query_days(
         "here nor there.",
         "Residency is decided by law and the tax authority, not by a day count. These are "
         "counts and margins only.",
+        *unread_notes,
     ]
     cols = ["country", "iso", OBSERVED, BRIDGED, "present", AIRBORNE, f"vs {threshold}"]
-    sections = [Section(f"days present, tax year {label}", cols, rows)]
+    if unread:
+        cols.insert(-1, "not fully read")
+    sections = [Section(f"days present, tax year {label}", cols, rows), *unread_sections]
     sections += _review_sections(ledger, begin, last, None, set(), territories)
     return Report("days", hdr or {}, sections, notes)
 
@@ -980,7 +1103,10 @@ def query_absences(
     A day with any home presence is a home day — departure and return days
     count as present, which is how most residence rules count them. A day with
     no data at all is **not proven home**: it is its own status, reported in
-    its own column, and only an upper bound treats it as away.
+    its own column, and only an upper bound treats it as away. A day whose only
+    points were not read is neither silent nor away: it is ``not read``, and it
+    or an away day that could not be read in full may have been a day at home,
+    so an absence with one in it is not settled.
     """
     status: dict[dt.date, str] = {}
     abroad: dict[dt.date, set[str]] = defaultdict(set)
@@ -996,7 +1122,8 @@ def query_absences(
     seq = []
     for i in range(total):
         day = since + dt.timedelta(days=i)
-        seq.append((day, status.get(day, "nodata")))
+        seq.append((day, status.get(day, "not read" if day in ledger.unread else "nodata")))
+    unread = set(ledger.unread_days(since, until))
 
     rows, nodata_rows = [], []
     run: list[tuple[dt.date, str]] = []
@@ -1007,6 +1134,8 @@ def query_absences(
         if run:
             away = [d for d, s in run if s == "away"]
             nod = [d for d, s in run if s == "nodata"]
+            not_read = [d for d, s in run if s == "not read"]
+            partly = [d for d in away if d in unread]
             first, last = run[0][0], run[-1][0]
             open_start = first == since
             open_end = last == until
@@ -1021,25 +1150,58 @@ def query_absences(
                         "countries": ", ".join(where),
                     }
                 )
+                if unread:
+                    rows[-1].update({
+                        "not read": len(not_read),
+                        "partly read": len(partly),
+                        "not settled": "any day not fully read may be a day at home — re-run"
+                        if not_read or partly else "",
+                    })
             else:
-                nodata_rows.append({"from": str(first), "to": str(last), "days": len(nod)})
+                # The silent days only: one that was not read ends the stretch.
+                for silent, group in groupby(run, key=lambda ds: ds[1] == "nodata"):
+                    ds = [d for d, _ in group]
+                    if silent:
+                        nodata_rows.append(
+                            {"from": str(ds[0]), "to": str(ds[-1]), "days": len(ds)})
         run = []
 
     away_days = [d for d, s in seq if s == "away"]
     nodata_days = [d for d, s in seq if s == "nodata"]
     roll_away = _max_rolling(away_days, 365)
     roll_upper = _max_rolling(sorted(away_days + nodata_days), 365)
-    per_year: dict[int, dict[str, int]] = defaultdict(lambda: {"away": 0, "no data": 0, "home": 0})
+    most = (
+        f"Most days away in any 365-day window: {roll_away} observed; up to {roll_upper} if every "
+        "no-data day was also away."
+    )
+    absence_cols = ["from", "to", "away", "no data", "countries"]
+    year_cols = ["year", "home", "away", "no data"]
+    blank = {"away": 0, "no data": 0, "home": 0}
+    if unread:
+        sure = _max_rolling([d for d in away_days if d not in unread], 365)
+        upper = _max_rolling([d for d, s in seq if s != "home"], 365)
+        most = (
+            f"Most days away in any 365-day window is not settled: {sure} on fully read days; up "
+            f"to {upper} if every no-data and not-read day was also away."
+        )
+        absence_cols[-1:-1] = ["not read", "partly read", "not settled"]
+        year_cols += ["not read", "partly read"]
+        blank |= {"not read": 0, "partly read": 0}
+    per_year: dict[int, dict[str, int]] = defaultdict(lambda: dict(blank))
     for d, s in seq:
-        per_year[d.year][{"away": "away", "nodata": "no data", "home": "home"}[s]] += 1
+        per_year[d.year]["no data" if s == "nodata" else s] += 1
+        if d in unread and s != "not read":
+            per_year[d.year]["partly read"] += 1
 
+    unread_sections, unread_notes = _unread_parts(ledger, since, until, territories)
     sections = [
-        Section("absences", ["from", "to", "away", "no data", "countries"], rows),
+        Section("absences", absence_cols, rows),
         Section(
             "totals per calendar year",
-            ["year", "home", "away", "no data"],
+            year_cols,
             [{"year": y, **v} for y, v in sorted(per_year.items())],
         ),
+        *unread_sections,
     ]
     if nodata_rows:
         sections.append(
@@ -1052,11 +1214,11 @@ def query_absences(
         )
     notes = [
         f"Home: {', '.join(name_of(h) for h in sorted(home))}.",
-        f"Most days away in any 365-day window: {roll_away} observed; up to {roll_upper} if every "
-        "no-data day was also away.",
+        most,
         "Departure and return days are counted as home days.",
         "Limits for residence and citizenship are set by law and the authority; this is a count, "
         "not a verdict.",
+        *unread_notes,
     ]
     sections += _review_sections(ledger, since, until, None, set(), territories, skip_iso=home)
     return Report("absences", hdr or {}, sections, notes)
@@ -1107,8 +1269,9 @@ def query_where(
         if day is None:
             key = None
         else:
-            empty = "not read" if day in ledger.unread else "no data"
-            key = tuple(sorted(labels.get(day, []))) or (empty,)
+            # Beside a place too: the point that was not read may be another one.
+            lost = ("not read",) if day in ledger.unread else ()
+            key = (*sorted(labels.get(day, [])), *lost) or ("no data",)
         if day is not None and key == cur:
             prev = day
             srcs |= sources.get(day, set())
@@ -1126,8 +1289,10 @@ def query_where(
         cur, start, prev, srcs = key, day, day, set(sources.get(day, set())) if day else set()
 
     und = _undated_in(ledger, since, until, None, set(), territories)
+    unread, unread_notes = _unread_parts(ledger, since, until, territories)
     sections = [
-        Section(f"where, {since} → {until}", ["from", "to", "days", "where", "sources"], rows)
+        Section(f"where, {since} → {until}", ["from", "to", "days", "where", "sources"], rows),
+        *unread,
     ]
     if und:
         sections.append(
@@ -1141,7 +1306,8 @@ def query_where(
         "where",
         hdr or {},
         sections,
-        ["'no data' means no source has a point that day — not that you were at home."],
+        ["'no data' means no source has a point that day — not that you were at home.",
+         *unread_notes],
     )
 
 

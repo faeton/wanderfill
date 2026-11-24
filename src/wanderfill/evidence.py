@@ -313,6 +313,8 @@ class Dossier:
     assets_unplaced: int = 0
     # Of those, the ones whose map tiles were not read. Not open water.
     assets_unread: int = 0
+    # Tiles that failed while measuring which regions are too small to cross.
+    tiles_unread: int = 0
 
     def by_grade(self, *grades: str) -> list[RegionEvidence]:
         return [r for r in self.regions if r.grade in grades]
@@ -559,6 +561,7 @@ def build(
     assets_seen: int = 0,
     assets_unplaced: int = 0,
     assets_unread: int = 0,
+    tiles_unread: int = 0,
     params: dict | None = None,
 ) -> Dossier:
     """Assemble the dossier from attributed shots and live profile state.
@@ -591,6 +594,7 @@ def build(
         assets_seen=assets_seen,
         assets_unplaced=assets_unplaced,
         assets_unread=assets_unread,
+        tiles_unread=tiles_unread,
         params=params or {},
     )
 
@@ -923,7 +927,13 @@ def render_markdown(dossier: Dossier) -> str:
             + ", ".join(f"{r.name} ({r.region})" for r in sorted(tiny, key=lambda r: r.name))
             + " are too small to cross and were graded on the two-spot rule instead."
         )
-    else:
+    if dossier.tiles_unread:
+        add(
+            f"The two-spot exemption was not granted{' to any other' if tiny else ''} because "
+            f"{_n(dossier.tiles_unread, 'map tile')} could not be read. A region there may be "
+            "small enough for it. Re-running retries them."
+        )
+    elif not tiny:
         add(
             "No region here was small enough to need the two-spot exemption. That "
             "rule exists for the Vaticans and Monacos; it is granted by measuring "
@@ -948,6 +958,7 @@ def render_json(dossier: Dossier) -> dict:
         "assets_seen": dossier.assets_seen,
         "assets_unplaced": dossier.assets_unplaced,
         "assets_unread": dossier.assets_unread,
+        "tiles_unread": dossier.tiles_unread,
         "counts": dossier.counts(),
         "regions": [
             {

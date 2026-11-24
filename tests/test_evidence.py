@@ -324,6 +324,22 @@ def test_photos_that_could_not_be_placed_are_not_called_open_water():
     assert "5 in no region" in md and "could not be placed" not in md
 
 
+def test_a_region_that_could_not_be_measured_is_not_called_large():
+    """Its polygon's tile failed, the exemption was not granted, and the dossier said no
+    region was small enough to need it."""
+    kw = {"account": 1, "library": "/x"}
+    shots = {1: [shot("2024-05-01", 41.9, 12.4)]}
+    md = render_markdown(build(shots, {1: {"name": "A"}}, {1}, tiles_unread=2, **kw))
+    assert "No region here was small enough" not in md
+    assert "was not granted because 2 map tiles could not be read" in md and "Re-running" in md
+    md = render_markdown(build(shots, {1: {"name": "A"}}, {1}, small={1}, tiles_unread=1, **kw))
+    assert "A (1) are too small to cross" in md
+    assert "was not granted to any other because 1 map tile could not be read" in md
+    d = build(shots, {1: {"name": "A"}}, {1}, **kw)
+    assert "No region here was small enough" in render_markdown(d)
+    assert "could not be read" not in render_markdown(d)
+
+
 def test_json_carries_the_boundary_warning_through():
     """A nearest-polygon hit must never reach an email looking like a fact."""
     s = shot("2024-05-01", 50.0, 14.0, uuid="edge", near_boundary=True)

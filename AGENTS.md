@@ -184,8 +184,11 @@ older polygon set than the catalogue. So:
 4. Points still unresolved are **open ocean or flights. Leave them unresolved.**
    Do not snap them to the nearest land.
 5. A tile that timed out or answered 500 is not an empty tile. The point is
-   `tile_error`, whatever polygon is next door, and the next run asks again.
-   Do not plan from a run that has any near the place in question.
+   `tile_error`, whatever polygon is next door; it has no region, is not cached,
+   and the next run asks again. Do not call it ocean, and do not plan from a run
+   that has any near the place in question. A wrong `tile_nearest` cached by a
+   version that did not know this looks like a right one: `--refresh` re-asks
+   only points with no region, so delete the coordinate cache to re-ask them all.
 
 ---
 
@@ -542,9 +545,14 @@ the person should know which days are which.
 in sources covering 2018 → 2026". If the question is about 2011 and the
 library starts in 2018, the honest answer is "the sources cannot see that", and
 you say so. A source that cannot see a year is not evidence of absence (§4).
-The same line says how many points could not be read, when a map tile did not
-arrive or `--no-resolve` skipped them. `check` then answers CHECK instead of "no
-evidence". Run it again before answering the form; do not answer around them.
+**"Not read" is not "no evidence".** When a map tile did not arrive, or
+`--no-resolve` skipped the point, the day is *not read*: not present, not away,
+not "no data". Every query lists those days on their own, a placed day with an
+unread point on it included, and while there is one in the window `check`
+answers CHECK instead of "no evidence", `days` gives no "under 183", `absences`
+marks the run "not settled", and a trip beside one has no exact edge. Run it
+again, without `--no-resolve`, before copying anything to a form. Do not answer
+around those days, and do not ask the person to fill them in (rule 7).
 
 **5. Disagreement is a report.** When the profile and the photos give
 different dates for a trip, show both. Correcting the profile is a write and

@@ -677,7 +677,8 @@ def test_history_and_evidence_say_how_many_points_could_not_be_read(
     monkeypatch.setenv("HOME", str(tmp_path))
     net = _Tiles(monkeypatch)
     fine = (10.0, 25.0)
-    net.at = {_home(): TimeoutError(), _east(): _tile(2), _home(fine): _tile(1)}
+    net.at = {_home(): TimeoutError(), _east(): _tile(2), _home(fine): _tile(1),
+              _home(fine, 8): TimeoutError()}
     monkeypatch.setattr(cli, "_client", lambda args, **kw: NomadMania(
         "fake", transport=FakeTransport({
             "regions/get-regions-list-2": {"data": {"1": {"name": "Istanbul"},
@@ -727,6 +728,10 @@ def test_history_and_evidence_say_how_many_points_could_not_be_read(
         assert "2 photos could not be placed" in md and "Re-running" in md
         body = json.loads((out / "evidence.json").read_text())
         assert (body["assets_unplaced"], body["assets_unread"]) == (2, 2)
+        if "--no-resolve" not in argv:
+            assert "No region here was small enough" not in md
+            assert "because 1 map tile could not be read" in md
+            assert body["tiles_unread"] == 1
 
     net.at[_home()] = _tile(2)
     assert cli.main(history) == 0
