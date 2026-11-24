@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import itertools
 import json
+import math
 import random
 import re
 import shutil
@@ -218,8 +219,16 @@ def test_neighbours_are_asked_for_an_interior_point_only(answer, want):
     assert len(asked) == 1
 
 
-@pytest.mark.parametrize("lat, lon", [(90.0, 0.0), (-90.0, 0.0), (0.0, 180.0), (-17.0, -180.0)])
-def test_the_points_around_a_photo_are_on_the_planet(lat, lon):
+def unit(lat, lon):
+    y, x = math.radians(lat), math.radians(lon)
+    return (math.cos(y) * math.cos(x), math.cos(y) * math.sin(x), math.sin(y))
+
+
+@pytest.mark.parametrize("lat, lon", [
+    (90.0, 0.0), (-90.0, 0.0), (90.0, 180.0), (89.9999, 10.0), (-89.9999, -170.0),
+    (89.9991, 0.0), (0.0, 180.0), (-17.0, -180.0), (70.0, 179.9999), (0.0, 0.0), (60.0, 20.0),
+])
+def test_the_points_around_a_photo_are_a_hundred_metres_off_at_eight_bearings(lat, lon):
     asked = []
 
     def resolve(y, x):
@@ -227,8 +236,31 @@ def test_the_points_around_a_photo_are_on_the_planet(lat, lon):
         return Resolution(y, x, R, "tile_interior")
 
     place(resolve, lat, lon)
-    assert all(-90 <= y <= 90 and -180 <= x <= 180 for y, x in asked)
-    assert all(haversine_km(lat, lon, y, x) < 0.2 for y, x in asked)
+    around = asked[1:]
+    assert len(around) == 8
+    assert all(-90 <= y <= 90 and -180 <= x <= 180 for y, x in around)
+    assert all(haversine_km(lat, lon, y, x) == pytest.approx(0.1, rel=1e-4) for y, x in around)
+    # Bearings, with any two directions across the photo for axes.
+    here = unit(lat, lon)
+    east = unit(0.0, lon + 90)
+    north = [here[(i + 1) % 3] * east[(i + 2) % 3] - here[(i + 2) % 3] * east[(i + 1) % 3]
+             for i in range(3)]
+    turns = sorted(math.degrees(math.atan2(*(sum(a * b for a, b in zip(unit(y, x), axis,
+                                                                       strict=True))
+                                             for axis in (east, north)))) % 360
+                   for y, x in around)
+    steps = [b - a for a, b in zip(turns, [*turns[1:], turns[0] + 360], strict=True)]
+    assert all(step == pytest.approx(45, abs=0.05) for step in steps)
+
+
+@pytest.mark.parametrize("pole", [90, -90])
+def test_a_border_beside_a_pole_is_seen_whichever_longitude_the_pole_has(pole):
+    def resolve(lat, lon):
+        there = abs(lon) > 90 and abs(lat) < 89.9995
+        return Resolution(lat, lon, Q if there else R, "tile_interior")
+
+    for lon in (0, 45, -90):
+        assert place(resolve, pole, lon) == Place(R, "edge")
 
 
 # -- 3: runs ----------------------------------------------------------------------
@@ -529,7 +561,9 @@ def test_a_visit_left_in_between_is_another_visit():
 @pytest.mark.parametrize("more, apart", [
     ((), False),
     ((ob(7, Q, 23.9),), False),       # the visit's last day says no time
-    ((ob(8, Q, 0.1),), True),
+    ((ob(8, Q, 1 + 59 / 60),), False),  # nor do two hours of the night after it
+    ((ob(8, Q, 2),), True),
+    ((ob(8, Q, 9),), True),
     ((ob(9, Q),), True),
     ((ob(10, Q, 8.9),), True),        # the run's own first day, before its first photo
     ((ob(10, Q, 9.0),), False), ((ob(10, Q, 9.1),), False),
@@ -544,7 +578,9 @@ def test_between_a_visit_and_the_run_after_it(more, apart):
 @pytest.mark.parametrize("more, apart", [
     ((), False),
     ((ob(17, Q, 0.1),), False),       # the visit's first day says no time
-    ((ob(16, Q, 23.9),), True),
+    ((ob(16, Q, 22 + 1 / 60),), False),  # nor do two hours of the night before it
+    ((ob(16, Q, 22),), True),
+    ((ob(16, Q, 9),), True),
     ((ob(15, Q),), True),
     ((ob(14, Q, 18.1),), True),
     ((ob(14, Q, 18.0),), False), ((ob(14, Q, 17.9),), False),
@@ -554,11 +590,22 @@ def test_between_the_run_and_a_visit_after_it(more, apart):
     assert held_by(visit(17, 18), settled(*more)) == want
 
 
+def test_the_visits_clock_need_not_be_the_runs():
+    """Half past midnight where the run is may be the evening of the visit's last day."""
+    home = {"zone": 1, "lon": 15.0}
+    obs = [*stay(R, 10, 14, **home), *stay(Q, 20, 22, **home), ob(1, Q, **home)]
+    assert held_by(visit(5, 7), [*obs, ob(8, Q, 0.5, **home)]) == ("fixed", {"continuation"})
+    assert held_by(visit(5, 7), [*obs, ob(8, Q, 7, **home)]) == ("offered", set())
+    assert held_by(visit(17, 18), [*obs, ob(16, Q, 23.5, **home)]) \
+        == ("fixed", {"continuation"})
+    assert held_by(visit(17, 18), [*obs, ob(16, Q, 20, **home)]) == ("offered", set())
+
+
 def test_a_later_date_across_the_line_may_be_before_the_visit_ended():
     """Q at +13 on the 8th, at one in the morning, is R's 7th at -10 at two."""
     obs = [*stay(R, 10, 14, zone=-10, lon=-155.0), *stay(Q, 20, 22, zone=-10, lon=-155.0)]
     early = ob(8, Q, 1, zone=13, lon=178.0)
-    late = ob(8, Q, 23.9, zone=13, lon=178.0)
+    late = ob(9, Q, 1.1, zone=13, lon=178.0)
     assert held_by(visit(5, 7), [*obs, early])[1] == {"continuation"}
     assert held_by(visit(5, 7), [*obs, late])[0] == "offered"
     # And after the run: Q on the 16th at -10 is R's 17th at +13 already.
@@ -566,7 +613,7 @@ def test_a_later_date_across_the_line_may_be_before_the_visit_ended():
            *stay(Q, 20, 22, zone=13, lon=178.0)]
     assert held_by(visit(17, 18), [*obs, ob(16, Q, 9, zone=-10, lon=-155.0)])[1] \
         == {"continuation"}
-    assert held_by(visit(17, 18), [*obs, ob(16, Q, 0.5, zone=-10, lon=-155.0)])[0] == "offered"
+    assert held_by(visit(17, 18), [*obs, ob(15, Q, 21.9, zone=-10, lon=-155.0)])[0] == "offered"
 
 
 def test_a_photo_between_them_in_time_but_not_by_its_own_date_is_doubtful():
@@ -627,14 +674,40 @@ def test_a_day_that_a_partly_dated_visit_does_say_is_an_overlap(a, b):
     assert held_by(visit(a, b)) == ("fixed", {"overlap"})
 
 
-def test_a_year_that_holds_a_part_of_the_run_is_a_continuation():
-    """It cannot be the whole of it, and nothing was seen elsewhere between."""
-    jan = dt.date(2027, 1, 2)
-    obs = [ob(dt.date(2026, 12, 30), R, 9), ob(dt.date(2026, 12, 31), R), ob(jan, R, 18),
-           ob(dt.date(2027, 1, 1), state="edge"), ob(dt.date(2026, 12, 1), Q),
-           ob(dt.date(2027, 1, 9), Q)]
-    assert held_by(visit(2026, 2026), obs) == ("fixed", {"continuation"})
-    assert held_by(visit(2027, None), obs) == ("fixed", {"continuation"})
+NEW_YEAR = [ob(dt.date(2026, 12, 1), Q), ob(dt.date(2026, 12, 30), R, 9),
+            ob(dt.date(2026, 12, 31), R), ob(dt.date(2027, 1, 1), R),
+            ob(dt.date(2027, 1, 2), R, 18), ob(dt.date(2027, 1, 9), Q)]
+
+
+@pytest.mark.parametrize("a, b", [(2026, 2026), (2027, 2027), (2027, None), (None, 2026),
+                                  (2025, 2026)], ids=str)
+def test_a_year_that_may_hold_a_part_of_the_run_is_undated(a, b):
+    """It may have been one of those days, and whoever left it undated may say so."""
+    assert held_by(visit(a, b), NEW_YEAR) == ("held", {"undated"})
+
+
+@pytest.mark.parametrize("year", [2026, 2027])
+def test_one_day_of_the_run_in_that_year_is_enough(year):
+    obs = [NEW_YEAR[0], *NEW_YEAR[2:4], NEW_YEAR[5]]  # the last of one and the first of the next
+    assert held_by(visit(year, year), obs) == ("held", {"undated"})
+
+
+@pytest.mark.parametrize("a, b", [(2025, 2025), (2028, 2028), (2028, None), (None, 2025)],
+                         ids=str)
+def test_a_year_with_no_day_of_the_run_is_judged_by_what_was_seen_between(a, b):
+    assert held_by(visit(a, b), NEW_YEAR) == ("offered", set())
+    rest = NEW_YEAR[:5] if a == 2028 else NEW_YEAR[1:]
+    assert "continuation" in held_by(visit(a, b), rest)[1]
+
+
+@pytest.mark.parametrize("a, b, want", [
+    (2026, 9, "offered"), (2026, 10, "overlap"), (14, 2026, "overlap"), (15, 2026, "offered"),
+    (None, 9, "offered"), (15, None, "offered"),
+], ids=str)
+def test_the_day_beside_the_run_is_not_a_day_of_it(a, b, want):
+    obs = settled(ob(10, Q, 5), ob(14, Q, 20))
+    assert held_by(visit(a, b), obs) == (
+        ("offered", set()) if want == "offered" else ("fixed", {want}))
 
 
 @pytest.mark.parametrize("a, b", [(14, 10), (30, 1), (2027, 2025), (12, 2025), (2026, 2025)],
@@ -1074,6 +1147,17 @@ def test_the_sweep_is_the_same_algorithm_at_each_gap():
     assert [r.suggested for r in rows] == [2, 2, 1, 0]  # beside what is there it is forced
     with pytest.raises(PlanInvalid):
         sweep(obs, {}, since=day(1), until=day(30))
+
+
+@pytest.mark.parametrize("fast_kmh, fast", [(None, False), (30.0, False), (10.0, True)])
+def test_the_sweep_suggests_the_cuts_that_boundaries_suggests(fast_kmh, fast):
+    """Over 33 km between the two of them, in the last two hours and a half."""
+    obs = [ob(1, R, 9, lat=0.0), ob(2, R, 9, lat=0.1), ob(2, Q, 11.5, lat=0.4),
+           ob(3, Q, 9, lat=0.5), ob(40, 8)]
+    (row,) = sweep(obs, {R: [], Q: [], 8: []}, since=day(1), until=day(30), gaps=(2,),
+                   fast_kmh=fast_kmh)
+    bs = boundaries(judged(obs, until=day(30)), gap_days=2, obs=obs, fast_kmh=fast_kmh)
+    assert row.suggested == sum(bool(b.suggestions) for b in bs) == fast
 
 
 # -- and the module ------------------------------------------------------------------------

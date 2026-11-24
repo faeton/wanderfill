@@ -65,6 +65,7 @@ _BRIEF = dt.timedelta(minutes=15)
 _LAYOVER = dt.timedelta(hours=24)
 _FAST_NEAR = dt.timedelta(hours=6)
 _CLOCKS_APART = 12 * 3600
+_NIGHT = dt.timedelta(hours=2)
 
 
 def kind_of(text: str) -> str:
@@ -114,13 +115,16 @@ def place(resolve: Callable[[float, float], Resolution], lat: float, lon: float)
 
 
 def _around(lat: float, lon: float) -> Iterator[tuple[float, float]]:
-    dy = _AROUND_KM / _KM_PER_DEGREE
-    # At a pole every longitude is near, and dividing by its cosine would not say so.
-    dx = dy / max(math.cos(math.radians(lat)), dy)
+    """Eight points on the sphere, as vectors: at a pole too there are eight ways to go."""
+    far, y, x = math.radians(_AROUND_KM / _KM_PER_DEGREE), math.radians(lat), math.radians(lon)
+    here = (math.cos(y) * math.cos(x), math.cos(y) * math.sin(x), math.sin(y))
+    north = (-math.sin(y) * math.cos(x), -math.sin(y) * math.sin(x), math.cos(y))
+    east = (-math.sin(x), math.cos(x), 0.0)
     for step in range(8):
         turn = math.radians(45 * step)
-        y = min(90.0, max(-90.0, lat + dy * math.sin(turn)))
-        yield y, (lon + dx * math.cos(turn) + 180.0) % 360.0 - 180.0
+        a, b, c = (math.cos(far) * h + math.sin(far) * (math.cos(turn) * n + math.sin(turn) * e)
+                   for h, n, e in zip(here, north, east, strict=True))
+        yield math.degrees(math.atan2(c, math.hypot(a, b))), math.degrees(math.atan2(b, a))
 
 
 @dataclass(frozen=True)
@@ -375,18 +379,17 @@ class _Dates:
     lo: dt.date
     hi: dt.date
     sure: tuple[dt.date, dt.date] | None
-    full: bool
 
     @classmethod
     def of(cls, v: Visit) -> _Dates:
         (a, b), (c, d) = _ends(v.date_from), _ends(v.date_to)
         if a == b and c == d:
             lo, hi = min(a, c), max(a, c)
-            return cls(lo, hi, (lo, hi), True)
+            return cls(lo, hi, (lo, hi))
         if a > d:  # the wrong way round, so all that is between is taken for its own
-            return cls(c, b, (d, a), False)
+            return cls(c, b, (d, a))
         b, c = min(b, d), max(c, a)  # neither end is past the other
-        return cls(a, d, (b, c) if b <= c else None, False)
+        return cls(a, d, (b, c) if b <= c else None)
 
 
 def _said(v: Visit) -> str:
@@ -406,41 +409,41 @@ def _midnight(day: dt.date, o: Obs) -> dt.datetime:
 def _apart(ix: _Index, run: Run, dates: _Dates) -> bool:
     """Whether a photo shows that the owner left between a visit and the run (5).
 
+    The visit shares no day with the run and cannot: it is before it or after it.
     A visit has dates and no times. So the photo must be a proof in another region, and by
     its own local date on a day strictly between the visit's nearest end and the run's, or
     on the run's own edge day, before its first proof or after its last. On the visit's
     edge day no photo says which came first, so there it counts for nothing. The nearest
     end is the nearest day it can be, if the visit is dated only in part.
 
-    It must also be between them in UTC: before the run's first proof and not before the
-    visit's last day was over, by the clock of that first proof; the same the other way
-    about. Over the date line a later date can be an earlier time. Where the two do not
-    agree the answer is no: doubtful is a continuation.
+    It must also be between them in UTC: before the run's first proof, and two hours or more
+    after the visit's last day was over by the clock of that first proof; the same the other
+    way about. Two hours, because nobody knows the visit's own clock and a region can have
+    two. Over the date line a later date can be an earlier time. Where the two do not agree
+    the answer is no: doubtful is a continuation.
     """
     if dates.hi < run.first:
-        i = bisect_left(ix.utcs, _midnight(dates.hi + _DAY, run.shots[0]))
-        j = bisect_left(ix.utcs, run.start)
+        over = _midnight(dates.hi + _DAY, run.shots[0]) + _NIGHT
+        i, j = bisect_left(ix.utcs, over), bisect_left(ix.utcs, run.start)
         return any(dates.hi < o.day <= run.first for o in ix.elsewhere(run.region, i, j))
-    if dates.lo > run.last:
-        i = bisect_right(ix.utcs, run.end)
-        j = bisect_left(ix.utcs, _midnight(dates.lo, run.shots[-1]))
-        return any(run.last <= o.day < dates.lo for o in ix.elsewhere(run.region, i, j))
-    return False
+    begun = _midnight(dates.lo, run.shots[-1]) - _NIGHT
+    i, j = bisect_right(ix.utcs, run.end), bisect_right(ix.utcs, begun)
+    return any(run.last <= o.day < dates.lo for o in ix.elsewhere(run.region, i, j))
 
 
 def _against_visit(ix: _Index, run: Run, v: Visit) -> str | None:
     """The reason that one row of the region's visits gives (6), or ``None``.
 
-    Dated only in part, a visit that has a day of the run for certain is an overlap; one
-    that can be as long as the whole run is undated; and one that can have a part of it, or
-    only lies beside it, is a continuation unless the owner was seen elsewhere between.
+    Dated only in part, a visit that has a day of the run for certain is an overlap, and one
+    that can have a day of it is undated. One that can have none is a continuation unless
+    the owner was seen elsewhere between.
     """
     dates = _Dates.of(v)
     if (v.date_from, v.date_to) == (run.first, run.last):
         return f"there: {_said(v)}"
     if dates.sure and dates.sure[0] <= run.last and run.first <= dates.sure[1]:
         return f"overlap: shares a day with {_said(v)}"
-    if not dates.full and dates.lo <= run.first and run.last <= dates.hi:
+    if dates.lo <= run.last and run.first <= dates.hi:
         return f"undated: may be {_said(v)}"
     if not _apart(ix, run, dates):
         return f"continuation: no photo shows that you left between it and {_said(v)}"
@@ -834,6 +837,7 @@ def sweep(
     until: dt.date | None,
     track: Collection[TrackRow] = (),
     gaps: Iterable[int] = SWEEP_GAPS,
+    fast_kmh: float | None = None,
 ) -> list[SweepRow]:
     """What the same photos come to at other settings of ``gap_days`` (13).
 
@@ -844,7 +848,7 @@ def sweep(
     for gap in gaps:
         runs = judge(find_runs(obs, gap_days=gap, track=track), obs, visits,
                      since=since, until=until, track=track)
-        cuts = boundaries(runs, gap_days=gap, obs=obs)
+        cuts = boundaries(runs, gap_days=gap, obs=obs, fast_kmh=fast_kmh)
         out.append(SweepRow(gap, len(runs),
                             sum(bool(b.suggestions) and not b.forced for b in cuts),
                             sum(r.status in ("held", "fixed") for r in runs)))
