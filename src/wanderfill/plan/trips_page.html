@@ -601,10 +601,19 @@ const Trips = (() => {
 
   function incomplete(data) {
     const { tiles_read: read, tiles_unread: tiles, unread_photos: photos } = data.coverage;
-    if (!tiles && !photos) return "";
-    return "This list is incomplete. " + tiles + " of " + (read + tiles) + " map tiles could not " +
-      "be read, and " + plural(photos, "photo") + " could not be put in a region. Run the command " +
-      "again; the answers you give here are for this list only.";
+    const rows = data.sources.reduce((sum, s) => sum + s.skipped, 0);
+    const out = [];
+    if (tiles || photos) {
+      out.push(tiles + " of " + (read + tiles) + " map tiles could not be read, and " +
+        plural(photos, "photo") + " could not be put in a region.");
+    }
+    if (rows) {
+      out.push(plural(rows, "row") + " of your tracks could not be read, so a day that would end " +
+        "a stretch can be missing.");
+    }
+    if (!out.length) return "";
+    return "This list is incomplete. " + out.join(" ") + " Run the command again; the answers you " +
+      "give here are for this list only.";
   }
 
   function gapText(gap) {
@@ -635,13 +644,15 @@ const Trips = (() => {
   function sources(data) {
     const out = data.sources.map((s) => SOURCE[s.kind] + ": " + shown(data, s.label) + ", " +
       plural(s.count, COUNTED[s.kind]) + (s.count ? ", " + span(s.first, s.last) : "") +
-      (s.sha256 ? ", file " + s.sha256.slice(0, 12) : ""));
+      (s.sha256 ? ", file " + s.sha256.slice(0, 12) : "") +
+      (s.skipped ? ", " + plural(s.skipped, "row") + " could not be read" : ""));
     if (data.no_track) out.push("You said there is no day-by-day track for these dates.");
     return out;
   }
 
   const LEFT_OUT = {
     other_origin: "of another camera or another app, which were not used",
+    no_place: "with no coordinate, so that a day with one is not a day with no photo",
     no_utc: "with no absolute time",
     span_none: "in a stretch you said not to use",
     conflict: "beside an impossible jump",

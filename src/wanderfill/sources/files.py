@@ -157,6 +157,101 @@ class GeoJsonSource:
                            source=f"{self.name}:{Path(self.path).name}")
 
 
+# -- every place of every day --------------------------------------------------------
+
+_MAX_DAYS = 1000  # of one feature; one that is over more is a mistake in the file
+
+
+def load_every(path: str | Path) -> Track:
+    """A track with every distinct place of every day in it, and not one for a day.
+
+    :func:`load` keeps the middle fix of a day, which is right for a stay and loses the one
+    fix somewhere else. Here a place that is lost is a day that seems to say nothing. What
+    cannot be read as a day and a place is counted in ``skipped``: a row, a feature, a fix.
+    A GPX waypoint or route point with no time is a bookmark or a plan, and is neither.
+    """
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix == ".csv":
+        return load(p)
+    if suffix in (".gpx", ".xml"):
+        found, skipped = _gpx_every(p)
+    elif suffix in (".json", ".geojson"):
+        found, skipped = _geojson_every(p)
+    else:
+        raise ValueError(f"no parser for {p.name}; supported: .csv .gpx .json .geojson")
+    points = [DayPoint(day, lat, lon, source=p.name) for day, lat, lon in dict.fromkeys(found)]
+    return Track(points=points, origin=str(p), skipped=skipped)
+
+
+_Fix = tuple[dt.date, float, float]
+
+
+def _gpx_every(path: Path) -> tuple[list[_Fix], int]:
+    out: list[_Fix] = []
+    skipped = 0
+    for el in ET.parse(path).iter():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag not in ("trkpt", "wpt", "rtept"):
+            continue
+        times = [c.text or "" for c in el if c.tag.rsplit("}", 1)[-1] == "time"]
+        if not times and tag != "trkpt":
+            continue
+        day = _as_date(times[-1]) if times else None
+        try:
+            lat, lon = float(el.attrib["lat"]), float(el.attrib["lon"])
+        except (KeyError, ValueError):
+            day = None
+        if day is None:
+            skipped += 1
+        else:
+            out.append((day, lat, lon))
+    return out, skipped
+
+
+def _geojson_every(path: Path) -> tuple[list[_Fix], int]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    features = data if isinstance(data, list) else data["features"]
+    out: list[_Fix] = []
+    skipped = 0
+    for feature in features:
+        days, good = _feature_days(feature)
+        places: list[tuple[float, float]] = []
+        geometry = feature.get("geometry") if isinstance(feature, dict) else None
+        good &= _positions(geometry.get("coordinates") if isinstance(geometry, dict) else None,
+                           places)
+        skipped += not good
+        out += [(day, lat, lon) for day in days for lat, lon in places]
+    return out, skipped
+
+
+def _feature_days(feature: object) -> tuple[list[dt.date], bool]:
+    """Every day of a feature, from the first that it gives to the last, and whether all of
+    what it gives could be read."""
+    props = feature.get("properties", feature) if isinstance(feature, dict) else None
+    if not isinstance(props, dict):
+        return [], False
+    given = [_as_date(str(props[k])) for k in GeoJsonSource.date_keys if props.get(k)]
+    days = [d for d in given if d]
+    start, end = (_as_date(str(props.get(k) or "")) for k in ("startTime", "endTime"))
+    good = bool(days) and len(days) == len(given) and not (start and end and start > end)
+    if days and (span := (max(days) - min(days)).days) <= _MAX_DAYS:
+        return [min(days) + dt.timedelta(n) for n in range(span + 1)], good
+    return days, False
+
+
+def _positions(value: object, out: list[tuple[float, float]]) -> bool:
+    """Every position in a GeoJSON coordinate array, however deep, and whether all were one."""
+    if not isinstance(value, list) or not value:
+        return False
+    if any(isinstance(v, list) for v in value):
+        return all([_positions(v, out) for v in value])  # all of them, and not up to the first
+    if len(value) < 2 or any(type(v) not in (int, float) for v in value[:2]):
+        return False
+    out.append((float(value[1]), float(value[0])))
+    return True
+
+
 def load(path: str | Path) -> Track:
     """Pick a parser by extension and read the file."""
     p = Path(path)

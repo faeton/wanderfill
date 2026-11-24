@@ -1538,15 +1538,15 @@ NAMES = {R: "Aldmoor", Q: "Berrow", S: "Cray Islands", 4: "Dunvale", 8: "Elstow"
 PARAMS = {"since": "2026-04-20", "until": "2026-05-30", "gap_days": 2,
           "speeds": default_speeds(), "spans": False, "flight_days": True}
 PHOTOS = {"kind": "photos", "label": "Photos library", "sha256": None, "first": "2019-03-02",
-          "last": "2026-06-20", "count": 4321}
+          "last": "2026-06-20", "count": 4321, "skipped": 0}
 TRACK = {"kind": "track", "label": "days.csv", "sha256": "a" * 64, "first": "2012-01-01",
-         "last": "2018-12-30", "count": 900}
+         "last": "2018-12-30", "count": 900, "skipped": 0}
 SPANS = {"kind": "spans", "label": "spans.json", "sha256": "b" * 64, "first": "2020-01-01",
-         "last": "2020-01-09", "count": 2}
+         "last": "2020-01-09", "count": 2, "skipped": 0}
 COVERAGE = {"tiles_read": 12, "tiles_unread": 0, "unread_photos": 0}
 LEFT_OUT = {name: n for n, name in enumerate((
-    "other_origin", "no_utc", "span_none", "conflict", "fast", "span_airports", "unread",
-    "stale", "nowhere", "nearest", "edge", "clock"), 2)}
+    "other_origin", "no_place", "no_utc", "span_none", "conflict", "fast", "span_airports",
+    "unread", "stale", "nowhere", "nearest", "edge", "clock"), 2)}
 SWEEP = [SweepRow(1, 6, 2, 1), SweepRow(2, 5, 1, 2)]
 TRIP = {"id": 551, "date_from": "2026-05-03", "date_to": "2026-05-04", "description": "hills"}
 
@@ -1584,7 +1584,7 @@ def test_a_list_comes_back_from_disk_as_it_was(tmp_path):
 
 def test_the_hash_of_a_trip_list_is_what_it_was():
     """Answers on disk name it. Another hash for the same list is another list to them."""
-    assert small().sha256 == "80d4ef7bd603cf0f8704f093937eae32b7b2444d1892f8cc94ff9da15bdc7451"
+    assert small().sha256 == "79231d035a2bc9dc6e2000182c437c92c67ac088af7dbe3fe7b7d6657d26b770"
 
 
 def test_what_the_list_says_of_a_run():
@@ -1733,7 +1733,8 @@ BAD_CHANGES = [
     ("sources.0.label", None), ("sources.0.sha256", "A" * 64), ("sources.0.sha256", "a" * 63),
     ("sources.0.sha256", 5), ("sources.0.first", None), ("sources.0.last", "2019-03-01"),
     ("sources.0.first", "2019"), ("sources.0.count", -1), ("sources.0.count", 0),
-    ("sources.0.count", True), ("sources.0.path", "x"),
+    ("sources.0.count", True), ("sources.0.path", "x"), ("sources.0.skipped", -1),
+    ("sources.0.skipped", GONE), ("sources.0.skipped", True), ("sources.0.skipped", 1),
     ("sources", [PHOTOS, PHOTOS]), ("sources", [PHOTOS, TRACK]), ("sources", [PHOTOS, SPANS]),
     ("coverage.tiles_read", -1), ("coverage.tiles_unread", None), ("coverage.unread_photos", 1.0),
     ("coverage.more", 1), ("left_out.fast", -1), ("left_out.fast", True), ("left_out.edge", GONE),
@@ -1955,11 +1956,12 @@ def test_left_out_gives_each_photo_of_the_dates_one_reason():
            ob(5, origin="airdrop", kind="fast"), ob(4, kind="fast"), ob(7, kind="fast")]
     ask = {"since": day(5), "until": day(6)}
     assert left_out(obs, **ask) == {
-        "other_origin": 1, "no_utc": 1, "span_none": 1, "conflict": 1, "fast": 2,
+        "other_origin": 1, "no_place": 0, "no_utc": 1, "span_none": 1, "conflict": 1, "fast": 2,
         "span_airports": 1, "unread": 1, "stale": 1, "nowhere": 1, "nearest": 1, "edge": 2,
         "clock": 1}
     assert left_out(obs, since=None, until=None, other_origin=5) == left_out(obs, **ask) | {
         "fast": 4, "other_origin": 6}
+    assert left_out([], **ask, no_place=3) == dict.fromkeys(LEFT_OUT, 0) | {"no_place": 3}
     assert left_out([], **ask) == dict.fromkeys(LEFT_OUT, 0)
     assert small(left_out=left_out(obs, **ask)).left_out["fast"] == 2
     out = sum(left_out(obs, since=None, until=None).values())
@@ -3348,6 +3350,38 @@ def test_both_kinds_of_photo_and_the_rule_itself_are_said(tmp_path):
     assert "Days of photos in flight are in no stretch" in about
 
 
+@needs_node
+def test_rows_that_could_not_be_read_make_the_page_incomplete(tmp_path):
+    read = """const p = open();
+      return [p.byId.incomplete.textContent, p.byId.incomplete.hidden, p.byId.sources.textContent];
+    """
+    track = lambda n: {"sources": [PHOTOS, TRACK | {"skipped": n}], "no_track": False}  # noqa: E731
+    text, hidden, sources = run(tmp_path, small(**track(2)), read)
+    assert hidden is False and "incomplete" in text and "2 rows of your tracks" in text
+    assert "2 rows could not be read" in sources
+    text, hidden, sources = run(tmp_path, small(**track(0)), read)
+    assert hidden is True and text == "" and "could not be read" not in sources
+    assert small(**track(1)).sha256 != small(**track(0)).sha256
+    assert "1 row of your tracks" in run(tmp_path, small(**track(1)), read)[0]
+
+
+def test_a_day_with_a_photo_that_is_nowhere_is_a_barrier():
+    obs = [*stay(R, 1, 3), *stay(R, 5, 6)]
+    assert spans(find_runs(obs)) == [(1, 6)]
+    assert spans(find_runs(obs, unplaced=[day(4)])) == [(1, 3), (5, 6)]
+    assert spans(find_runs(obs, unplaced=[day(2), day(5), day(9)])) == [(1, 6)]
+    near = [*obs, ob(4, state="edge")]  # compatible, but for the photo with no place
+    assert spans(find_runs(near, gap_days=1)) == [(1, 6)]
+    assert spans(find_runs(near, gap_days=1, unplaced=[day(4)])) == [(1, 3), (5, 6)]
+    both = {R: []}
+    for gap, n in ((1, 2), (2, 2)):
+        (row,) = sweep(obs, both, since=None, until=None, gaps=[gap], unplaced=[day(4)])
+        assert row.runs == n
+    only = {"since": day(4), "until": day(4)}
+    assert regions_to_read(obs, **only) == {R}
+    assert regions_to_read(obs, **only, unplaced=[day(4)]) == set()
+
+
 READ_PARTS = """
   return open().runs().map((r) => r.all((e) => e.tag === "details").map((d) => [
     d.open, d.all((e) => e.tag === "summary")[0].textContent,
@@ -3511,7 +3545,8 @@ def test_the_header_says_what_was_read_and_what_was_left_out(tmp_path):
         assert word in sources, word
     assert "no day-by-day track" not in sources
     for line, n, word in zip(out, LEFT_OUT.values(), (
-            "another camera", "no absolute time", "not to use", "impossible jump", "travel speed",
+            "another camera", "no coordinate", "no absolute time",
+            "not to use", "impossible jump", "travel speed",
             "layover", "could not be read", "list of regions", "no land", "beside a region",
             "near the edge", "clock"), strict=True):
         assert line.startswith(f"{n} photos ") and word in line, word

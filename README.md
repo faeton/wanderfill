@@ -537,7 +537,7 @@ wanderfill show -v plan-trips.json && wanderfill check plan-trips.json
 map, and finds **runs**: days with a photo on the ground and strictly inside one region,
 by a clock that can be the local one. Photos taken at speed, beside an impossible jump, on
 a border, or with no zone prove no day. A run goes on over a day with no photo at all, but
-not over a day with a photo somewhere else. It reads every visit of those regions, and
+not over a day with a photo somewhere else, or with one that has no coordinate. It reads every visit of those regions, and
 every trip of those years, and writes a page and its list into `review/trips/`.
 
 A made-up journey, as the page shows it:
@@ -574,15 +574,16 @@ One with a visit of exactly its days is greyed and left out. Between two runs th
 asks whether a new trip starts wherever something suggests it: a flight, days with nothing,
 a run that is on the profile.
 
-A trip can have a region once. A journey that comes back through a place, A, B and A
-again, has to be two trips: press "A new trip starts here" somewhere between the two
+A trip can have a region once. Two stays in one region with other regions between them
+are two visits, so a journey that comes back through a place, A, B and A again, has to be
+two trips: press "A new trip starts here" somewhere between the two
 stays in A. Any place between them will do, not only a suggested one, and you pick it.
 Until you do, the trip is not made, and the page says which two stays it is about.
 
 | flag | what it does |
 |---|---|
 | `--since`, `--until` | the first and the last day, by the photo's own clock |
-| `--track FILE...` or `--no-track` | one of them is needed. A row of a track proves no day; on a day with no photo, in another region, it ends a run |
+| `--track FILE...` or `--no-track` | one of them is needed. Every place of every day in it is read. A row proves no day; on a day with no photo, in another region, it ends a run |
 | `--gap-days N` | with 1, every day with no photo ends a run; with 2, one such day does not; with N, up to N-1 in a row do not. 2 unless you say. A table shows the other settings |
 | `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
 | `--no-flight-days` | a run begins and ends on a day with a photo on the ground |
@@ -608,7 +609,7 @@ any plan. Nothing but `create_trip` is ever in it.
 | 0 | both files written, also when the list is empty | the plan is written, or no trip comes of the answers and none is |
 | 1 | no token | no token; a list or answers that cannot be used, too many region visits |
 | 2 | an error, and no file; a track that cannot be read is one | an error, another account, a profile that has changed, a plan file that exists |
-| 3 | both files written, and something could not be read (a map tile, a row of a track), so the list is incomplete: run it again | |
+| 3 | both files written, and something could not be read (a map tile, a row of a track), so the list is incomplete and says so, on the page and in `plan`: run it again | |
 
 The files in `review/trips/` say where you were and when. They are readable by you alone
 and ignored by git.

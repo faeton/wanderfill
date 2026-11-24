@@ -19,7 +19,7 @@ from typing import ClassVar
 import pytest
 
 from wanderfill.api.client import NomadMania
-from wanderfill.api.errors import AccountMismatch, DriftError, PlanInvalid
+from wanderfill.api.errors import AccountMismatch, DriftError, PlanInvalid, WanderfillError
 from wanderfill.cli import main as cli
 from wanderfill.geo.tiles import deg2tile, tile_bounds
 from wanderfill.plan import trips
@@ -112,6 +112,7 @@ class Library:
     """A Photos library that remembers how it was read."""
 
     photos: ClassVar[list] = []
+    unplaced: ClassVar[list] = []
     column = True
     opened: ClassVar[list] = []
 
@@ -122,6 +123,9 @@ class Library:
     def assets(self):
         self.importer_column = Library.column
         yield from Library.photos
+
+    def without_location(self):
+        yield from Library.unplaced
 
 
 class Site:
@@ -216,6 +220,7 @@ def site(monkeypatch, tmp_path):
     monkeypatch.setattr(Library, "opened", [])
     monkeypatch.setattr(Library, "column", True)
     monkeypatch.setattr(Library, "photos", list(JOURNEY))
+    monkeypatch.setattr(Library, "unplaced", [])
     (tmp_path / "cwd").mkdir()
     (tmp_path / "lib").mkdir()
     monkeypatch.chdir(tmp_path / "cwd")
@@ -524,9 +529,9 @@ def test_review_says_what_it_did_in_the_list(site, tmp_path):
     assert m.left_out["other_origin"] == 1  # of these dates
     assert m.sources == [
         {"kind": "photos", "label": "lib", "sha256": None, "first": str(day(-9)),
-         "last": str(day(17)), "count": len(JOURNEY)},
+         "last": str(day(17)), "count": len(JOURNEY), "skipped": 0},
         {"kind": "spans", "label": "stretches.json", "first": str(day(12)),
-         "last": str(day(12)), "count": 1,
+         "last": str(day(12)), "count": 1, "skipped": 0,
          "sha256": hashlib.sha256(spans.read_bytes()).hexdigest()}]
     assert m.no_track and [r.gap_days for r in m.sweep] == [1, 2, 3, 5]
     assert listed()[0].params["until"] is None
@@ -716,7 +721,7 @@ def test_a_row_on_a_silent_day_in_another_region_is_a_barrier(site, region, join
     assert spans == ([(day(3), day(6))] if joins else [(day(3), day(4)), (day(6), day(6))])
     (row,) = [s for s in m.sources if s["kind"] == "track"]
     assert row == {"kind": "track", "label": "days.csv", "first": str(day(1)),
-                   "last": str(day(5)), "count": 2,
+                   "last": str(day(5)), "count": 2, "skipped": 0,
                    "sha256": hashlib.sha256(Path("days.csv").read_bytes()).hexdigest()}
     assert m.no_track is False
 
@@ -759,7 +764,170 @@ def test_rows_that_cannot_be_read_are_said_and_are_exit_three(site, capsys):
         f.write(f"{day(5)},,\nsomeday,1.0,10.5\n,,\n")
     assert do_review(track=("--track", "days.csv")) == 3
     out = capsys.readouterr().out
-    assert "2 row(s) of days.csv" in out and len(list(Path("out").iterdir())) == 2
+    assert "days.csv: 2 rows" in out and "2 rows could not be read" in out
+    assert "This list is incomplete" in out and len(list(Path("out").iterdir())) == 2
+    m, path = made()
+    (row,) = [s for s in m.sources if s["kind"] == "track"]
+    assert (row["count"], row["skipped"]) == (2, 2)
+    assert "incomplete" in path.with_suffix(".html").read_text()
+    assert do_plan() == 0
+    out = capsys.readouterr().out
+    assert "The list was incomplete" in out and "2 rows" in out
+
+
+GPX = """<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>{}</trkseg></trk>{}</gpx>"""
+
+
+def trkpt(n, where, hour=12, tag="trkpt"):
+    lat, lon = centre(where) if isinstance(where, int) else where
+    when = n if isinstance(n, str) else n and day(n)
+    time = "" if n is None else f"<time>{when}T{hour:02}:00:00Z</time>"
+    return f'<{tag} lat="{lat}" lon="{lon}">{time}</{tag}>'
+
+
+def feature(n, where, kind="Point", **props):
+    lat, lon = centre(where) if isinstance(where, int) else where
+    at = {"Point": [lon, lat], "LineString": [[10.5, 1.25], [lon, lat]],
+          "MultiLineString": [[[10.5, 1.25]], [[lon, lat]]]}[kind]
+    return {"type": "Feature", "properties": {"date": str(day(n))} | props if n else props,
+            "geometry": {"type": kind, "coordinates": at}}
+
+
+def spans_of(m, region):
+    return [(r.first, r.last) for r in m.runs if r.region == region]
+
+
+APART = [(day(3), day(4)), (day(6), day(6))]
+TOGETHER = [(day(3), day(6))]
+
+
+@pytest.mark.parametrize("name, text", [
+    ("t.gpx", GPX.format("".join([*(trkpt(5, 2, h) for h in (8, 9, 10)), trkpt(5, 4, 11)]), "")),
+    ("t.gpx", GPX.format(trkpt(5, 2), trkpt(5, 4, tag="wpt"))),
+    ("t.gpx", GPX.format(trkpt(5, 4), "".join(trkpt(5, 2, h, "rtept") for h in (8, 9, 10)))),
+    ("t.xml", GPX.format("".join(trkpt(5, w) for w in (4, 2, 2, 2)), "")),
+    ("t.geojson", json.dumps({"features": [feature(5, 2), feature(5, 4)]})),
+    ("t.json", json.dumps([feature(5, 2), feature(5, 2), feature(5, 4), feature(5, 2)])),
+    ("t.json", json.dumps({"features": [feature(5, 4, "LineString")]})),
+    ("t.json", json.dumps({"features": [feature(5, 4, "MultiLineString")]})),
+    ("t.json", json.dumps({"features": [feature(None, 4, startTime="2031-05-04T10:00:00Z",
+                                                endTime="2031-05-06T10:00:00Z")]})),
+    ("t.csv", f"date,lat,lon\n{day(5)},1.25,10.5\n{day(5)},2.25,10.5\n"),
+], ids=range(10))
+def test_every_place_of_a_day_in_a_track_counts(site, name, text):
+    """Three fixes in Berrow and one in Dunvale: the one is the barrier."""
+    Path(name).write_text(text)
+    m, _ = listed(track=("--track", name))
+    assert spans_of(m, 2) == APART
+    assert [s["skipped"] for s in m.sources] == [0, 0]
+
+
+@pytest.mark.parametrize("name, text", [
+    ("t.gpx", GPX.format("".join(trkpt(5, 2, h) for h in (8, 9)) + trkpt(9, 3), "")),
+    ("t.json", json.dumps([feature(5, 2), feature(5, 2, "LineString")])),
+], ids=range(2))
+def test_a_track_in_one_region_only_joins_as_before(site, name, text):
+    Path(name).write_text(text)
+    assert spans_of(listed(track=("--track", name))[0], 2) == TOGETHER
+
+
+@pytest.mark.parametrize("name, text, n", [
+    ("t.gpx", GPX.format(trkpt(1, 1) + trkpt(None, 2), ""), 1),                 # no time
+    ("t.gpx", GPX.format(trkpt(1, 1), trkpt(None, 2, tag="wpt")), 0),           # a bookmark
+    ("t.gpx", GPX.format(trkpt(1, 1), trkpt(None, 2, tag="rtept")), 0),         # a plan
+    ("t.gpx", GPX.format(trkpt(1, 1), trkpt("someday", 2, tag="wpt")), 1),
+    ("t.gpx", GPX.format(trkpt(1, 1) + trkpt("2031-13-05", 2), ""), 1),
+    ("t.gpx", GPX.format(trkpt(1, 1) + trkpt(2, ("x", 10.5)) + "<trkpt lat='1'/>", ""), 2),
+    ("t.json", json.dumps([feature(1, 1), feature(None, 2)]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(None, 2, date="someday")]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(2, 2) | {"geometry": None}]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(2, 2) | {"geometry": {"coordinates": []}}]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(2, 2) | {
+        "geometry": {"coordinates": [[10.5, 1.25], ["x", 1], [10.5]]}}]), 1),
+    ("t.json", json.dumps([feature(1, 1), 7, None, "x", {"properties": 5}]), 4),
+    ("t.json", json.dumps([feature(1, 1), feature(2, 2, endTime="someday")]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(None, 2, startTime="2031-05-05",
+                                                  endTime="2031-05-01")]), 1),
+    ("t.json", json.dumps([feature(1, 1), feature(None, 2, startTime="1931-05-05",
+                                                  endTime="2031-05-01")]), 1),
+    ("t.csv", f"date,lat,lon\n{day(1)},0.75,10.5\n{day(2)},x,10\n,,\n", 1),
+], ids=range(16))
+def test_rows_that_cannot_be_read_are_counted_in_every_format(site, name, text, n):
+    Path(name).write_text(text)
+    assert do_review(track=("--track", name)) == (3 if n else 0)
+    (row,) = [s for s in made()[0].sources if s["kind"] == "track"]
+    assert row["skipped"] == n and row["count"] >= 1
+
+
+@pytest.mark.parametrize("bad", [["x", 1], [10.5], 1, None])
+def test_what_can_be_read_after_what_cannot_still_counts(site, bad):
+    there = feature(5, 4)
+    there["geometry"]["coordinates"] = [bad, [10.5, 2.25]]
+    Path("t.json").write_text(json.dumps([there]))
+    assert do_review(track=("--track", "t.json")) == 3
+    m, _ = made()
+    assert spans_of(m, 2) == APART and m.sources[1]["skipped"] == 1
+
+
+def test_what_the_other_readers_give_is_what_it_was(tmp_path):
+    from wanderfill.sources.files import load
+
+    path = tmp_path / "t.gpx"
+    path.write_text(GPX.format("".join([*(trkpt(5, 2, h) for h in (8, 9)), trkpt(5, 4)]), ""))
+    (p,) = load(path).points
+    assert (p.lat, p.lon, p.weight) == (1.25, 10.5, 3) and load(path).skipped == 0
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({"features": [feature(5, 4, "LineString"), feature(None, 2)]}))
+    (p,) = load(path).points
+    assert (p.lat, p.lon) == (1.25, 10.5)
+
+
+# -- review: photos with no location --------------------------------------------------------
+
+
+def blind(n, origin="own-camera"):
+    from wanderfill.sources.photos_app import DatedPhoto
+
+    return DatedPhoto(f"b{n}", day(n), origin)
+
+
+def test_a_photo_with_no_place_is_a_photo_of_its_day(site, capsys):
+    assert spans_of(listed()[0], 2) == TOGETHER
+    Library.unplaced = [blind(5), blind(-40)]
+    m, path = listed()
+    assert spans_of(m, 2) == APART and m.left_out["no_place"] == 1
+    assert "1  with no coordinate" in capsys.readouterr().out
+    assert all(day(5) not in r.silent for r in m.runs)
+    assert "with no coordinate" in path.with_suffix(".html").read_text()
+
+
+def test_only_the_owners_own_camera_is_a_barrier(site):
+    Library.unplaced = [blind(5, "airdrop"), blind(5, "unknown"), blind(5, "other")]
+    m, _ = listed()
+    assert spans_of(m, 2) == TOGETHER and m.left_out["no_place"] == 0
+
+
+def test_a_photo_with_no_place_between_is_a_barrier_to_a_flight_day(site):
+    photos(*days(HOME, -9, -4), *days(1, 1, 4), *flown(6, 1, 8), *days(2, 7, 8),
+           *days(HOME, 10, 11))
+    assert by_region(listed()[0])[1].last == day(6)
+    Library.unplaced = [blind(5)]
+    assert by_region(listed()[0])[1].last == day(4)
+    Library.unplaced = [blind(6)]  # of the flight day itself, and it still is one
+    assert by_region(listed()[0])[1].last == day(6)
+
+
+def test_a_photo_with_no_place_on_a_day_with_proof_changes_nothing(site):
+    was, _ = listed()
+    Library.unplaced = [blind(4), blind(6)]
+    assert [r.id for r in listed()[0].runs] == [r.id for r in was.runs]
+
+
+def test_the_table_and_what_is_read_have_them_too(site):
+    Library.unplaced = [blind(5)]
+    m, _ = listed()
+    by_gap = {r.gap_days: r.runs for r in m.sweep}
+    assert by_gap[2] == by_gap[1] == len(m.runs)
 
 
 # -- review: arguments, errors, files -----------------------------------------------------
@@ -826,6 +994,67 @@ def test_the_same_list_is_rewritten_and_another_under_its_name_is_not(site, caps
     assert path.read_text() == "{}" and str(path) in capsys.readouterr().err
 
 
+def steps(monkeypatch, at):
+    """Interrupt the run right after its `at`-th step on a file, whatever it is."""
+    count = [0]
+
+    def wrap(where, name):
+        real = getattr(where, name)
+
+        def step(*a, **kw):
+            out = real(*a, **kw)
+            count[0] += 1
+            if count[0] == at:
+                raise KeyboardInterrupt
+            return out
+
+        monkeypatch.setattr(where, name, step)
+
+    for name in ("open", "fdopen"):
+        wrap(os, name)
+    wrap(Path, "replace")
+    return count
+
+
+def test_an_interrupt_after_any_step_leaves_no_half_of_a_pair(site, monkeypatch):
+    m, path = listed(out="whole")
+    made_up, html = TripList.load(path), path.with_suffix(".html").read_text()
+    for at in range(1, 12):
+        out = Path(f"out{at}")
+        with monkeypatch.context() as broken:
+            count = steps(broken, at)
+            try:
+                cli._write_pair(out, "trips", made_up, html)
+                ended = True
+            except KeyboardInterrupt:
+                ended = False
+        left = sorted(p.name for p in out.iterdir())
+        assert left == ([f"trips-{m.sha256[:12]}.html", f"trips-{m.sha256[:12]}.json"]
+                        if ended else []), at
+        if count[0] < at:
+            break
+    assert at > 5
+
+
+def test_a_failure_removes_only_what_this_run_put_there(site, monkeypatch):
+    m, path = listed(out="whole")
+    html, out = path.with_suffix(".html").read_text(), Path("out")
+    replace = Path.replace
+
+    def another(self, target):
+        replace(self, target)
+        if Path(target).suffix == ".json":  # somebody puts their own there at once
+            Path(target).unlink()
+            Path(target).write_text("theirs")
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "replace", another)
+    with pytest.raises(WanderfillError):
+        cli._write_pair(out, "trips", m, html)
+    (left,) = out.iterdir()
+    assert left.read_text() == "theirs"
+
+
 @pytest.mark.parametrize("fails", [".json", ".html"])
 def test_half_a_list_is_none(site, monkeypatch, fails):
     replace = Path.replace
@@ -879,6 +1108,68 @@ def test_review_shows_progress_and_says_what_the_first_run_costs(site, capsys):
     assert do_review() == 0
     err = capsys.readouterr().err
     assert "photos placed" in err and "map tiles" in err
+
+
+BAD = "da\x1b[2J\u202eys"
+
+
+def test_no_name_of_a_file_reaches_the_terminal_raw(site, capsys, tmp_path):
+    raw = {"\x1b", "\u202e", "\x07"}
+    track = track_file((5, 2), name=f"{BAD}.csv")
+    spans = Path(f"{BAD}.json")
+    spans.write_text("[]")
+    library = tmp_path / f"{BAD}lib"
+    library.mkdir()
+    argv = ("trips", "review", "--since", day(1), "--library", library, "--spans", spans)
+    assert run_cli(*argv, "--track", track, "--out", f"{BAD}out") == 0
+    both = capsys.readouterr()
+    assert not set(both.out + both.err) & raw and "da[2Jys.csv" in both.out
+    assert "wanderfill trips plan" not in both.out and "cannot be shown" in both.out
+    m, path = made(f"{BAD}out")
+    files = path, answer(m, path=f"{BAD}answers.json")
+    assert run_cli("trips", "plan", *files, "--plan", f"{BAD}plan.json") == 0
+    assert run_cli("trips", "plan", *files, "--plan", f"{BAD}plan.json") == 2     # it is there
+    assert run_cli("trips", "plan", path, f"{BAD}absent.json") == 1
+    assert run_cli("trips", "plan", f"{BAD}absent.json", files[1]) == 1
+    Path(f"{BAD}.txt").write_text("x")
+    Path(f"{BAD}e.csv").write_text("date,lat,lon\n")
+    Path(f"{BAD}p.csv").write_text("date,lat,lon\n2031-05-05,95,1\n")
+    for bad in (".txt", "e.csv", "p.csv", "absent.csv"):
+        assert run_cli(*argv, "--track", f"{BAD}{bad}", "--out", "o") == 2
+    assert run_cli(*argv[:4], "--no-track", "--library", f"{BAD}none") == 2
+    assert run_cli(*argv[:6], "--no-track", "--spans", f"{BAD}none") == 2
+    path.write_text("{}")
+    assert run_cli(*argv, "--track", track, "--out", f"{BAD}out") == 2
+    Path(f"{BAD}file").write_text("x")
+    assert run_cli(*argv, "--track", track, "--out", f"{BAD}file") == 2
+    assert run_cli(*argv, "--no-track", f"{BAD}more") == 2
+    both = capsys.readouterr()
+    assert not set(both.out + both.err) & raw
+
+
+def test_a_newline_in_a_name_makes_no_line_of_its_own(site, capsys):
+    assert run_cli("trips", "review", "--since", day(1), "--library", "../lib",
+                   "--track", "a\nerror: all is well.csv") == 2
+    assert not any(line.startswith("error: all") for line in
+                   capsys.readouterr().err.splitlines())
+
+
+@pytest.mark.parametrize("out, want", [("out", "out/"), ("my out", "'my out/")])
+def test_the_suggested_command_can_be_pasted(site, capsys, out, want):
+    assert do_review(out=out) == 0
+    (line,) = [x for x in capsys.readouterr().out.splitlines() if "wanderfill trips plan" in x]
+    import shlex
+
+    assert shlex.split(line) == ["wanderfill", "trips", "plan", str(made(out)[1]),
+                                 "trips-answers.json"]
+    assert want in line
+
+
+@pytest.mark.parametrize("out", ["o\u200but", "o\nut", "o\u00a0ut"])
+def test_a_command_that_cannot_be_shown_exactly_is_not_shown(site, capsys, out):
+    assert do_review(out=out) == 0
+    said = capsys.readouterr().out
+    assert "wanderfill trips plan" not in said and "cannot be shown" in said
 
 
 # -- placing -------------------------------------------------------------------------------

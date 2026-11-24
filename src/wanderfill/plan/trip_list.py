@@ -71,8 +71,8 @@ _KINDS = _REASONS | _FLAGS | _SUGGESTIONS
 _PARAMS = ("since", "until", "gap_days", "speeds", "spans", "flight_days")
 _SOURCES = ("photos", "track", "spans")
 _COVERAGE = ("tiles_read", "tiles_unread", "unread_photos")
-_LEFT_OUT = ("other_origin", "no_utc", "span_none", "conflict", "fast", "span_airports",
-             "unread", "stale", "nowhere", "nearest", "edge", "clock")
+_LEFT_OUT = ("other_origin", "no_place", "no_utc", "span_none", "conflict", "fast",
+             "span_airports", "unread", "stale", "nowhere", "nearest", "edge", "clock")
 _VISIT = ("id", "date_from", "date_to", "quality", "trip_id")
 _TRIP = ("id", "date_from", "date_to", "description")
 _LISTS = ("sources", "sweep", "runs", "boundaries", "trips")
@@ -139,10 +139,10 @@ class TripList:
     arguments of :func:`~wanderfill.plan.review.grade_shots` by name, ``spans``, whether
     a spans file was given, and ``flight_days``, whether a run may have them. ``sources`` has
     the photos once, every track and the spans file, each with ``kind``, ``label`` (no
-    directory), ``sha256`` or ``None``, ``first``, ``last`` and ``count``; ``no_track`` is the
-    owner's word that there is no track for these dates, and is true exactly when there is
-    none. ``coverage`` has ``tiles_read``, ``tiles_unread`` and ``unread_photos``.
-    ``left_out`` is what :func:`left_out` returns.
+    directory), ``sha256`` or ``None``, ``first``, ``last``, ``count`` and ``skipped``, how
+    many rows could not be read; ``no_track`` is the owner's word that there is no track for
+    these dates, and is true exactly when there is none. ``coverage`` has ``tiles_read``,
+    ``tiles_unread`` and ``unread_photos``. ``left_out`` is what :func:`left_out` returns.
     ``visits`` has every visit of every region on the list, as :func:`visits_rows` has them,
     and ``trips`` the trips over the same days, as :func:`trips_rows` has them.
 
@@ -194,6 +194,12 @@ class TripList:
             raise PlanInvalid(str(exc)) from None
         for name, value in clean.items():
             object.__setattr__(self, name, value)
+
+    @property
+    def not_read(self) -> tuple[int, int, int]:
+        """How many map tiles, photos and rows of tracks could not be read."""
+        return (self.coverage["tiles_unread"], self.coverage["unread_photos"],
+                sum(s["skipped"] for s in self.sources))
 
     def _content(self) -> dict:
         return {
@@ -429,7 +435,7 @@ def _sources_of(rows: Sequence) -> list[dict]:
     out = []
     for i, row in enumerate(rows):
         what = f"sources[{i}]"
-        _fields(row, ("kind", "label", "sha256", "first", "last", "count"), what)
+        _fields(row, ("kind", "label", "sha256", "first", "last", "count", "skipped"), what)
         kind, label, sha = row["kind"], _text(row["label"], f"{what}.label"), row["sha256"]
         if not isinstance(kind, str) or kind not in _SOURCES:
             raise ValueError(f"{what}.kind must be one of {', '.join(_SOURCES)}, not {_r(kind)}")
@@ -441,13 +447,16 @@ def _sources_of(rows: Sequence) -> list[dict]:
         if sha is None and kind != "photos":
             raise ValueError(f"{what}.sha256: a {kind} file has one")
         count = _whole(row["count"], f"{what}.count", low=0)
+        skipped = _whole(row["skipped"], f"{what}.skipped", low=0)
+        if skipped and kind != "track":
+            raise ValueError(f"{what}.skipped: only a track has rows")
         ends = [None if row[k] is None else date(row[k], f"{what}.{k}") for k in ("first", "last")]
         if (ends == [None, None]) is not (count == 0) or (None in ends and any(ends)):
             raise ValueError(f"{what}.first and last are its days, where there is anything in it")
         if count and ends[0] > ends[1]:
             raise ValueError(f"{what}.first is after its last")
         out.append({"kind": kind, "label": label, "sha256": sha, "first": ends[0],
-                    "last": ends[1], "count": count})
+                    "last": ends[1], "count": count, "skipped": skipped})
     return sorted(out, key=lambda s: (_SOURCES.index(s["kind"]), s["label"], canonical(s)))
 
 
@@ -632,15 +641,18 @@ def _trips_of(rows: Sequence, runs: Sequence[ListedRun]) -> list[dict]:
 
 
 def left_out(
-    obs: Iterable[Obs], *, since: dt.date | None, until: dt.date | None, other_origin: int = 0
+    obs: Iterable[Obs], *, since: dt.date | None, until: dt.date | None, other_origin: int = 0,
+    no_place: int = 0,
 ) -> dict[str, int]:
     """How many photos of these dates are no proof, by reason, for the page to say.
 
     Each photo has one reason, the first that holds, in the order of the result.
-    ``other_origin`` is how many of another origin were not given at all.
+    ``other_origin`` is how many of another origin were not given at all, and
+    ``no_place`` how many of the owner's that have no coordinate.
     """
     out = dict.fromkeys(_LEFT_OUT, 0)
     out["other_origin"] = other_origin
+    out["no_place"] = no_place
     for o in obs:
         if (since is None or o.day >= since) and (until is None or o.day <= until) and (
                 why := _why_not(o)):

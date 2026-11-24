@@ -115,14 +115,17 @@ def zone_fits(zone: int | None, lon: float) -> bool:
     return abs(off) <= 4 * 3600
 
 
-MINE = """
+PLACED = """
   a.ZLATITUDE BETWEEN -90 AND 90
   AND a.ZLONGITUDE BETWEEN -180 AND 180
   AND NOT (a.ZLATITUDE = 0 AND a.ZLONGITUDE = 0)
-  AND a.ZTRASHEDSTATE = 0
+"""
+KEPT = """
+  a.ZTRASHEDSTATE = 0
   AND COALESCE(a.ZSAVEDASSETTYPE, 0) != 12
   AND NOT (a.ZKIND = 0 AND a.ZKINDSUBTYPE = 10)
 """
+MINE = f"{PLACED}  AND {KEPT}"
 """The photos that are actually yours and actually places.
 
 Kept in one string because ``points()`` and ``assets()`` disagreeing about
@@ -200,6 +203,29 @@ LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
 WHERE {MINE}
 {WINDOW}{{origin}}ORDER BY ts
 """
+
+
+DATED_QUERY = f"""
+SELECT a.ZUUID, date({LOCAL}, 'unixepoch'), {{importer}}
+FROM ZASSET a
+LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
+WHERE COALESCE(({PLACED}), 0) = 0
+  AND {KEPT}
+{WINDOW}{{origin}}ORDER BY 2, 1
+"""
+"""The photos that ``MINE`` leaves out for their coordinate and for nothing else."""
+
+
+@dataclass(frozen=True)
+class DatedPhoto:
+    """A photo with no location: which it is, its own local day, and whose.
+
+    It is evidence of no place. But its day is a day with a photo, and that is all it is for.
+    """
+
+    uuid: str
+    date: dt.date
+    origin: Origin
 
 
 @dataclass(frozen=True)
@@ -400,6 +426,11 @@ class PhotosAppSource:
                 taken_utc=dt.datetime.fromtimestamp(float(utc), dt.timezone.utc),
                 zone=int(zone) if isinstance(zone, (int, float)) else None,
             )
+
+    def without_location(self) -> Iterator[DatedPhoto]:
+        """The dated photos that have no coordinate, which the other two readings leave out."""
+        for uuid, day, importer in self._read(DATED_QUERY, self._bounds()):
+            yield DatedPhoto(str(uuid), dt.date.fromisoformat(day), origin_of(importer))
 
     def points(self) -> Iterator[DayPoint]:
         rows = self._read(QUERY, {**self._bounds(), "precision": self.precision})

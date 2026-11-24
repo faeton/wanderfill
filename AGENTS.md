@@ -334,7 +334,8 @@ and no others.
    status and reason, the gap table, what was left out, the sources with their first and
    last day, the trips that are there already, the tiles not read. Run `evidence` first
    (6a): a region with a thin run is one the owner may be asked to prove. Exit 3 means
-   that something was not read and the list is incomplete: say so, and run it again. A
+   that something was not read (a tile, a photo's place, a row of a track) and the list is
+   incomplete: say so, and run it again. `plan` says it once more. A
    plan from an incomplete list is allowed only if the owner, told that it is, wants it.
 2. **Hand the page to the owner and stop.** They open it, answer and save the file. Never
    fill in an answer, a word, a cut or a date, never edit the list or the answers, press
@@ -387,7 +388,8 @@ leaves its trip's header behind (above). A layover is theirs to judge: some coun
 most do not. Do not cut or join anything for them either: where a new trip starts is
 asked on the page.
 
-**A region is in a trip once.** A journey through one hub (A, B, A) is not made until the
+**A region is in a trip once.** Two stays in one region with other regions between them are
+two visits. A journey through one hub (A, B, A) is not made until the
 owner presses "A new trip starts here" somewhere between the two stays in A, also where
 nothing suggests a cut. The owner picks where; do not pick it for them, and do not
 propose a place.

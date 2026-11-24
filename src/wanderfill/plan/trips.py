@@ -278,7 +278,7 @@ def _in_order(runs: Iterable[AnyRun]) -> list:
 
 def find_runs(
     obs: Iterable[Obs], *, gap_days: int = GAP_DAYS, track: Iterable[TrackRow] = (),
-    flight_days: bool = True,
+    flight_days: bool = True, unplaced: Iterable[dt.date] = (),
 ) -> list[Run]:
     """The runs of every region, in time order, not judged (3, 3a).
 
@@ -286,7 +286,8 @@ def find_runs(
     other, join when each day strictly between is compatible or silent, with at most
     ``gap_days`` - 1 silent days in a row. Compatible: every photo of the day is on the
     ground, not set aside, and placed in this region, on its edge or beside it. Silent: no
-    photo at all, and no ``track`` row in another region. Any other day is a barrier. What
+    photo at all, and no ``track`` row in another region. Any other day is a barrier, and so
+    is one of ``unplaced``: the days with a photo of the owner's camera that has no location. What
     else there is on a proof day does not matter: a day trip and a transfer leave proof of
     two regions on one day. With ``flight_days`` a run may begin and end a day wider than its
     proof; see :func:`_with_flight_days`.
@@ -304,6 +305,7 @@ def find_runs(
             only[o.day] = None
         if o.proof:
             proof[o.place.region][o.day].append(o)
+    only |= dict.fromkeys(unplaced)
     rows: dict[dt.date, set[int | None]] = defaultdict(set)
     for day, region in track:
         rows[day].add(region)
@@ -621,10 +623,12 @@ def regions_to_read(
     track: Collection[TrackRow] = (),
     gaps: Iterable[int] = SWEEP_GAPS,
     flight_days: bool = True,
+    unplaced: Collection[dt.date] = (),
 ) -> set[int]:
     """The regions whose visits :func:`judge` and :func:`sweep` need, at each of ``gaps``."""
     return {r.region for gap in gaps
-            for r in find_runs(obs, gap_days=gap, track=track, flight_days=flight_days)
+            for r in find_runs(obs, gap_days=gap, track=track, flight_days=flight_days,
+                               unplaced=unplaced)
             if _touches(r, since, until)}
 
 
@@ -1023,6 +1027,7 @@ def sweep(
     gaps: Iterable[int] = SWEEP_GAPS,
     fast_kmh: float | None = None,
     flight_days: bool = True,
+    unplaced: Collection[dt.date] = (),
 ) -> list[SweepRow]:
     """What the same photos come to at other settings of ``gap_days`` (13).
 
@@ -1031,8 +1036,9 @@ def sweep(
     """
     out = []
     for gap in gaps:
-        runs = judge(find_runs(obs, gap_days=gap, track=track, flight_days=flight_days), obs,
-                     visits, since=since, until=until, track=track)
+        found = find_runs(obs, gap_days=gap, track=track, flight_days=flight_days,
+                          unplaced=unplaced)
+        runs = judge(found, obs, visits, since=since, until=until, track=track)
         cuts = boundaries(runs, gap_days=gap, obs=obs, fast_kmh=fast_kmh)
         out.append(SweepRow(gap, len(runs),
                             sum(bool(b.suggestions) and not b.forced for b in cuts),

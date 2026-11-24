@@ -2429,6 +2429,36 @@ def _photos_library(tmp_path, shots, importers=None):
     return db.parents[1]
 
 
+def test_photos_with_no_location_are_read_apart_and_nowhere_else(tmp_path):
+    """Such a photo is not in `assets()`, so its day looked like a day with no photo."""
+    import sqlite3
+
+    from wanderfill.sources.photos_app import DatedPhoto, PhotosAppSource
+
+    noon = dt.datetime(2026, 3, 28, 23, 30)
+    here, none = (10.0, 20.0), (-180.0, -180.0)
+    places = [here, none, (0.0, 0.0), (None, None), (95.0, 20.0), none, none, none, none, none]
+    lib = _photos_library(tmp_path, [(noon, 3600, *at) for at in places],
+                          ["com.apple.camera"] * 8 + ["com.apple.sharingd", None])
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.execute("UPDATE ZASSET SET ZTRASHEDSTATE = 1 WHERE Z_PK = 6")
+    con.execute("UPDATE ZASSET SET ZSAVEDASSETTYPE = 12 WHERE Z_PK = 7")
+    con.execute("UPDATE ZASSET SET ZKINDSUBTYPE = 10 WHERE Z_PK = 8")
+    con.commit()
+    con.close()
+    src = PhotosAppSource(library=lib)
+    got = list(src.without_location())
+    assert {p.uuid for p in got} == {"u2", "u3", "u4", "u5", "u9", "u10"}
+    assert {p.origin for p in got if p.uuid in ("u9", "u10")} == {"airdrop", "unknown"}
+    first = next(p for p in got if p.uuid == "u2")
+    assert first == DatedPhoto("u2", dt.date(2026, 3, 29), "own-camera")  # by its own clock
+    assert [a.uuid for a in src.assets()] == ["u1"] and len(list(src.points())) == 1
+    own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
+    assert {p.uuid for p in own.without_location()} == {"u2", "u3", "u4", "u5"}
+    late = PhotosAppSource(library=lib, since=dt.date(2026, 3, 30))
+    assert list(late.without_location()) == []
+
+
 @pytest.fixture
 def mac_on_utc_minus_10(monkeypatch):
     import time
