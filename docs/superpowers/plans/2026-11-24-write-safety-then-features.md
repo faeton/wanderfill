@@ -57,7 +57,7 @@
 
 # Phase 1: safety
 
-> **Status, 2026-11-24:** Tasks 1-6, 7 (refusals and docs only), 8 and 9 are done in `e150985..eeffe9f`. The whole change was reviewed by Codex and Grok and their findings fixed; 1088 tests, also on Python 3.10. Not built: Task 7's command, `expect_rows` and the rule 2 exception, which wait for the owner. What was built differs from the text below where a review or a live read showed it to be wrong; the commits say where.
+> **Status, 2026-11-24:** Tasks 1-6, 7 (refusals and docs only), 8 and 9 are done in `e150985..eeffe9f`. The whole change was reviewed by Codex and Grok and their findings fixed; 1088 tests, also on Python 3.10. The owner then approved the rule 2 exception, and Task 7's command and `expect_rows` followed in `019634f..f086a09`, reviewed the same way: 1221 tests. It has been run live only as a dry run. What was built differs from the text below where a review or a live read showed it to be wrong; the commits say where.
 
 ## Task 1: an uncertain write stays uncertain
 
@@ -262,6 +262,8 @@ Why the last one: Task 4's review showed that a plan rebuilt after its trip land
 - An interrupt inside the verify file's own write can leave `partial` false or the file short.
 - A row with a year and month but no day reads as a bare year in both readers. None of 946 live rows has that shape.
 - What `updateMQP`, the delete endpoints and `update-trip` answer on success is not recorded. Record it at the next live use.
+- DARE and TCC ticks are in the fingerprint, so a half-applied DARE or TCC plan is refused by drift and has to be rebuilt.
+- KYE: the site's own page script paints ids above 612 (613-648) as one group worth one point. Not verified against the server; it may explain the quadrants that appeared without a tick.
 - The package is installed editable, so an apply in another session runs whatever is checked out here. On 2026-11-24 one did, between two gates. Use a worktree for Phase 2, or keep other sessions from applying.
 
 ---
