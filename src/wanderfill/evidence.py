@@ -311,6 +311,8 @@ class Dossier:
     params: dict = field(default_factory=dict)
     assets_seen: int = 0
     assets_unplaced: int = 0
+    # Of those, the ones whose map tiles were not read. Not open water.
+    assets_unread: int = 0
 
     def by_grade(self, *grades: str) -> list[RegionEvidence]:
         return [r for r in self.regions if r.grade in grades]
@@ -556,6 +558,7 @@ def build(
     small: set[int] | None = None,
     assets_seen: int = 0,
     assets_unplaced: int = 0,
+    assets_unread: int = 0,
     params: dict | None = None,
 ) -> Dossier:
     """Assemble the dossier from attributed shots and live profile state.
@@ -587,6 +590,7 @@ def build(
         rules=rules,
         assets_seen=assets_seen,
         assets_unplaced=assets_unplaced,
+        assets_unread=assets_unread,
         params=params or {},
     )
 
@@ -665,8 +669,16 @@ def render_markdown(dossier: Dossier) -> str:
     add(f"Library `{dossier.library}`")
     add(
         f"{dossier.assets_seen:,} photos read, "
-        f"{dossier.assets_unplaced:,} in no region (flights, open water, bad fixes)"
+        f"{dossier.assets_unplaced - dossier.assets_unread:,} in no region "
+        "(flights, open water, bad fixes)"
     )
+    if dossier.assets_unread:
+        add("")
+        add(
+            f"**{_n(dossier.assets_unread, 'photo')} could not be placed: the map tiles "
+            "were not read.** Every grade and count below is without them. Re-running "
+            "(without `--no-resolve`) retries them."
+        )
     add("")
     add("## Where you stand")
     add("")
@@ -779,6 +791,12 @@ def render_markdown(dossier: Dossier) -> str:
             "voluntarily is a different conversation from having it done for you."
         )
         add("")
+        if dossier.assets_unread:
+            add(
+                f"Not yet, though: {_n(dossier.assets_unread, 'photo')} could not be read "
+                "in this run, and these regions' photos may be among them."
+            )
+            add("")
         for r in nothing:
             filed = f" — {_n(len(r.documents), 'document')} filed" if r.documents else ""
             add(f"- {r.name} ({r.region}){filed}")
@@ -929,6 +947,7 @@ def render_json(dossier: Dossier) -> dict:
         "projection": dossier.projection(),
         "assets_seen": dossier.assets_seen,
         "assets_unplaced": dossier.assets_unplaced,
+        "assets_unread": dossier.assets_unread,
         "counts": dossier.counts(),
         "regions": [
             {

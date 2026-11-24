@@ -118,6 +118,39 @@ def test_write_cards_records_the_claim_without_the_region_list(stats, tmp_path):
     assert written[-1].name == "stats.json"
 
 
+def test_a_map_with_a_failed_tile_is_drawn_and_says_so(tmp_path, monkeypatch, capsys):
+    """A tile that timed out was a blank quarter of the world on a finished card."""
+    mvt = pytest.importorskip("mapbox_vector_tile")
+    from shapely.geometry import box
+
+    from wanderfill.geo import tiles
+
+    body = mvt.encode([{"name": "regions", "features": [
+        {"geometry": box(0, 0, 4096, 4096), "properties": {"id": 1}}]}])
+
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return body
+
+    def urlopen(req, timeout=None):
+        if "/1/0/1.pbf" in req.full_url:
+            raise TimeoutError
+        return Reply()
+
+    monkeypatch.setattr(tiles.urllib.request, "urlopen", urlopen)
+    assert len(share.world_polygons(zoom=1, cache_dir=tmp_path)) == 3
+    assert "1 of 4 map tiles could not be read" in capsys.readouterr().err
+    monkeypatch.setattr(tiles.urllib.request, "urlopen", lambda req, timeout=None: Reply())
+    assert len(share.world_polygons(zoom=1, cache_dir=tmp_path)) == 4
+    assert capsys.readouterr().err == ""
+
+
 def test_wrap_keeps_items_whole():
     from PIL import Image, ImageDraw
 

@@ -12,6 +12,11 @@ worth trusting, so you sniff the magic bytes. And the series layer is *not*
 decimated by zoom — a test box over Rome returns the same objects at z9 as at
 z15 — so harvesting can be done at a coarse zoom for a fraction of the requests.
 
+And most tiles do not exist: the sea is a 404. A request that got no answer
+looks the same from the outside and must not, so :attr:`TileReader.failed` holds
+every tile that could not be read. No polygons from a tile in there is not "no
+polygons there".
+
 Nothing from this module is redistributed. The polygons belong to NomadMania;
 we fetch them at runtime and cache them in the user's own directory.
 """
@@ -30,6 +35,7 @@ from ..api.transport import USER_AGENT
 
 BASE = "https://maps.nomadmania.travel/tiles"
 LAYERS = ("countries", "regions", "dare", "series2")
+MAX_TRIES = 2  # per tile, per reader
 
 
 def deg2tile(lat: float, lon: float, z: int) -> tuple[int, int]:
@@ -82,7 +88,13 @@ class SeriesPoint:
 
 
 class TileReader:
-    """Fetches and decodes tiles, with an on-disk cache."""
+    """Fetches and decodes tiles, with an on-disk cache.
+
+    A tile that cannot be read comes back as empty as one that does not exist,
+    so whoever draws a conclusion from emptiness has to look in ``failed``: the
+    ``(layer, z, x, y)`` of every tile whose last read was a network error, an
+    HTTP status other than 204, 404 or 410, or a body that is not a tile.
+    """
 
     def __init__(self, cache_dir=None, timeout: float = 30.0, memo: int = 256):
         from collections import OrderedDict
@@ -92,51 +104,105 @@ class TileReader:
         self.cache = Path(cache_dir) if cache_dir else default
         self.cache.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self.failed: set[tuple[str, int, int, int]] = set()
+        self._failures: dict[tuple[str, int, int, int], int] = {}
         self._memo: OrderedDict[tuple, list] = OrderedDict()
         self._memo_size = memo
 
     def raw(self, layer: str, z: int, x: int, y: int) -> bytes:
+        """The tile's bytes. Empty for an absent tile, and for one in :attr:`failed`."""
+        return self._load(layer, z, x, y)[0]
+
+    def decode(self, layer: str, z: int, x: int, y: int) -> dict:
+        """The tile's layers. Empty for an absent tile, and for one in :attr:`failed`."""
+        return self._load(layer, z, x, y)[1]
+
+    def _load(self, layer: str, z: int, x: int, y: int) -> tuple[bytes, dict]:
+        """Bytes and layers, with :attr:`failed` brought up to date.
+
+        Nothing that does not decode is kept: a portal's login page written as
+        a tile would be an empty patch of the map for good. One already on disk
+        is removed, counts as this tile's first failure, and so is asked for
+        once more.
+        """
+        if not (0 <= x < 2**z and 0 <= y < 2**z):
+            # Off the edge of the map. There is no such tile, whatever the
+            # server would call it: a 400 here must not read as a failure, or
+            # every point beside the antimeridian is unreadable for good.
+            return b"", {}
+        key = (layer, z, x, y)
         path = self.cache / layer / str(z) / str(x) / f"{y}.pbf"
-        if path.exists():
-            return path.read_bytes()
+        data: bytes | None
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            pass
+        else:
+            tile = self._parse(data)
+            if tile is not None:
+                self._succeeded(key)
+                return data, tile
+            path.unlink(missing_ok=True)
+            self._failures[key] = self._failures.get(key, 0) + 1
+        # A dead network costs a timeout per request, so a tile gets two and is
+        # then known to have failed for as long as this reader lives.
+        if self._failures.get(key, 0) < MAX_TRIES:
+            data = self._fetch(layer, z, x, y)
+            tile = None if data is None else self._parse(data)
+            if data is not None and tile is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
+                tmp.write_bytes(data)
+                tmp.replace(path)  # atomic: a half-written tile is a decode error later
+                self._succeeded(key)
+                return data, tile
+            self._failures[key] = self._failures.get(key, 0) + 1
+        self.failed.add(key)
+        return b"", {}
+
+    def _succeeded(self, key: tuple[str, int, int, int]) -> None:
+        self.failed.discard(key)
+        self._failures.pop(key, None)
+
+    def _fetch(self, layer: str, z: int, x: int, y: int) -> bytes | None:
+        """One request. ``b""`` is the server saying there is no such tile; None is no answer.
+
+        Timeouts, DNS failures, a 500 or a rate limit are about the network, not
+        the map. Reading them as "no polygons here" hands the point to whichever
+        neighbour has some.
+        """
         url = f"{BASE}/{layer}/{z}/{x}/{y}.pbf"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 data = r.read()
+            return gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
         except urllib.error.HTTPError as exc:
-            if exc.code not in (204, 404, 410):
-                return b""  # a 500 or a rate limit is temporary; do not enshrine it
-            data = b""  # an absent tile is ordinary: most of the planet is empty
+            # An absent tile is ordinary: most of the planet is empty.
+            return b"" if exc.code in (204, 404, 410) else None
         except Exception:
-            # Timeouts and DNS failures are about the network, not the map. A run
-            # started on a bad connection would otherwise poison the cache with
-            # empty tiles that never expire, and every later run would silently
-            # resolve half a continent to nothing.
-            return b""
-        if data[:2] == b"\x1f\x8b":
-            data = gzip.decompress(data)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
-        tmp.write_bytes(data)
-        tmp.replace(path)  # atomic: a half-written tile is a decode error later
-        return data
+            return None
 
-    def decode(self, layer: str, z: int, x: int, y: int) -> dict:
-        data = self.raw(layer, z, x, y)
+    @staticmethod
+    def _parse(data: bytes) -> dict | None:
+        """Decoded layers, ``{}`` for no bytes, None for bytes that are not a tile."""
         if not data:
             return {}
         import mapbox_vector_tile
 
         try:
-            return mapbox_vector_tile.decode(data)
+            # Some short strings decode, to no layer at all. A tile has one.
+            return mapbox_vector_tile.decode(data) or None
         except Exception:
-            return {}
+            return None
 
     # -- what callers actually want ---------------------------------------
 
     def polygons(self, layer: str, z: int, x: int, y: int) -> Iterator[tuple[dict, object]]:
-        """Yield (properties, shapely geometry) for one tile, in lon/lat degrees."""
+        """Yield (properties, shapely geometry) for one tile, in lon/lat degrees.
+
+        Yields nothing for a tile in :attr:`failed`, as for an absent one.
+        """
         from shapely.affinity import affine_transform
         from shapely.geometry import shape
 
@@ -163,11 +229,16 @@ class TileReader:
         hundred tiles turns that back into once per tile — an hour into a
         minute — as long as callers ask in tile order, which
         :meth:`RegionResolver.resolve_many` does.
+
+        A failed tile is not memoised: the next caller asks again, up to
+        ``MAX_TRIES``, rather than inheriting "no polygons".
         """
         key = (layer, z, x, y)
         hit = self._memo.get(key)
         if hit is None:
             hit = list(self.polygons(layer, z, x, y))
+            if key in self.failed:
+                return hit
             self._memo[key] = hit
             while len(self._memo) > self._memo_size:
                 self._memo.popitem(last=False)
@@ -181,6 +252,8 @@ class TileReader:
         One harvest geocodes all 69 series at once, which is why this is the
         only practical way to match a track against World Heritage Sites, Know
         Your Earth, TCC and the rest.
+
+        A tile in :attr:`failed` yields nothing: a harvest with any is incomplete.
         """
         tile = self.decode("series2", z, x, y)
         if not tile:

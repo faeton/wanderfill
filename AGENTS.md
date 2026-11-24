@@ -183,6 +183,9 @@ older polygon set than the catalogue. So:
    and take the nearest polygon within a stated tolerance.
 4. Points still unresolved are **open ocean or flights. Leave them unresolved.**
    Do not snap them to the nearest land.
+5. A tile that timed out or answered 500 is not an empty tile. The point is
+   `tile_error`, whatever polygon is next door, and the next run asks again.
+   Do not plan from a run that has any near the place in question.
 
 ---
 
@@ -445,6 +448,9 @@ The technical parts that are easy to get wrong:
   nearest-polygon flag through to the output. Offering a photo taken across a
   border as proof of the region on this side of it is precisely the accusation
   the whole protocol exists to avoid.
+- **"could not be read" is not "nothing there".** Photos whose map tiles did not
+  arrive are in no grade. Run it again before telling anybody a region is thin
+  or has nothing.
 
 ---
 
@@ -536,6 +542,9 @@ the person should know which days are which.
 in sources covering 2018 → 2026". If the question is about 2011 and the
 library starts in 2018, the honest answer is "the sources cannot see that", and
 you say so. A source that cannot see a year is not evidence of absence (§4).
+The same line says how many points could not be read, when a map tile did not
+arrive or `--no-resolve` skipped them. `check` then answers CHECK instead of "no
+evidence". Run it again before answering the form; do not answer around them.
 
 **5. Disagreement is a report.** When the profile and the photos give
 different dates for a trip, show both. Correcting the profile is a write and
@@ -765,7 +774,7 @@ Left to right, and the invariant is structural rather than a convention:
 | `plan/segment.py` | trips; `home=` is the parameter the module turns on |
 | `plan/series.py` | shortlists and the recall curve, never an auto-marker |
 | `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |
-| `geo/tiles.py` | gzip sniffing, polygons, the series harvest |
+| `geo/tiles.py` | gzip sniffing, polygons, the series harvest, and which tiles `failed` |
 | `grade.py` | is-this-coordinate-a-visit, by speed and time spread |
 | `evidence.py`, `share.py` | read-only leaves; nothing in the write path imports them |
 | `api/cache.py` | the slow-link cache for `history`, `evidence` and `share` only |

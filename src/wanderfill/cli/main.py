@@ -193,6 +193,10 @@ def _resolve_coords(args, catalogue: dict, coords, client: NomadMania | None = N
     built at one zoom and read at another mixes two answers silently.
     Uses ``args.cache``, ``args.zoom``, ``args.tolerance`` and
     ``args.no_resolve``.
+
+    A point whose tile could not be read comes back as ``tile_error`` and is not
+    saved, so the next run asks again. With ``no_resolve`` a point the cache does
+    not know is simply absent; callers must count both as not read.
     """
     from ..geo.resolve import (
         RegionResolver,
@@ -416,11 +420,13 @@ def cmd_evidence(args) -> int:
     known, catalogue = _resolve_coords(args, catalogue, coords, c)
 
     shots_by_region: dict[int, list[Shot]] = {}
-    unplaced = 0
+    unplaced = unread = 0
     for a in assets:
         r = known.get(a.key)
         if r is None or r.region is None:
             unplaced += 1
+            # Absent from a --no-resolve run is not open water either.
+            unread += r is None or r.unread
             continue
         shots_by_region.setdefault(r.region, []).append(
             Shot(
@@ -462,11 +468,14 @@ def cmd_evidence(args) -> int:
     small: set[int] = set()
     if candidates and not args.no_resolve:
         print(f"measuring {len(candidates)} tightly-clustered regions...", file=sys.stderr)
-        small = small_regions(
-            RegionResolver(catalogue, zoom=args.zoom).reader,
-            candidates,
-            threshold_km=args.small_region_km,
-        )
+        reader = RegionResolver(catalogue, zoom=args.zoom).reader
+        small = small_regions(reader, candidates, threshold_km=args.small_region_km)
+        if reader.failed:
+            print(
+                f"  {len(reader.failed)} map tiles could not be read; a region measured across "
+                "one is graded as not small. Re-running retries them.",
+                file=sys.stderr,
+            )
         if small:
             print(
                 f"  {len(small)} are genuinely too small to cross: "
@@ -495,6 +504,7 @@ def cmd_evidence(args) -> int:
         small=small,
         assets_seen=len(assets),
         assets_unplaced=unplaced,
+        assets_unread=unread,
         params={
             "since": args.since, "until": args.until, "zoom": args.zoom,
             "tolerance_deg": args.tolerance, "exhibits": args.exhibits,
@@ -542,6 +552,11 @@ def cmd_evidence(args) -> int:
         f"{counts['strong']} strong, {counts['serial']} serial, "
         f"{counts['thin']} thin, {counts['none']} with nothing"
     )
+    if unread:
+        print(
+            f"{unread} photo{'s' * (unread != 1)} could not be read against the map and are in "
+            "none of these counts. Re-running (without --no-resolve) retries them."
+        )
     print(
         f"if they drew {proj['sample']} regions: ~{proj['even']} photo-backed on an "
         f"even draw, ~{proj['weighted']} if it leans to your thinnest half "
@@ -652,14 +667,13 @@ def cmd_history(args) -> int:
             except UnmappedCountries as exc:
                 sys.exit(f"history: {exc}")
 
-        def region(p_):
+        def placed(p_):
             r = known.get((round(p_.lat, 3), round(p_.lon, 3)))
-            return r.region if r is not None else None
+            # Absent from a --no-resolve run is not open water either.
+            region, unread = (None, True) if r is None else (r.region, r.unread)
+            return hi.Point(p_.date, p_.lat, p_.lon, region, p_.source, p_.ref, p_.at, unread)
 
-        points = [
-            hi.Point(p_.date, p_.lat, p_.lon, region(p_), p_.source, p_.ref, p_.at)
-            for p_ in points
-        ]
+        points = [placed(p_) for p_ in points]
 
     visits = []
     if not args.no_profile:
@@ -741,6 +755,9 @@ def cmd_history(args) -> int:
             first=getattr(args, "first", False), territories=territories, hdr=hdr,
             title="every trip" if q == "list" else "trips",
         )
+
+    if incomplete := hi.unread_note(ledger):
+        report.notes.insert(0, incomplete)  # the CSV carries notes and no header
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -1358,7 +1375,8 @@ def _net_flags(parser) -> None:
     """``--refresh`` and ``--verbose`` for the commands that may read from the cache."""
     parser.add_argument("--refresh", action="store_true",
                         help="ignore the local cache and re-read everything from the server "
-                             "(do this before copying into a form)")
+                             "(do this before copying into a form). Coordinates already "
+                             "placed in a region keep it; delete the --cache file to re-ask")
     parser.add_argument("-v", "--verbose", dest="verbose_net", action="store_true",
                         help="print every request with its size and time")
 

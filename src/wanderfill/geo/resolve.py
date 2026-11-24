@@ -13,6 +13,9 @@ is a plan somebody has to approve.
 
 Points that survive all three stages unresolved are left unresolved. They are
 flights and open ocean. Snapping them to the nearest land would invent travel.
+
+A point whose tile could not be read is neither resolved nor ocean. It is
+``tile_error``: no region, never cached, asked again by the next run.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from typing import Literal
 
 from .tiles import TileReader, deg2tile, haversine_km, neighbourhood
 
-Method = Literal["geocoder", "tile_interior", "tile_nearest", "unresolved"]
+Method = Literal["geocoder", "tile_interior", "tile_nearest", "unresolved", "tile_error"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,11 @@ class Resolution:
     def confident(self) -> bool:
         """True when the point is inside a polygon rather than merely near one."""
         return self.method in ("geocoder", "tile_interior")
+
+    @property
+    def unread(self) -> bool:
+        """True when a map tile was missing, so "no region" says nothing about the place."""
+        return self.method == "tile_error"
 
 
 class RegionResolver:
@@ -119,11 +127,17 @@ class RegionResolver:
         but it is right for the overwhelming majority, and it is nine times
         cheaper. :meth:`resolve_many` uses it as a first pass and widens only
         for the points it misses.
+
+        A point inside a polygon that was read is answered, whatever else
+        failed. Otherwise one failed tile makes the answer ``tile_error``, even
+        with a candidate in reach: the tile that did not arrive may hold the
+        region the point is in.
         """
         from shapely.geometry import Point
 
         pt = Point(lon, lat)
         best_id, best_dist = None, float("inf")
+        failed = False
         for x, y in neighbourhood(lat, lon, self.zoom, ring=ring):
             for props, geom in self.reader.shapes(self.layer, self.zoom, x, y):
                 rid = props.get("id") or props.get("region_id")
@@ -138,6 +152,9 @@ class RegionResolver:
                 d = geom.distance(pt)
                 if d < best_dist:
                     best_id, best_dist = rid, d
+            failed |= (self.layer, self.zoom, x, y) in self.reader.failed
+        if failed:
+            return Resolution(lat, lon, None, "tile_error", 0.0)
         if best_id is not None and best_dist <= self.tolerance:
             return Resolution(lat, lon, best_id, "tile_nearest", best_dist)
         return Resolution(lat, lon, None, "unresolved", best_dist if best_id else 0.0)
@@ -162,7 +179,8 @@ class RegionResolver:
         the reader's memo holds the tile being asked about instead of thrashing.
         And the first pass looks only inside the point's own tile, widening to
         the ring only for the minority that miss — mostly coasts, borders and
-        flights.
+        flights. A point whose own tile failed is widened too: the polygon it is
+        in may be drawn past the edge of a tile that was read.
 
         The geocoder is not used here at all. It is one call per coordinate
         against somebody else's server, and about one in seven of its answers
@@ -205,8 +223,9 @@ def region_extent_km(
     region shaped like an L or an archipelago, which is the safe direction: a
     region wrongly judged *large* keeps the strict kilometre rule.
 
-    Returns 0.0 when the polygon cannot be found, which callers should read as
-    "do not grant the small-region exemption".
+    Returns 0.0 when the polygon cannot be found, or when a tile it may lie in
+    could not be read — part of a region measures small — which callers should
+    read as "do not grant the small-region exemption".
     """
     x, y = deg2tile(lat, lon, zoom)
     west = south = float("inf")
@@ -221,6 +240,8 @@ def region_extent_km(
             w, s, e, n = geom.bounds
             west, south = min(west, w), min(south, s)
             east, north = max(east, e), max(north, n)
+        if (layer, zoom, tx, ty) in reader.failed:
+            return 0.0
     if not found:
         return 0.0
     del x, y
@@ -296,12 +317,13 @@ def valid_only(
     dead on arrival. Entries naming an id nobody has any more are *dropped*
     rather than blanked, so the caller resolves them again instead of inheriting
     a hole. Points legitimately resolved to nothing — ocean, mid-flight — are
-    kept, because that answer does not go stale.
+    kept, because that answer does not go stale. A ``tile_error`` is dropped: it
+    is not an answer.
     """
     return {
         key: r
         for key, r in resolutions.items()
-        if r.region is None or r.region in catalogue
+        if not r.unread and (r.region is None or r.region in catalogue)
     }
 
 
@@ -316,6 +338,8 @@ def save_coord_map(
     cache is only as meaningful as the settings behind it: a point resolved at
     z10 with a 0.30° tolerance is not the same answer as one resolved at z11
     with none, and silently mixing the two makes a run unreproducible.
+
+    A ``tile_error`` is never written: the point is asked again next time.
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -329,6 +353,7 @@ def save_coord_map(
                 "distance_deg": round(r.distance_deg, 6),
             }
             for (lat, lon), r in sorted(resolutions.items())
+            if not r.unread
         },
     }
     p.write_text(json.dumps(body, indent=0, ensure_ascii=False), encoding="utf-8")

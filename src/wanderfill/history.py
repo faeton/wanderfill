@@ -93,6 +93,7 @@ class Point:
     source: str  # "photos" | "track"
     ref: str = ""  # asset uuid, or "track:<line>"
     at: dt.datetime | None = None
+    unread: bool = False  # region is None because its map tile was not read
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,23 @@ class Ledger:
     # there — a flight, a ferry, a coordinate not yet cached — so no bridge
     # may be drawn across or from them.
     unplaced: set[dt.date] = field(default_factory=set)
+    # The unresolved points whose map tiles were not read, by date. They are in
+    # the two fields above as well: no region, so no presence and no bridge.
+    unread: dict[dt.date, int] = field(default_factory=dict)
+
+    @property
+    def unread_points(self) -> int:
+        return sum(self.unread.values())
+
+    def unread_text(self) -> str:
+        """``3 points on 2 days (2024-03-02 → 2024-03-05) could not be read``, or nothing."""
+        if not self.unread:
+            return ""
+        n, first, last = self.unread_points, min(self.unread), max(self.unread)
+        span = str(first) if first == last else f"{first} → {last}"
+        days = len(self.unread)
+        return (f"{n} point{'s' * (n != 1)} on {days} day{'s' * (days != 1)} ({span}) "
+                "could not be read: no map tile")
 
     # -- country days, per territory mode, with bridging applied --------------
 
@@ -277,7 +295,10 @@ class Ledger:
         return out
 
     def coverage_text(self) -> str:
-        return "; ".join(c.describe() for c in self.coverage)
+        # What could not be read belongs to what the sources cover: this is the
+        # text printed beside every "no evidence".
+        parts = [c.describe() for c in self.coverage]
+        return "; ".join([*parts, self.unread_text()] if self.unread else parts)
 
     def continuous_cover(self, day: dt.date) -> list[str]:
         return [c.source for c in self.coverage if c.continuous and c.sees(day)]
@@ -359,6 +380,7 @@ def build_ledger(
     cells: dict[tuple[dt.date, int], Cell] = {}
     unresolved = airborne = 0
     unplaced: set[dt.date] = set()
+    unread: dict[dt.date, int] = defaultdict(int)
     spans: dict[str, list[dt.date]] = defaultdict(list)
 
     for p, fast in zip(points, flags, strict=True):
@@ -366,6 +388,8 @@ def build_ledger(
         if p.region is None:
             unresolved += 1
             unplaced.add(p.date)
+            if p.unread:
+                unread[p.date] += 1
             continue
         airborne += fast
         c = cells.setdefault((p.date, p.region), Cell())
@@ -402,7 +426,8 @@ def build_ledger(
         Coverage(src, min(ds) if ds else None, max(ds) if ds else None, src != "profile")
         for src, ds in sorted(spans.items())
     ]
-    return Ledger(cells, undated, coverage, cmap, unresolved, airborne, bridge, fast_kmh, unplaced)
+    return Ledger(cells, undated, coverage, cmap, unresolved, airborne, bridge, fast_kmh,
+                  unplaced, dict(unread))
 
 
 # ------------------------------------------------------------------ trips
@@ -552,14 +577,31 @@ def header(
         "airborne": f"consecutive timed points faster than {ledger.fast_kmh:.0f} km/h; "
         "day-level rows have no clock and are never airborne",
         "territories": territories,
-        "unresolved points": f"{ledger.unresolved_points} (open water, flights, or outside every "
-        "polygon — left unplaced)",
+        "unresolved points": f"{ledger.unresolved_points - ledger.unread_points} (open water, "
+        "flights, or outside every polygon — left unplaced)",
         "undated profile visits": f"{len(ledger.undated)} (year only, or no date — shown as CHECK, "
         "never turned into days)",
     }
+    if ledger.unread:
+        h["points not read"] = unread_note(ledger)
     for name, expansion in (groups or {}).items():
         h[f"group {name}"] = expansion
     return h
+
+
+def unread_note(ledger: Ledger) -> str:
+    """Why this run cannot answer a form yet. Empty when every point was looked up.
+
+    The CSV has no header, so the caller puts this among the notes as well.
+    """
+    if not ledger.unread:
+        return ""
+    return (
+        f"{ledger.unread_text()}. Where they are is not known, which is not 'no evidence "
+        "there': a trip, a count or a 'no data' day may be missing because of them. "
+        "Re-running (without --no-resolve) retries them; do that before copying anything "
+        "into a form."
+    )
 
 
 def describe_groups(names: Iterable[str]) -> dict[str, str]:
@@ -824,6 +866,8 @@ def query_check(
 ) -> Report:
     ts = [t for t in trips(ledger, territories) if _in_window(t.entry, t.exit, since, until)]
     days = ledger.days(territories)
+    # A point nobody could place may be in any of them.
+    unread = any(_in_window(d, d, since, until) for d in ledger.unread)
     rows = []
     for iso in sorted(set(countries) - set(exclude)):
         mine = [t for t in ts if t.iso == iso]
@@ -845,6 +889,9 @@ def query_check(
                 parts.append(f"overflight only: {', '.join(str(d.date) for d in air[:6])}")
             parts.extend(u.describe() for u in und)
             detail = "; ".join(parts)
+        elif unread:
+            answer = "CHECK"
+            detail = f"this run is incomplete; in sources covering: {ledger.coverage_text()}"
         else:
             answer = "no evidence"
             detail = f"in sources covering: {ledger.coverage_text() or 'nothing'}"
@@ -1060,7 +1107,8 @@ def query_where(
         if day is None:
             key = None
         else:
-            key = tuple(sorted(labels.get(day, []))) or ("no data",)
+            empty = "not read" if day in ledger.unread else "no data"
+            key = tuple(sorted(labels.get(day, []))) or (empty,)
         if day is not None and key == cur:
             prev = day
             srcs |= sources.get(day, set())

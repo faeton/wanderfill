@@ -310,6 +310,20 @@ def test_markdown_names_files_not_just_regions():
     assert "Somewhere Unphotographed" in text
 
 
+def test_photos_that_could_not_be_placed_are_not_called_open_water():
+    """A dossier built on a bad connection told its reader to consider removing regions
+    whose photos it had failed to look up."""
+    kw = {"account": 1, "library": "/x", "assets_seen": 9, "assets_unplaced": 5}
+    d = build({}, {1: {"name": "A"}}, {1}, assets_unread=3, **kw)
+    md = render_markdown(d)
+    assert "2 in no region (flights, open water, bad fixes)" in md
+    assert "3 photos could not be placed" in md and "Re-running" in md
+    assert "may be among them" in md.split("## Claimed, with nothing in this library")[1]
+    assert render_json(d)["assets_unread"] == 3
+    md = render_markdown(build({}, {1: {"name": "A"}}, {1}, **kw))
+    assert "5 in no region" in md and "could not be placed" not in md
+
+
 def test_json_carries_the_boundary_warning_through():
     """A nearest-polygon hit must never reach an email looking like a fact."""
     s = shot("2024-05-01", 50.0, 14.0, uuid="edge", near_boundary=True)

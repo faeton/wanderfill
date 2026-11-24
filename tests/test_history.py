@@ -303,6 +303,31 @@ def test_an_unplaced_point_on_an_edge_blocks_the_bridge():
     assert not any(d.kind == h.BRIDGED for d in ledger(pts).days())
 
 
+def test_an_unread_point_is_not_open_water_and_not_no_data():
+    """Its map tile timed out. It is unplaced like a flight, and it is not one: the
+    day is not empty, and "no evidence" would be a guess about a country nobody asked."""
+    lost = h.Point(D(2024, 1, 2), 0.0, 0.0, None, "track", unread=True)
+    sea = pt(D(2024, 1, 6), None)
+    lg = ledger([pt(D(2024, 1, 1), ES), lost, pt(D(2024, 1, 3), ES), sea])
+    assert (lg.unresolved_points, lg.unread_points) == (2, 1)
+    assert not any(d.kind == h.BRIDGED for d in lg.days())
+    hdr = h.header(lg, command="x", since=None, until=None, territories="separate")
+    assert hdr["unresolved points"].startswith("1 (open water")
+    assert hdr["points not read"].startswith("1 point on 1 day (2024-01-02)")
+    assert "1 point on 1 day" in hdr["sources"]
+    row = h.query_check(lg, countries={"PT"}, since=None, until=None).sections[0].rows[0]
+    assert row["answer"] == "CHECK" and "could not be read" in row["evidence"]
+    where = h.query_where(lg, since=D(2024, 1, 1), until=D(2024, 1, 4)).sections[0].rows
+    assert [r["where"] for r in where] == ["Spain: Madrid", "not read", "Spain: Madrid", "no data"]
+
+
+def test_a_run_that_read_every_point_says_nothing_about_unread_ones():
+    lg = ledger([pt(D(2024, 1, 1), ES), pt(D(2024, 1, 2), None)])
+    hdr = h.header(lg, command="x", since=None, until=None, territories="separate")
+    assert "points not read" not in hdr and "read" not in hdr["sources"]
+    assert hdr["unresolved points"].startswith("1 (open water")
+
+
 def test_two_unmapped_regions_stay_two_and_never_bridge():
     pts = [pt(D(2024, 1, 1), 901), pt(D(2024, 1, 3), 902)]
     lg = ledger(pts)
@@ -545,6 +570,7 @@ def test_cli_end_to_end_reads_only(tmp_path, monkeypatch):
 
     from wanderfill.api.client import NomadMania
     from wanderfill.cli import main as cli
+    from wanderfill.geo.resolve import Resolution
 
     track = tmp_path / "track.csv"
     track.write_text("date,lat,lon\n2024-03-01,41.0,29.0\n2024-03-02,41.0,29.0\n")
@@ -588,7 +614,7 @@ def test_cli_end_to_end_reads_only(tmp_path, monkeypatch):
         cli,
         "_resolve_coords",
         lambda args, cat, coords, c=None: (
-            {k: type("R", (), {"region": 1})() for k in coords}, cat),
+            {k: Resolution(*k, 1, "tile_interior") for k in coords}, cat),
     )
     out = tmp_path / "out"
     rc = cli.main(

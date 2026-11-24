@@ -201,6 +201,10 @@ https://maps.nomadmania.travel/tiles/series2/{z}/{x}/{y}.pbf     z3-17
 Bodies are **gzipped** without a `Content-Encoding` worth trusting — sniff for
 `1f 8b` and decompress before decoding the MVT.
 
+Most tiles do not exist: 204, 404 and 410 mean "nothing here". Anything else that
+is not a tile — a timeout, a 500, a login page — means "not known", and must not
+be read as empty or kept.
+
 Two properties make this the most useful surface of the three:
 
 **It is authoritative where the API is stale.** The region layer carries the

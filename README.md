@@ -291,6 +291,10 @@ If the tiles name a region the cached catalogue does not have, the catalogue
 is treated as stale and read again, rather than filing those points as
 "unresolved".
 
+A map tile that does not arrive is asked for twice and then given up on for that
+run. Points that needed it are placed nowhere, and the run says how many, in its
+files too. Run it again to retry them.
+
 ## Risks — read this part
 
 - This uses NomadMania's **undocumented internal API**. It can break at any time,
@@ -527,6 +531,7 @@ cost a wrong write or a wrong number the first time.
 | `get-regions-mqp` returns `visited` as an id string, not a boolean | Not used; `visited_dare_ids` is the source of truth |
 | `location/get-region` runs on stale polygons — ~14% of ids are dead | `RegionResolver` validates every id and repairs failures against live tiles |
 | Vector tiles are gzipped with no usable `Content-Encoding` | `TileReader` sniffs the magic bytes |
+| A tile that timed out read as an empty tile, so a point in it was given to a polygon in the next tile over, and that answer was cached for good | `TileReader.failed` holds every tile that did not arrive, and a point with one in its neighbourhood and no polygon around it is `tile_error`: no region, never cached, counted by `history` and `evidence` in the terminal and in their files, and asked again by the next run. A body that does not decode is not kept, and one already on disk is fetched again. Wrong `tile_nearest` answers cached by earlier versions cannot be told from right ones: `--refresh` asks again only about points with **no** region, so delete the coordinate cache (`~/.local/share/wanderfill/coords.json` by default) to re-ask them all; `test_a_failed_home_tile_is_not_answered_by_its_neighbour`, `test_tile_errors_are_not_saved_to_the_coordinate_cache`, `test_history_and_evidence_say_how_many_points_could_not_be_read` |
 | `location/get-region` doubles as a live-location beacon | `share=0` is hardcoded, not a parameter |
 | UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
 | A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |

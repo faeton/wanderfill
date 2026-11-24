@@ -59,9 +59,9 @@ ignore = [
     # was taken at 14:00 wherever the camera was, and this package works in
     # whole days. Forcing a timezone here would invent precision.
     "DTZ007",
-    # Tile fetches and MVT decoding catch broadly on purpose: an absent or
-    # malformed tile is ordinary (most of the planet is empty) and must not
-    # abort a resolve run over thousands of coordinates.
+    # Tile fetches and MVT decoding catch broadly on purpose: a tile that did
+    # not arrive is recorded in TileReader.failed and must not abort a resolve
+    # run over thousands of coordinates.
     "BLE001",
     # This package is about places, and places are spelled how they are spelled.
     # Nukuʻalofa keeps its ʻokina; en dashes stay en dashes in prose.

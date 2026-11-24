@@ -212,7 +212,8 @@ def world_polygons(zoom: int = 2, cache_dir: str | Path | None = None) -> list[t
 
     The first ring of each entry is the exterior, the rest are holes, each a
     list of ``(lon, lat)``. Needs the ``geo`` extra; raises ImportError
-    without it so the caller can drop the map rather than the whole card.
+    without it so the caller can drop the map rather than the whole card. A
+    tile that cannot be read leaves its part of the map blank, and is said.
     """
     from .geo.tiles import TileReader
 
@@ -231,6 +232,9 @@ def world_polygons(zoom: int = 2, cache_dir: str | Path | None = None) -> list[t
                         continue
                     rings = [list(g.exterior.coords)] + [list(i.coords) for i in g.interiors]
                     out.append((int(rid), rings))
+    if reader.failed:
+        warn(f"the map is incomplete: {len(reader.failed)} of {n * n} map tiles could not be "
+             "read; re-running retries them")
     return out
 
 
