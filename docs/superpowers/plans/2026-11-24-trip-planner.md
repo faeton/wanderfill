@@ -1,5 +1,7 @@
 # Trip planner implementation plan
 
+Status: built and pushed, 2026-11-24. Flight days (spec 16) were added while it was built.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`.
 
 **Goal:** `wanderfill trips review` and `trips plan`: from the owner's photos, through a page the owner answers, to one plan file of `create_trip` ops.
@@ -36,7 +38,7 @@
 - `review.Shot` gains `uuid: str = ""` and `zone: int | None = None`, last fields, carried by `grade_shots`.
 - `Resolution.stale: bool = False`, set by `from_tiles` when a polygon with an id outside the catalogue covers the point and none inside it does; `resolve_many` keeps it; saved coordinate maps unchanged. Nothing existing behaves otherwise.
 
-- [ ] RED, implement, GREEN, ruff, commit `trips: foundations`.
+- [x] RED, implement, GREEN, ruff, commit `trips: foundations`.
 
 ## Task 2: runs, reasons, boundaries
 
@@ -49,8 +51,8 @@
 - `find_runs(obs, *, gap_days=2, track=()) -> list[Run]` (3, 3a); `judge(runs, obs, visits, *, since, until) -> list[Run]` (4-7b; `visits: dict[int, list[Visit]]`); `boundaries(runs, *, gap_days, obs) -> list[Boundary]` with `Boundary(before, after, suggestions: tuple[str, ...], forced: bool)` (8, 8a); `sweep(obs, visits, ...)` (13).
 - `group(runs, boundaries, answers) -> tuple[list[TripDraft], list[NotMade]]` (8-10).
 
-- [ ] **Tests:** one per decision row, boundary values included; order of photos does not matter; every barrier kind; coast days compatible; continuation against a run and against a visit; transit-only, year-only, one-ended, year 0, undated; date-line clocks; open, brief, layover; region twice; `no` in the middle; forced cuts.
-- [ ] RED, implement, GREEN, ruff, commit `trips: runs, reasons and boundaries`.
+- [x] **Tests:** one per decision row, boundary values included; order of photos does not matter; every barrier kind; coast days compatible; continuation against a run and against a visit; transit-only, year-only, one-ended, year 0, undated; date-line clocks; open, brief, layover; region twice; `no` in the middle; forced cuts.
+- [x] RED, implement, GREEN, ruff, commit `trips: runs, reasons and boundaries`.
 
 ## Task 3: the list, the page, the answers
 
@@ -58,8 +60,8 @@
 
 **Produces:** `TripList` (as `Manifest`: hash, `save`, `load`, refuses anything altered), `render_page(trip_list) -> str`, `load_answers(path, trip_list) -> Answers`. The page's grouping and the Python `group` are the same rules: a test runs both on the same answers through `node` and compares.
 
-- [ ] **Tests:** as Task 10b of the series plan, plus: text fields only where words are taken; quality 1's note; greyed runs take no quality; the preview agrees with `group`; hostile region names and words inert.
-- [ ] RED, implement, GREEN, ruff, commit `trips: a page to answer`.
+- [x] **Tests:** as Task 10b of the series plan, plus: text fields only where words are taken; quality 1's note; greyed runs take no quality; the preview agrees with `group`; hostile region names and words inert.
+- [x] RED, implement, GREEN, ruff, commit `trips: a page to answer`.
 
 ## Task 4: the commands, the plan, the docs
 
@@ -69,10 +71,10 @@
 - README: a section with one made-up journey. AGENTS.md: how an agent runs it, hands the page over and stops; never answers, words or cuts for the owner; which reasons words release; `evidence` before the claim; first visits in one trip; the module table in section 10.
 - The acceptance test in Review Focus, from photos with a fake resolver to `validate(plan) == []` and `apply_plan` against the fake transport.
 
-- [ ] RED, implement, GREEN, ruff, docs, commit `trips: review and plan`.
+- [x] RED, implement, GREEN, ruff, docs, commit `trips: review and plan`.
 
 ## Gate
 
-- [ ] Both Pythons, ruff; whole-change review by Codex and Grok; findings fixed once.
-- [ ] The controller runs `trips review` read-only on a real library and profile, checks that stays already on the profile come out as already there, and drives the page in a browser; a synthetic answer goes to `plan` and `check`, never `apply`; results stay out of the repository.
-- [ ] Fast-forward `main`; push on the owner's yes.
+- [x] Both Pythons, ruff; whole-change review by Codex and Grok; findings fixed once.
+- [x] The controller runs `trips review` read-only on a real library and profile, checks that stays already on the profile come out as already there, and drives the page in a browser; a synthetic answer goes to `plan` and `check`, never `apply`; results stay out of the repository.
+- [x] Fast-forward `main`; push on the owner's yes.

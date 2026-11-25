@@ -954,7 +954,7 @@ drives it.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-.venv/bin/pytest -q                                   # whole suite, ~2s
+.venv/bin/pytest -q                                   # whole suite, ~35s
 .venv/bin/pytest tests/test_quirks.py -k update_visit  # one trap at a time
 .venv/bin/ruff check .                                 # line-length 100, py310
 .venv/bin/wanderfill whoami                            # the only check that needs a token

@@ -1,5 +1,8 @@
 # Write safety, then features: Implementation Plan
 
+Status: built and pushed, 2026-11-24. The boxes below were not kept. Tasks 10 and 11 went through
+`2026-11-24-series-review.md`, Task 12 through `2026-11-24-trip-planner.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Phase 2 does not start until Phase 1 is merged and reviewed.
 
 **Goal:** make it impossible for `apply`, `delete` and trip re-spans to lose track of a write, then turn the one-off series-review scripts into a command.

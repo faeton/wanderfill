@@ -111,7 +111,7 @@ No code. `docs/superpowers/specs/2026-11-24-trip-planner-design.md`, answering t
 
 - [x] Suite and ruff on Python 3.10 and the venv's Python; whole-change review by Codex and Grok; findings fixed.
 - [x] The controller runs `series review` read-only on a real library into a private directory, opens the page, and runs `series plan` and `check` on a synthetic answer without applying. Results stay out of the repository.
-- [ ] Fast-forward `main`; push only on the owner's yes.
+- [x] Fast-forward `main`; push only on the owner's yes.
 
 ## Not building
 
