@@ -355,12 +355,14 @@ and the owner know those. Every other photo proves nothing and may still stand b
 two days.
 
 **Flight days.** One day beside a run, at each end at most, is in it if it has a photo at
-speed or beside an impossible jump strictly inside the region, and nothing was seen
-elsewhere in between: the airport. It can be a day too many, after a night flight with a
-position that is still the old one, so the page names the day and the owner can leave it
-out. Whether a flight day was a day there is the owner's alone: do not answer it, do not
-press "Leave this day out", and do not pass `--no-flight-days` unless they ask. Read out
-how many runs have one. Leaving one out releases nothing that holds a run.
+speed strictly inside the region, and nothing was seen elsewhere in between: the airport.
+It can be a day too many, after a night flight with a position that is still the old one,
+so the page names the day and the owner can leave it out. A day with photos beside an
+impossible jump only is out, for such a photo is the old place as often as not; the owner
+can include it, where the stay with it would pass every check. Whether either was a day
+there is the owner's alone: do not answer it, do not press "Leave this day out" or "Include
+this day", do not say which is likelier, and do not pass `--no-flight-days` unless they ask.
+Read out both counts. Neither button releases anything that holds a run.
 
 What holds a run, and what releases it:
 
@@ -578,7 +580,8 @@ is a region they may be asked to prove.** So:
   has no evidence in the library, say so at plan time rather than letting the
   user find out from a committee. `trips review` grades each run in the same way
   and puts `evidence thin` on the page; the grade holds nothing, and it is of that
-  run's photos only.
+  run's proof only: a flight day, and a day beside a jump that the owner included, add
+  nothing to it. Those days are theirs to leave out or include, and never yours.
 - The dossier is **read-only on both sides** and needs no approval to produce.
   It reads the profile, reads the library, writes local files. There is no
   `--apply` because there is nothing to apply.

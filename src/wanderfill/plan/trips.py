@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
-from itertools import pairwise
+from itertools import combinations, pairwise
 from typing import Literal, Protocol, TypedDict
 
 from .. import evidence
@@ -211,8 +211,13 @@ class Run:
     each end at most. ``first`` and ``last`` are the ends of both, never of anything else.
     ``silent`` are the days between with no photo at all. ``shots`` is the proof, in UTC
     order. ``held`` is released by the owner's words and ``fixed`` by nothing; ``there`` is on
-    the profile already, with these dates. ``flight_photos`` has, for each flight day, how
-    many of its photos were taken at speed and how many are beside an impossible jump.
+    the profile already, with these dates or with a day of ``jump`` beside them.
+    ``flight_photos`` has, for each flight day, how many of its photos were taken at speed and
+    how many are beside an impossible jump.
+
+    ``jump`` are the days beside it that rest on impossible jumps only, outside ``first`` to
+    ``last`` and in no reason of the run, and ``jump_photos`` how many photos each has. The
+    owner may have those of ``includable`` in the dates, which :func:`judge` says.
     """
 
     region: int
@@ -226,6 +231,9 @@ class Run:
     status: Status
     flight: tuple[dt.date, ...] = ()
     flight_photos: tuple[tuple[int, int], ...] = ()
+    jump: tuple[dt.date, ...] = ()
+    jump_photos: tuple[int, ...] = ()
+    includable: tuple[dt.date, ...] = ()
 
     @property
     def id(self) -> str:
@@ -255,6 +263,8 @@ class AnyRun(Protocol):
     def days(self) -> tuple[dt.date, ...]: ...
     @property
     def flight(self) -> tuple[dt.date, ...]: ...
+    @property
+    def includable(self) -> tuple[dt.date, ...]: ...
     @property
     def reasons(self) -> tuple[str, ...]: ...
     @property
@@ -356,13 +366,17 @@ def _with_flight_days(
     is_silent: Callable[[int, dt.date], bool],
     gap_days: int,
 ) -> list[Run]:
-    """The runs with their flight days (16): one local day beside a run, at either end.
+    """The runs with the days of flight beside them (16): one local day, at either end.
 
     A photo of it was taken at speed or is beside an impossible jump, as at the airport, and
     is strictly inside the run's region by a clock that fits. It is after the run's last proof
     and before any proof in another region, or before the first and after any. Every day
     between is silent, and they are fewer than ``gap_days``. A day that two runs of the region
     could have, or that is in another one, is neither's. A region with no proof has no run.
+
+    With a photo at speed it is a flight day, and the run has it. With jumps only the photo may
+    as well have the place that was left, so it is a day of ``jump``, and the run has it only
+    if the owner says so.
     """
     ix = _Index(obs)
     in_flight: dict[tuple[int, dt.date], list[Obs]] = defaultdict(list)
@@ -399,16 +413,23 @@ def _with_flight_days(
     return [_widened(run, mine[n]) if n in mine else run for n, run in enumerate(runs)]
 
 
-def _widened(run: Run, flights: Sequence[tuple[dt.date, Sequence[Obs]]]) -> Run:
-    flight = tuple(day for day, _ in flights)
-    first, last = min(run.first, *flight), max(run.last, *flight)
-    ends = (*((first, run.first),) * (first in flight), *((run.last, last),) * (last in flight))
-    beyond = {a + n * _DAY for a, b in ends for n in range(1, (b - a).days)}
-    return replace(
-        run, first=first, last=last, silent=tuple(sorted({*run.silent, *beyond})), flight=flight,
-        flight_photos=tuple((sum(o.shot.kind == "fast" for o in photos),
-                             sum(o.shot.kind == "conflict" for o in photos))
-                            for _, photos in flights))
+def _widened(run: Run, beside: Sequence[tuple[dt.date, Sequence[Obs]]]) -> Run:
+    counts = [(day, sum(o.shot.kind == "fast" for o in photos),
+               sum(o.shot.kind == "conflict" for o in photos)) for day, photos in beside]
+    flight = [(day, (fast, jumps)) for day, fast, jumps in counts if fast]
+    jump = [(day, jumps) for day, fast, jumps in counts if not fast]
+    wide = _reaching(run, [day for day, _ in flight])
+    return replace(wide, flight=tuple(d for d, _ in flight),
+                   flight_photos=tuple(n for _, n in flight),
+                   jump=tuple(d for d, _ in jump), jump_photos=tuple(n for _, n in jump))
+
+
+def _reaching(run: Run, days: Collection[dt.date]) -> Run:
+    """The run from the first to the last of its own days and these, beside it."""
+    first, last = min([run.first, *days]), max([run.last, *days])
+    beyond = {a + n * _DAY for a, b in ((first, run.first), (run.last, last))
+              for n in range(1, (b - a).days)}
+    return replace(run, first=first, last=last, silent=tuple(sorted({*run.silent, *beyond})))
 
 
 # -- what is known of all the photos ---------------------------------------------------
@@ -671,6 +692,12 @@ def judge(
     Otherwise one reason that nothing releases makes it ``fixed``, any other makes it
     ``held``, and none makes it ``offered``. Two runs of one region with no proof elsewhere
     between them are both ``fixed``: nothing says that the first one ended.
+
+    A run that could have a day of ``jump`` is judged with it too, against the same of
+    everything. With a visit of just those days it is ``there``: they were written with the
+    day. If it is offered or held, a day is ``includable`` where every such run that has it is
+    offered or held, for no reason that the run does not have already. The dates, the reasons
+    and the status stay the run's own, so that to include a day releases nothing.
     """
     obs = list(obs)
     runs = _in_order(runs)
@@ -692,16 +719,38 @@ def judge(
                 half_of[a.id].append(b)
                 half_of[b.id].append(a)
 
-    out = []
-    for run in chosen:
-        reasons = _against_visits(ix, run, visits[run.region])
+    def reasons_of(wide: Run, halves: Iterable[Run]) -> list[str]:
+        reasons = _against_visits(ix, wide, visits[wide.region])
         if "there" not in map(kind_of, reasons):
             reasons += [f"continuation: no photo shows that you left between it and run {r.id}"
-                        for r in half_of[run.id]]
-            reasons += _own_reasons(ix, run, since, until)
-        out.append(replace(run, reasons=tuple(reasons), status=status_of(reasons),
-                           flags=tuple(_flags(ix, run, rows, assets or {}))))
+                        for r in halves]
+            reasons += _own_reasons(ix, wide, since, until)
+        return reasons
+
+    out = []
+    for run in chosen:
+        halves = half_of[run.id]
+        reasons = reasons_of(run, halves)
+        wider = {days: reasons_of(_reaching(run, days), halves)
+                 for n in range(1, len(run.jump) + 1) for days in combinations(run.jump, n)}
+        if "there" not in map(kind_of, reasons):
+            written = [s for said in wider.values() for s in said if kind_of(s) == "there"]
+            reasons = list(dict.fromkeys(written)) or reasons
+        status = status_of(reasons)
+        refused = {d for days, said in wider.items() if not set(said) <= set(reasons)
+                   for d in days}
+        free = status in ("offered", "held") and not _shares(run, by_region[run.region])
+        out.append(replace(run, reasons=tuple(reasons), status=status,
+                           flags=tuple(_flags(ix, run, rows, assets or {})),
+                           includable=tuple(d for d in run.jump if free and d not in refused)))
     return out
+
+
+def _shares(run: Run, same: Iterable[Run]) -> bool:
+    """Whether a run, with its days of jump, can have a day of another one of its region."""
+    far = _reaching(run, run.jump)
+    return any(r is not run and o.first <= far.last and far.first <= o.last
+               for r in same for o in [_reaching(r, r.jump)])
 
 
 def _own_reasons(
@@ -824,15 +873,10 @@ def _speed(a: Shot, b: Shot) -> float:
 # -- from answers to trips ---------------------------------------------------------------
 
 
-class RunAnswer(TypedDict, total=False):
-    """One run's answer: ``a`` is a quality ``"1"`` to ``"6"``, ``"no"`` or ``"?"``.
-
-    ``out`` are the flight days of the run that the owner left out, and blank leaves none.
-    """
-
-    a: str
-    words: str
-    out: list[str]
+# One run's answer: `a` is a quality "1" to "6", "no" or "?". `out` are the flight days of the
+# run that the owner left out, and `in` the days beside a jump that they included. Blank is none.
+RunAnswer = TypedDict(
+    "RunAnswer", {"a": str, "words": str, "out": list[str], "in": list[str]}, total=False)
 
 
 class Answers(TypedDict):
@@ -849,7 +893,8 @@ class Answers(TypedDict):
 class TripRow:
     """One region of a trip, with its quality and, for a held run, the owner's own words.
 
-    ``first`` and ``last`` are the run's, without the flight days the owner left out.
+    ``first`` and ``last`` are the run's, without the flight days the owner left out and with
+    the days beside a jump that they included.
     """
 
     run: AnyRun
@@ -897,16 +942,19 @@ def _says(text: str) -> bool:
     return any(not any(low <= ord(ch) <= high for low, high in SAYS_NOTHING) for ch in text)
 
 
-def _are_flight_days(out: object, run: AnyRun) -> bool:
-    """Some of the run's flight days, in order, each of them once, and not none."""
-    flight = [d.isoformat() for d in run.flight]
-    return isinstance(out, list) and out != [] and out == [d for d in flight if d in out]
+def _some_of(said: object, days: Iterable[dt.date]) -> bool:
+    """Some of these days, in order, each of them once, and not none."""
+    known = [d.isoformat() for d in days]
+    return isinstance(said, list) and said != [] and said == [d for d in known if d in said]
 
 
-def _row(run: AnyRun, quality: int, words: str, out: Collection[str]) -> TripRow:
-    """Without a flight day, the silent days between it and the proof are not in it either."""
-    kept = [*run.days, *(d for d in run.flight if d.isoformat() not in out)]
-    return TripRow(run, quality, words, min(kept), max(kept))
+def _row(run: AnyRun, quality: int, answer: RunAnswer) -> TripRow:
+    """Without a flight day, the silent days between it and the proof are not in it either.
+    With a day beside a jump, they are."""
+    out, within = answer.get("out", ()), answer.get("in", ())
+    kept = [*run.days, *(d for d in run.flight if d.isoformat() not in out),
+            *(d for d in run.includable if d.isoformat() in within)]
+    return TripRow(run, quality, answer.get("words", ""), min(kept), max(kept))
 
 
 def _check(runs: Sequence[AnyRun], bounds: Sequence[Boundary], answers: Answers) -> None:
@@ -928,8 +976,11 @@ def _check(runs: Sequence[AnyRun], bounds: Sequence[Boundary], answers: Answers)
         if a in _QUALITIES and status not in ("offered", "held"):
             raise PlanInvalid(f"runs: {key} takes no quality")
         if "out" in row and (status not in ("offered", "held")
-                             or not _are_flight_days(row["out"], known[key])):
+                             or not _some_of(row["out"], known[key].flight)):
             raise PlanInvalid(f"runs: {key} has not these flight days to leave out")
+        if "in" in row and (status not in ("offered", "held")
+                            or not _some_of(row["in"], known[key].includable)):
+            raise PlanInvalid(f"runs: {key} has not these days to include")
     cuts = {b.id for b in bounds}
     for key, cut in answers["cuts"].items():
         if key not in cuts:
@@ -951,10 +1002,10 @@ def group(
 
     Runs answered "no" are left out, and the rest is the trip. A run with no answer or
     with "?", a held run with a quality and no words, and a region that is in it twice, each
-    hold the whole trip. A row has the run's days without the flight days that were left out;
-    no reason is judged again without them, so that releases nothing. A stretch with nothing
-    in it and nothing that holds it is no trip, and is in neither list, and neither is a run
-    that is there.
+    hold the whole trip. A row has the run's days without the flight days that were left out
+    and with the days beside a jump that were included; no reason is judged again for that, so
+    it releases nothing. A stretch with nothing in it and nothing that holds it is no trip, and
+    is in neither list, and neither is a run that is there.
 
     An answer that the page could not have written raises :class:`PlanInvalid`.
     """
@@ -989,8 +1040,7 @@ def group(
             elif run.status == "held" and not _says(words.get(run.id, "")):
                 holds.append(f"{run.id} needs words of yours")
             else:
-                rows.append(_row(run, int(answer), words.get(run.id, ""),
-                                 answers["runs"][run.id].get("out", ())))
+                rows.append(_row(run, int(answer), answers["runs"][run.id]))
         once: dict[int, AnyRun] = {}
         for row in rows:
             first = once.setdefault(row.run.region, row.run)

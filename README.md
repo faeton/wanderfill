@@ -558,20 +558,27 @@ each region with its own days. With no words for Cray Islands it would be no tri
 what is not answered is never guessed, and half a journey is not planned.
 
 **Flight days.** At the airport on the first or last day a phone often has only photos
-taken at speed, or keeps its last position through the flight, and those prove no day. So
-one day beside a run, at each end at most, is in it if it has such a photo strictly inside
-the region, with nothing seen elsewhere between that photo and the run, and only silent
-days between. A region with photos in flight only is never a run. The limit: after a
-night flight a phone can still say the old place the next morning, so this can be a day
-too many. The page names the day and its photos and has a button, "Leave this day out",
-which you can take back. `--no-flight-days` turns the rule off.
+taken at speed, and those prove no day. So one day beside a run, at each end at most, is in
+it if it has such a photo strictly inside the region, with nothing seen elsewhere between
+that photo and the run, and only silent days between. A region with photos in flight only
+is never a run. The limit: after a night flight a phone can still say the old place the
+next morning, so this can be a day too many. The page names the day and its photos and has
+a button, "Leave this day out", which you can take back.
+
+A day whose photos there are only beside an impossible jump is **out**: a phone keeps its
+position through a flight, and such a photo says the old place as often as not. The page
+shows it and has a button, "Include this day", which you can take back, wherever the stay
+with that day would pass every check that it passes without it. Where it would not, the day
+is shown and has no button. Including a day releases nothing. `--no-flight-days` turns both
+off.
 
 A run that may be one that is on the profile already, or the second half of a stay, is
 held. Some reasons are released by your own words (`open`, `brief`, `layover?`,
 `undated`). Nothing releases the others: a day shared with a visit that is there, nothing
 to show that you left in between, a map tile that did not arrive, a region that is not in
 the catalogue, a run over `--since` or `--until`, two clocks that cannot both be right.
-One with a visit of exactly its days is greyed and left out. Between two runs the page
+One with a visit of exactly its days, or of those and a day beside a jump, is greyed and
+left out. Between two runs the page
 asks whether a new trip starts wherever something suggests it: a flight, days with nothing,
 a run that is on the profile.
 
@@ -587,7 +594,7 @@ Until you do, the trip is not made, and the page says which two stays it is abou
 | `--track FILE...` or `--no-track` | one of them is needed. Every place of every day in it is read. A row proves no day; on a day with no photo, in another region, it ends a run |
 | `--gap-days N` | with 1, every day with no photo ends a run; with 2, one such day does not; with N, up to N-1 in a row do not. 2 unless you say. A table shows the other settings |
 | `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
-| `--no-flight-days` | a run begins and ends on a day with a photo on the ground |
+| `--no-flight-days` | a run begins and ends on a day with a photo on the ground, and no day beside a jump is shown or can be included |
 | `--spans FILE` | stretches that prove nothing, as for `series` |
 | `--library`, `--out` | another Photos library, another directory |
 

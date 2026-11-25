@@ -482,12 +482,109 @@ def test_the_rule_can_be_turned_off_for_a_list(site, capsys):
     assert status(made("f")[0])[1] == ("there", ["there"])
 
 
-def test_an_impossible_jump_at_the_landing_is_a_flight_day_too(site):
-    """A phone that still has Aldmoor when it is two thousand kilometres away."""
-    photos(*days(HOME, -9, -4), *days(1, 1, 4), cam(5, 1, 9, off=0.1), cam(5, HOME, 9.1),
+# The phone still has Aldmoor when it is two thousand kilometres away.
+LANDING = [*days(HOME, -9, -4), *days(1, 1, 4), cam(5, 1, 9, off=0.1), cam(5, HOME, 9.1),
+           *days(HOME, 6, 7), *days(2, 10, 11), *days(HOME, 14, 15)]
+
+
+def included(m, path, quality, *regions):
+    """The answers file, with the days beside a jump of these regions included."""
+    raw = json.loads(Path(answer(m, quality, cuts={
+        (a.region, b.region): "cut" for a, b in zip(m.runs, m.runs[1:], strict=False)},
+        path=path)).read_text())
+    for r in m.runs:
+        if r.region in regions:
+            raw["runs"][r.id]["in"] = [str(d) for d in r.includable]
+    Path(path).write_text(json.dumps(raw))
+    return path
+
+
+def test_a_day_with_an_impossible_jump_only_is_out_until_the_owner_includes_it(
+        site, capsys, tmp_path):
+    photos(*LANDING)
+    m, path = listed()
+    r = by_region(m)[1]
+    assert (r.last, r.flight, r.jump, r.jump_photos, r.includable) == (
+        day(4), (), (day(5),), (1,), (day(5),))
+    out = capsys.readouterr().out
+    assert "0 runs with a flight day at an end" in out
+    assert ("2 runs with a day beside a jump, which is out unless you include it on the page"
+            in " ".join(out.split()))
+    assert run_cli("trips", "plan", path, included(m, "a.json", {1: "3"})) == 0
+    (op,) = Plan.load("plan-trips.json").ops
+    assert (op.date_from, op.date_to) == (str(day(1)), str(day(4)))
+    assert ("day beside a jump 2031-05-05: 1 photo beside an impossible jump in the region, not "
+            "included" in op.proof[0]["detail"])
+
+    assert run_cli("trips", "plan", path, included(m, "b.json", {1: "3"}, 1),
+                   "--plan", "b-plan.json") == 0
+    plan = Plan.load("b-plan.json")
+    (op,) = plan.ops
+    assert (op.date_from, op.date_to) == (str(day(1)), str(day(5)))
+    assert (op.regions[0]["day_from"], op.regions[0]["day_to"]) == (1, 5)
+    assert "included by the owner" in op.proof[0]["detail"]
+    assert "not included" not in op.proof[0]["detail"]
+    assert any("day beside a jump included by the owner: 2031-05-05" in e for e in op.evidence)
+    assert validate(plan) == []
+
+    # A visit of just those days is a second copy to `check` and to `apply`.
+    site.visit(1, day(1), day(5))
+    snap = site.client().snapshot([1])
+    again = dataclasses.replace(plan, basis={
+        "fingerprint": fingerprint(basis_of(snap, [1])), "taken_at": "later"})
+    with pytest.raises(DriftError, match="second copy"):
+        apply_plan(site.client(), again, workdir=tmp_path / "x", confirm=True)
+    site.visits.clear()
+    site.writable = True
+    report = apply_plan(site.client(), plan, workdir=tmp_path / "w", confirm=True)
+    assert report.errors == [] and report.verified["mismatches"] == []
+    assert report.verified["unproven"] == []
+    (v,) = site.visits[1]
+    assert (v["day_from"], v["day_to"]) == (1, 5)
+    # And it comes out as there, with the days it was written with.
+    m, _ = listed(out="again")
+    r = by_region(m)[1]
+    assert (r.status, r.last, r.includable) == ("there", day(4), ())
+    assert r.reasons == (f"there: visit {v['id']}, 2031-05-01 to 2031-05-05",)
+
+
+def test_the_rule_that_is_off_is_off_for_both(site, capsys):
+    photos(*LANDING)
+    m, _ = listed("--no-flight-days")
+    assert all(r.jump == r.flight == () for r in m.runs)
+    out = capsys.readouterr().out
+    assert "flight days are not used" in out and "beside a jump, which" not in out
+
+
+def test_silent_days_come_in_with_an_included_day_and_are_said(site):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3), cam(5, 1, 9, off=0.1), cam(5, HOME, 9.1),
            *days(HOME, 6, 7), *days(2, 10, 11))
-    m, _ = listed()
-    assert by_region(m)[1].last == day(5) and by_region(m)[1].flight_photos == ((0, 1),)
+    m, path = listed()
+    assert (by_region(m)[1].jump, by_region(m)[1].silent) == ((day(5),), ())
+    assert run_cli("trips", "plan", path, included(m, "a.json", {1: "3"}, 1)) == 0
+    (op,) = Plan.load("plan-trips.json").ops
+    assert op.date_to == str(day(5))
+    assert "none on 2031-05-04" in op.proof[0]["detail"]
+
+
+def test_a_visit_that_came_on_the_included_day_refuses_the_plan(site, capsys):
+    photos(*LANDING)
+    m, path = listed()
+    files = path, included(m, "a.json", {1: "3"}, 1)
+    site.visit(1, day(5), day(5))
+    assert run_cli("trips", "plan", *files) == 2
+    assert "Aldmoor (1)" in capsys.readouterr().err and nothing_written()
+    m, _ = listed(out="b")
+    assert by_region(m)[1].includable == ()
+
+
+def test_a_day_of_the_answers_that_the_list_does_not_offer_is_refused(site):
+    photos(*LANDING)
+    m, path = listed()
+    raw = json.loads(Path(included(m, "a.json", {1: "3"}, 1)).read_text())
+    raw["runs"][by_region(m)[1].id]["in"] = [str(day(6))]
+    Path("a.json").write_text(json.dumps(raw))
+    assert run_cli("trips", "plan", path, "a.json") == 1 and nothing_written()
 
 
 # -- review: what is read ----------------------------------------------------------------

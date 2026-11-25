@@ -1578,6 +1578,9 @@ def _print_trips(m) -> None:
                 print(f"         {kinds.count(kind):>5} {kind}")
         print(f"  {_n(sum(bool(r.flight) for r in m.runs), 'run')} with a flight day at an end"
               if p["flight_days"] else "  flight days are not used, as you said")
+        if p["flight_days"]:
+            print(f"  {_n(sum(bool(r.includable) for r in m.runs), 'run')} with a day beside a "
+                  "jump, which is out unless you include it on the page")
     else:
         print("\nNothing is on this list: no photo of these dates is proof of a day in a region.")
     print("\nthe same photos at other gaps, in days:")
@@ -2339,7 +2342,8 @@ def _trips_parser(sub) -> None:
     r.add_argument("--no-flight-days", action="store_true",
                    help="a stay ends on its last day with a photo on the ground; without this, "
                         "one day beside it with photos at the airport, at speed, is in it, and "
-                        "you can leave it out on the page")
+                        "you can leave it out on the page; and one with only photos beside an "
+                        "impossible jump is out, and you can include it")
     r.add_argument("--spans", metavar="FILE",
                    help="JSON list of your own: dates and boxes whose photos prove nothing "
                         "(use none) or only an airport (use airports)")

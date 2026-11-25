@@ -154,6 +154,8 @@ def _op(draft: TripDraft, trip_list: TripList, answers: Answers) -> Op:
         marks = "" if row.quality >= MARKS_REGION_FROM else ", which does not mark the region"
         left = [d for d in row.run.flight if not row.first <= d <= row.last]
         out = f"; flight day left out by the owner: {_days(left)}" if left else ""
+        if within := _included(row):
+            out += f"; day beside a jump included by the owner: {_days(within)}"
         evidence.append(f"{_named(row.run)}, {row.first} to {row.last}: "
                         f"{row.quality} {QUALITY[row.quality]}{marks}{out}")
     ids = [r.id for r in trip_list.runs]
@@ -210,7 +212,24 @@ def _flights(row: TripRow) -> list[str]:
             (conflict, f"{_count(conflict, 'photo')} beside an impossible jump")) if n]
         kept = "" if row.first <= day <= row.last else ", left out by the owner"
         out.append(f"flight day {day}: {' and '.join(kinds)} in the region{kept}")
+    within = _included(row)
+    for day, n in zip(row.run.jump, row.run.jump_photos, strict=True):
+        said = "included by the owner" if day in within else "not included"
+        out.append(f"day beside a jump {day}: {_count(n, 'photo')} beside an impossible jump in "
+                   f"the region, {said}")
     return out
+
+
+def _included(row: TripRow) -> list[dt.date]:
+    return [d for d in row.run.includable if row.first <= d <= row.last]
+
+
+def _silent(row: TripRow) -> list[dt.date]:
+    """The run's days with no photo, and those that an included day brings in."""
+    run = row.run
+    ends = (row.first, run.first), (run.last, row.last)
+    return sorted({*run.silent, *(a + dt.timedelta(n) for a, b in ends
+                                  for n in range(1, (b - a).days))})
 
 
 def _proof(row: TripRow, trip_list: TripList) -> list[dict]:
@@ -220,7 +239,7 @@ def _proof(row: TripRow, trip_list: TripList) -> list[dict]:
     parts = [
         f"{run.region} {shown(run.name, 'region')}: {run.first} to {run.last}",
         f"photos on {_count(len(run.days), 'day')}"
-        + (f", none on {_days(run.silent)}" if run.silent else ""),
+        + (f", none on {_days(silent)}" if (silent := _silent(row)) else ""),
         f"{_count(run.photos, 'photo')}, from {_clock(run.first_photo)} to "
         f"{_clock(run.last_photo)}",
         *_flights(row),

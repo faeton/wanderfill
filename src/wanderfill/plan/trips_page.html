@@ -103,9 +103,11 @@ remember yourself.</p>
 <li>Leaving a question blank is fine. It holds the trip that it is in, and that trip is not made.</li>
 <li>A photo does not prove a visit. A stretch begins and ends on a day with a photo, and the days
 with no photo in it are named.</li>
-<li>The first or the last day of a stretch can be a flight day: its photos in the region were
-taken in flight or beside a jump, as at an airport. It is in the stretch unless you leave it out.
-After a night flight a phone can still say the old place, so it can be a day too many.</li>
+<li>The first or the last day of a stretch can be a flight day: photos in the region were taken
+at speed, as at an airport. It is in the stretch unless you leave it out. After a night flight a
+phone can still say the old place, so it can be a day too many.</li>
+<li>A day beside a stretch can have photos in the region beside an impossible jump, and none at
+speed. Those say the old place as often as not, so it is out unless you include it.</li>
 <li>Times are by the photo's own clock.</li>
 <li>Your answers change nothing by themselves. This page sends nothing anywhere: you save the
 answers as a file, and a plan is made from it for you to read first.</li>
@@ -166,6 +168,7 @@ const Trips = (() => {
   const NO = "Leave it out";
   const ASK = "I don't remember";
   const LEAVE_DAY = "Leave this day out";
+  const INCLUDE_DAY = "Include this day";
   const CUT_WORDS = { same: "Same trip", cut: "A new trip starts here" };
   const CUTS = Object.keys(CUT_WORDS);
 
@@ -174,6 +177,9 @@ const Trips = (() => {
   const outOf = (run, day) => "out:" + idOf(run) + ":" + day;
   /* The flight days that can be left out: where a quality is taken. */
   const leavable = (run) => (["offered", "held"].includes(run.status) ? run.flight : []);
+  const inOf = (run, day) => "in:" + idOf(run) + ":" + day;
+  /* The days beside a jump that can be included: the same runs, and the days the list offers. */
+  const joinable = (run) => (["offered", "held"].includes(run.status) ? run.includable : []);
   const cutOf = (edge) => edge.before + "|" + edge.after;
   const kindOf = (text) => text.split(":")[0];
   const within = (ranges, n) => ranges.some(([low, high]) => low <= n && n <= high);
@@ -229,6 +235,7 @@ const Trips = (() => {
       if (values.length) out.set("run:" + idOf(run), (text) => values.includes(text));
       if (run.status === "held") out.set("words:" + idOf(run), (text) => text !== "");
       for (const day of leavable(run)) out.set(outOf(run, day), (text) => text === "out");
+      for (const day of joinable(run)) out.set(inOf(run, day), (text) => text === "in");
     }
     for (const edge of data.boundaries) {
       if (!edge.forced) out.set("cut:" + cutOf(edge), (text) => CUTS.includes(text));
@@ -337,6 +344,8 @@ const Trips = (() => {
       if (words && !wordsProblem(data, words)) row.words = words;
       const out = leavable(run).filter((day) => store.get(outOf(run, day)));
       if (out.length) row.out = out;
+      const within = joinable(run).filter((day) => store.get(inOf(run, day)));
+      if (within.length) row.in = within;
       if (Object.keys(row).length) runs[idOf(run)] = row;
     }
     for (const edge of data.boundaries) {
@@ -398,7 +407,9 @@ const Trips = (() => {
         } else {
           /* Without a flight day, the silent days between it and the rest are not in it. */
           const out = rowOf(run).out || [];
-          const kept = [...run.days, ...run.flight.filter((d) => !out.includes(d))].sort();
+          const within = rowOf(run).in || [];
+          const kept = [...run.days, ...run.flight.filter((d) => !out.includes(d)),
+            ...run.includable.filter((d) => within.includes(d))].sort();
           rows.push([run, Number(answer), wordsOf(run), kept[0], kept[kept.length - 1]]);
         }
       }
@@ -563,17 +574,23 @@ const Trips = (() => {
   }
 
   /* A flight day, as it is said beside its button. */
+  const jumps = (n) => plural(n, "photo") + " in the region beside an impossible jump, as when " +
+    "a phone keeps its position through a flight";
+
   function flightText(run, n) {
     const [fast, conflict] = run.flight_photos[n];
     const day = run.flight[n];
-    const kinds = [];
-    if (fast) kinds.push(plural(fast, "photo") + " taken at speed in the region");
-    if (conflict) {
-      kinds.push(plural(conflict, "photo") + " in the region beside an impossible jump, as when " +
-        "a phone keeps its position through a flight");
-    }
+    const kinds = [plural(fast, "photo") + " taken at speed in the region"];
+    if (conflict) kinds.push(jumps(conflict));
     return "The " + (day < run.days[0] ? "first" : "last") + " day is a flight day: " + day + ", " +
       kinds.join(", and ");
+  }
+
+  function jumpText(run, n) {
+    const day = run.jump[n];
+    return "A day " + (day < run.first ? "before" : "after") + " it, " + day + ", has " +
+      jumps(run.jump_photos[n]) + ". It is not in the dates" +
+      (joinable(run).includes(day) ? " unless you include it." : ".");
   }
 
   /* By date, and those with no first day last. */
@@ -631,6 +648,7 @@ const Trips = (() => {
       "Over " + p.speeds.fast_kmh + " km/h a photo is in the air",
       p.flight_days ? "A day of photos in flight beside a stretch is in it" :
         "Days of photos in flight are in no stretch",
+      ...(p.flight_days ? ["A day with photos beside a jump only is out unless you include it"] : []),
       plural(data.runs.length, "stretch", "stretches") + " on this list",
       plural(data.coverage.tiles_read, "map tile") + " read, " + data.coverage.tiles_unread +
         " not read",
@@ -747,12 +765,11 @@ const Trips = (() => {
     : "";
 
   return {
-    CUT_WORDS, FILE, LEAVE_DAY, MARKS_NOTHING, WHY_NOT, about, answerWord, countsText, cutOf,
-    edgeNotes,
-    exportNote, exportText, facts, flightText, gapRows, given, group, idOf, incomplete, keptNote,
-    leavable, leftOut, marksNothing, openStore, outOf, plainText, preview, problemOf, problems,
-    refusal, runTitle, says, sources, takes, tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel,
-    wordsProblem,
+    CUT_WORDS, FILE, INCLUDE_DAY, LEAVE_DAY, MARKS_NOTHING, WHY_NOT, about, answerWord,
+    countsText, cutOf, edgeNotes, exportNote, exportText, facts, flightText, gapRows, given, group,
+    idOf, inOf, incomplete, joinable, jumpText, keptNote, leavable, leftOut, marksNothing, openStore,
+    outOf, plainText, preview, problemOf, problems, refusal, runTitle, says, sources, takes,
+    tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel, wordsProblem,
   };
 })();
 </script>
@@ -854,7 +871,10 @@ const Trips = (() => {
       return line;
     }));
     box.append(name, said);
-    run.flight.forEach((day, i) => drawFlight(box, run, n, i));
+    run.flight.forEach((day, i) => drawDay(box, "flight-" + n + "-" + i, Trips.flightText(run, i),
+      Trips.leavable(run).includes(day) && [Trips.outOf(run, day), "out", Trips.LEAVE_DAY]));
+    run.jump.forEach((day, i) => drawDay(box, "jump-" + n + "-" + i, Trips.jumpText(run, i),
+      Trips.joinable(run).includes(day) && [Trips.inOf(run, day), "in", Trips.INCLUDE_DAY]));
     const visits = Trips.visitLines(data, run);
     if (visits.length) box.append(boxOf("visits", Trips.visitsTitle(visits.length), visits));
     const trips = Trips.tripLines(data, run);
@@ -883,18 +903,18 @@ const Trips = (() => {
     return box;
   }
 
-  /* One button, which takes back what it did. The day is in until it is pressed. */
-  function drawFlight(box, run, n, i) {
-    const day = run.flight[i];
+  /* A day beside a run, and one button, which takes back what it did. A flight day is in until
+     it is pressed, and a day beside a jump is out. */
+  function drawDay(box, id, said, answer) {
     const line = el("div", "flight");
-    const text = el("p", "", Trips.flightText(run, i));
-    text.setAttribute("id", "flight-" + n + "-" + i);
+    const text = el("p", "", said);
+    text.setAttribute("id", id);
     line.append(text);
-    if (Trips.leavable(run).includes(day)) {
-      const key = Trips.outOf(run, day);
-      const b = button("", Trips.LEAVE_DAY, () => answered(key, store.get(key) ? "" : "out"));
-      b.setAttribute("aria-describedby", "flight-" + n + "-" + i);
-      redraw.push(() => b.setAttribute("aria-pressed", String(store.get(key) === "out")));
+    if (answer) {
+      const [key, value, word] = answer;
+      const b = button("", word, () => answered(key, store.get(key) ? "" : value));
+      b.setAttribute("aria-describedby", id);
+      redraw.push(() => b.setAttribute("aria-pressed", String(store.get(key) === value)));
       line.append(b);
     }
     box.append(line);

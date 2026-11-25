@@ -48,11 +48,11 @@ from .trips import (
     RunAnswer,
     Status,
     SweepRow,
-    _are_flight_days,
     _cuts_itself_off,
     _ends,
     _in_order,
     _says,
+    _some_of,
     evidence_grade,
     kind_of,
     status_of,
@@ -101,8 +101,9 @@ class ListedRun:
 
     ``photos`` counts its proof. ``start`` and ``end`` are the first and the last of it in
     UTC, which is the order of the list, and ``first_photo`` and ``last_photo`` the same two
-    by their own clocks. ``flight`` and ``flight_photos`` are the run's. ``evidence`` is the
-    grade that ``wanderfill evidence`` would give.
+    by their own clocks. ``flight`` and ``flight_photos``, ``jump``, ``jump_photos`` and
+    ``includable`` are the run's. ``evidence`` is the grade that ``wanderfill evidence`` would
+    give.
     """
 
     region: int
@@ -122,6 +123,9 @@ class ListedRun:
     status: Status
     flight: tuple[dt.date, ...] = ()
     flight_photos: tuple[tuple[int, int], ...] = ()
+    jump: tuple[dt.date, ...] = ()
+    jump_photos: tuple[int, ...] = ()
+    includable: tuple[dt.date, ...] = ()
 
     @property
     def id(self) -> str:
@@ -137,12 +141,13 @@ class TripList:
 
     ``params`` has ``since``, ``until`` (a date or ``None``), ``gap_days``, ``speeds``, the
     arguments of :func:`~wanderfill.plan.review.grade_shots` by name, ``spans``, whether
-    a spans file was given, and ``flight_days``, whether a run may have them. ``sources`` has
-    the photos once, every track and the spans file, each with ``kind``, ``label`` (no
-    directory), ``sha256`` or ``None``, ``first``, ``last``, ``count`` and ``skipped``, how
-    many rows could not be read; ``no_track`` is the owner's word that there is no track for
-    these dates, and is true exactly when there is none. ``coverage`` has ``tiles_read``,
-    ``tiles_unread`` and ``unread_photos``. ``left_out`` is what :func:`left_out` returns.
+    a spans file was given, and ``flight_days``, whether a run may have them, or a day beside a
+    jump. ``sources`` has the photos once, every track and the spans file, each with ``kind``,
+    ``label`` (no directory), ``sha256`` or ``None``, ``first``, ``last``, ``count`` and
+    ``skipped``, how many rows could not be read; ``no_track`` is the owner's word that there
+    is no track for these dates, and is true exactly when there is none. ``coverage`` has
+    ``tiles_read``, ``tiles_unread`` and ``unread_photos``. ``left_out`` is what
+    :func:`left_out` returns.
     ``visits`` has every visit of every region on the list, as :func:`visits_rows` has them,
     and ``trips`` the trips over the same days, as :func:`trips_rows` has them.
 
@@ -357,7 +362,11 @@ def _run_of(raw: object, what: str) -> ListedRun:
         evidence=grade, flags=_texts(raw["flags"], _FLAGS, f"{what}.flags"),
         reasons=_texts(raw["reasons"], _REASONS, f"{what}.reasons"), status=raw["status"],
         flight=_days(raw["flight"], f"{what}.flight"),
-        flight_photos=_flight_photos(raw["flight_photos"], f"{what}.flight_photos"))
+        flight_photos=_flight_photos(raw["flight_photos"], f"{what}.flight_photos"),
+        jump=_days(raw["jump"], f"{what}.jump"),
+        jump_photos=tuple(_whole(n, f"{what}.jump_photos", low=1)
+                          for n in _listed(raw["jump_photos"], f"{what}.jump_photos")),
+        includable=_days(raw["includable"], f"{what}.includable"))
     if not run.days or (min(run.days + run.flight), max(run.days + run.flight)) != (
             run.first, run.last):
         raise ValueError(f"{what}.days must be from first to last")
@@ -367,6 +376,13 @@ def _run_of(raw: object, what: str) -> ListedRun:
         raise ValueError(f"{what}.flight must be one day beside the days at each end, at most")
     if len(run.flight_photos) != len(run.flight):
         raise ValueError(f"{what}.flight_photos must be of each flight day")
+    if any(run.first <= d <= run.last for d in run.jump) or len(run.jump_photos) != len(run.jump):
+        raise ValueError(f"{what}.jump must be days beside the run, with the photos of each")
+    for side in (lambda d: d < run.days[0], lambda d: d > run.days[-1]):
+        if sum(map(side, run.flight + run.jump)) > 1:
+            raise ValueError(f"{what}.jump must be one day at an end that has no flight day")
+    if not set(run.includable) <= set(run.jump):
+        raise ValueError(f"{what}.includable must be some of the days of jump")
     if run.photos < len(run.days):
         raise ValueError(f"{what}.photos: {run.photos} photos on {len(run.days)} days")
     if any(d in run.days or not run.first < d < run.last for d in run.silent):
@@ -381,6 +397,8 @@ def _run_of(raw: object, what: str) -> ListedRun:
     if run.status != (wanted := status_of(run.reasons)):
         raise ValueError(f"{what}.status: {_r(run.status)} does not follow from its reasons, "
                          f"which make it {wanted}")
+    if run.includable and wanted not in ("offered", "held"):
+        raise ValueError(f"{what}.includable: a run that takes no quality includes no day")
     if wanted == "there" and {kind_of(r) for r in run.reasons} != {"there"}:
         raise ValueError(f"{what}.reasons: a run that is there has no other reason")
     if ("evidence thin" in run.flags) is not (grade in ("thin", "none")):
@@ -397,10 +415,11 @@ def _beyond(run: ListedRun) -> list[dt.date]:
 def _flight_photos(value: object, what: str) -> tuple[tuple[int, int], ...]:
     out = []
     for pair in _listed(value, what):
-        if len(_listed(pair, what)) != 2 or sum(_whole(n, what, low=0) for n in pair) < 1:
-            raise ValueError(f"{what}: {_r(pair)} is not how many photos at speed and beside a "
-                             "jump there are on a day")
-        out.append((pair[0], pair[1]))
+        counts = [_whole(n, what, low=0) for n in _listed(pair, what)]
+        if len(counts) != 2 or counts[0] < 1:
+            raise ValueError(f"{what}: {_r(pair)} is not how many photos at speed, one at least, "
+                             "and beside a jump there are on a day")
+        out.append((counts[0], counts[1]))
     return tuple(out)
 
 
@@ -483,11 +502,25 @@ def _check_runs(runs: Sequence[ListedRun], params: Mapping) -> None:
         if any(n >= params["gap_days"] for n in Counter(
                 d < run.days[0] for d in _beyond(run)).values()):
             raise ValueError(f"runs: {run.id} has a flight day too far from its days")
+        if run.jump and not params["flight_days"]:
+            raise ValueError(f"runs: {run.id} has a day beside a jump, and the list says there "
+                             "are none")
+        if any(min(abs((d - e).days) for e in (run.first, run.last)) > params["gap_days"]
+               for d in run.jump):
+            raise ValueError(f"runs: {run.id} has a day beside a jump too far from its days")
         if run.id in seen:  # one answer would stand for two questions
             raise ValueError(f"runs: {run.id} is there twice")
         seen.add(run.id)
+    for a, b in pairwise(sorted(runs, key=lambda r: (r.region, _reach(r)))):
+        if a.region == b.region and _reach(b)[0] <= _reach(a)[1]:  # two trips could have it
+            raise ValueError(f"runs: {a.id} and {b.id} are of one region and can share a day")
     if list(runs) != _in_order(runs):
         raise ValueError("runs must be in the order of their photos")
+
+
+def _reach(run: AnyRun) -> tuple[dt.date, dt.date]:
+    """The first and the last day that a row of the run can have."""
+    return min(run.first, *run.includable, run.last), max(run.last, *run.includable, run.first)
 
 
 def _check_boundaries(
@@ -593,7 +626,7 @@ def _trip_end(text: str | None) -> When | None:
 
 
 def _over(trip: Mapping, run: AnyRun) -> bool:
-    """Whether a trip can have a day of the run.
+    """Whether a trip can have a day of the run, or one that may be included.
 
     An end that does not say is taken for open, but a header with no date that can be read is
     over no day: there are many, and they would be over every run.
@@ -603,7 +636,8 @@ def _over(trip: Mapping, run: AnyRun) -> bool:
         return False
     (a, b), (c, d) = map(_ends, ends)
     lo, hi = (a, d) if a <= d else (c, b)
-    return lo <= run.last and run.first <= hi
+    first, last = _reach(run)
+    return lo <= last and first <= hi
 
 
 def trips_rows(trips: Iterable[Mapping], runs: Iterable[AnyRun]) -> list[dict]:
@@ -716,7 +750,8 @@ def _listed_run(run: Run, name: str, grade: evidence.Grade) -> ListedRun:
     utc = dt.timezone.utc
     return ListedRun(run.region, name, run.first, run.last, run.days, run.silent, len(run.shots),
                      first, last, run.start.astimezone(utc), run.end.astimezone(utc), grade,
-                     run.flags, run.reasons, run.status, run.flight, run.flight_photos)
+                     run.flags, run.reasons, run.status, run.flight, run.flight_photos,
+                     run.jump, run.jump_photos, run.includable)
 
 
 # -- the page, and what came back from it ----------------------------------------------------
@@ -810,7 +845,7 @@ def _read_each(
 
 
 def _run_answer(run: ListedRun, row: object, what: str) -> RunAnswer:
-    _fields(row, (), what, ("a", "words", "out"))
+    _fields(row, (), what, ("a", "words", "out", "in"))
     takes = _TAKES[run.status]
     if not row:
         raise ValueError(f"{what} says nothing; an answer that was not given is not there")
@@ -826,9 +861,13 @@ def _run_answer(run: ListedRun, row: object, what: str) -> RunAnswer:
         if problem := words_problem(row["words"]):
             raise ValueError(f"{what}: the words cannot be taken: {problem}")
     if "out" in row and (run.status not in ("offered", "held")
-                         or not _are_flight_days(row["out"], run)):
+                         or not _some_of(row["out"], run.flight)):
         raise ValueError(f"{what}: out must be some of its flight days, in order, where it takes "
                          f"a quality, not {_r(row['out'])}")
+    if "in" in row and (run.status not in ("offered", "held")
+                        or not _some_of(row["in"], run.includable)):
+        raise ValueError(f"{what}: in must be some of the days that it may include, in order, "
+                         f"where it takes a quality, not {_r(row['in'])}")
     return dict(row)  # type: ignore[return-value]
 
 

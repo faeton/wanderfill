@@ -529,7 +529,7 @@ FOUR = [*BEFORE, *stay(R, 10, 14), *stay(Q, 20, 22)]
 
 @pytest.mark.parametrize("more, want", [
     ((), (10, 14)),
-    ((flown(15),), (10, 15)), ((flown(15, kind="conflict"),), (10, 15)),
+    ((flown(15),), (10, 15)), ((flown(15, kind="conflict"),), (10, 14)),
     ((flown(9),), (9, 14)), ((flown(9), flown(15)), (9, 15)),
     ((flown(16),), (10, 16)),                                  # one silent day between
     ((flown(17),), (10, 14)), ((flown(8),), (8, 14)), ((flown(7),), (10, 14)),
@@ -635,8 +635,282 @@ def test_a_flight_day_over_the_date_line_goes_by_its_own_clock():
 
 def test_an_overnight_flight_can_give_a_day_too_many():
     """The limit that the page says: a phone that still has the old place the next morning."""
-    obs = [*FOUR, flown(15, hour=5, kind="conflict"), ob(15, Q, 9)]
+    obs = [*FOUR, flown(15, hour=5), ob(15, Q, 9)]
     assert ends_of(obs) == [(10, 15)]
+
+
+# -- 16a: a day beside a jump ------------------------------------------------------------
+
+
+def jumped(d, region=R, hour=12.0, **kw):
+    return flown(d, region, hour, kind="conflict", **kw)
+
+
+def found(obs, region=R, **kw):
+    (run,) = [r for r in find_runs(obs, **kw) if r.region == region]
+    return run
+
+
+def includable(obs, visits=(), **kw):
+    """The days of the run in R that may be included, as days of May."""
+    return [d.day for d in one(obs, {R: list(visits)}, **kw).includable]
+
+
+@pytest.mark.parametrize("more, flight, jump", [
+    ((jumped(15),), [], [15]), ((jumped(9),), [], [9]), ((jumped(9), jumped(15)), [], [9, 15]),
+    ((jumped(16),), [], [16]), ((jumped(17),), [], []),        # silent days as for a flight day
+    ((jumped(15, hour=8), flown(15, hour=9)), [15], []),       # one at speed is enough
+    ((jumped(15, hour=9), flown(15, hour=8)), [15], []),
+    ((flown(9), jumped(15)), [9], [15]), ((jumped(9), flown(15)), [15], [9]),
+    ((jumped(15), flown(16)), [], [15]),                       # the nearest, and no other
+    ((flown(15), jumped(16)), [15], []),
+    # The one at speed is after a proof elsewhere, so the day rests on the other.
+    ((jumped(15, hour=8), ob(15, Q, 10), flown(15, hour=12)), [], [15]),
+    ((jumped(15, state="edge"),), [], []), ((jumped(15, use="none"),), [], []),
+    ((jumped(15, recorded=False),), [], []), ((ob(15, Q, 8), jumped(15, hour=9)), [], []),
+    ((jumped(12),), [], []), ((jumped(15, origin="airdrop"),), [], []),
+], ids=lambda v: str(v)[-40:])
+def test_a_day_with_jumps_only_does_not_widen_the_run(more, flight, jump):
+    obs = [*FOUR, *more]
+    for given in (obs, obs[::-1]):
+        run = found(given)
+        assert [d.day for d in run.flight] == flight and [d.day for d in run.jump] == jump
+        ends = sorted([10, 14, *flight])
+        assert (run.first.day, run.last.day) == (ends[0], ends[-1])
+        assert run.includable == ()  # not judged
+    off = found(obs, flight_days=False)
+    assert off.jump == off.jump_photos == off.flight == ()
+
+
+def test_a_day_beside_a_jump_changes_nothing_of_the_run():
+    obs = [*FOUR, jumped(8, hour=7), jumped(16, hour=8), jumped(16, hour=9)]
+    plain, run = found(obs, flight_days=False), found(obs)
+    assert run == dataclasses.replace(plain, jump=(day(8), day(16)), jump_photos=(1, 2))
+    assert run.silent == () and run.id == plain.id
+
+
+def test_a_day_that_two_runs_could_have_is_neithers_whatever_its_photos():
+    for a, b in itertools.product((flown, jumped), repeat=2):
+        obs = [*BEFORE, *stay(R, 10, 12), a(13, hour=1), b(13, hour=20), *stay(R, 14, 16),
+               *stay(Q, 20, 22)]
+        runs = [r for r in find_runs(obs) if r.region == R]
+        assert len(runs) == 2 and all(r.flight == r.jump == () for r in runs)
+
+
+def test_a_day_beside_a_jump_goes_by_its_own_clock_over_the_date_line():
+    east, west = {"zone": 13, "lon": 178.0}, {"zone": -10, "lon": -155.0}
+    at = [*BEFORE, *stay(R, 10, 14, **west)]
+    assert found([*at, jumped(15, hour=23, **east)]).jump == (day(15),)
+    assert found([*at, jumped(15, hour=2, **east)]).jump == ()      # before the last proof
+    at = [*BEFORE, *stay(R, 10, 14, **east)]
+    assert found([*at, jumped(14, hour=9, **west)]).jump == ()      # no later day by its clock
+    # Judged as it is: the visit on the 16th has to be shown to be another one.
+    obs = [*at, jumped(15, hour=8, **east), ob(15, Q, 12, **west), *stay(Q, 20, 22)]
+    assert includable(obs) == [15]
+    assert includable(obs, [visit(17, 18)]) == [15]
+    assert includable(obs, [visit(16, 18)]) == []
+
+
+# R on 10-14 with a jump on the 15th, and Q seen on the 15th and 16th after it.
+LEFT = [*BEFORE, *stay(R, 10, 14), jumped(15, hour=8), ob(15, Q, 18), *stay(Q, 16, 22)]
+
+
+@pytest.mark.parametrize("visits, kw, status, days", [
+    ([], {}, "offered", [15]),
+    ([visit(18, 19)], {}, "offered", [15]), ([visit(1, 1)], {}, "offered", [15]),
+    ([visit(16, 17)], {}, "offered", [15]),                    # seen in Q on the evening before
+    # One with that day: nothing shows that they left before it, and the day is in it.
+    ([visit(15, 15)], {}, "fixed", []), ([visit(15, 18)], {}, "fixed", []),
+    ([visit(15, None)], {}, "fixed", []),
+    ([], {"until": day(14)}, "offered", []), ([], {"until": day(15)}, "offered", [15]),
+    ([], {"since": day(10)}, "offered", [15]), ([], {"since": day(11)}, "fixed", []),
+], ids=str)
+def test_a_day_may_be_included_only_if_no_check_changes(visits, kw, status, days):
+    run = one(LEFT, {R: visits}, **kw)
+    assert run.status == status and run.last == day(14) and run.jump == (day(15),)
+    assert [d.day for d in run.includable] == days
+
+
+@pytest.mark.parametrize("v", [(15, 15), (15, 18), (15, None)])
+def test_a_day_that_would_make_it_an_overlap_cannot_be_included(v):
+    """By the calendar of two sides of the line the owner was elsewhere on the 14th after the
+    run, and its jump is on the 15th."""
+    east, west = {"zone": 13, "lon": 178.0}, {"zone": -10, "lon": -155.0}
+    obs = [*BEFORE, *stay(R, 10, 14, **east), jumped(15, hour=1, **east),
+           ob(14, Q, 12, **west), *stay(Q, 20, 22)]
+    run = one(obs, {R: [visit(16, 18)]})
+    assert (run.status, run.jump, run.includable) == ("offered", (day(15),), ())
+    assert one(obs, {R: [visit(*v)]}).includable == ()
+
+
+def test_a_day_before_since_cannot_be_included():
+    obs = [*BEFORE, jumped(9), *stay(R, 10, 14), *stay(Q, 20, 22)]
+    assert includable(obs) == [9] == includable(obs, since=day(9))
+    assert includable(obs, since=day(10)) == []
+
+
+def test_a_day_that_would_make_it_open_cannot_be_included():
+    obs = [*BEFORE, *stay(R, 10, 14), jumped(15, hour=8), ob(15, Q, 18)]
+    assert one(obs).status == "offered" and includable(obs) == []
+    obs = [*BEFORE, *stay(R, 10, 14), jumped(15, hour=8)]  # open with it and without it
+    assert kinds(one(obs)) == {"open"} and includable(obs) == [15]
+
+
+def with_jump(obs, d, visits):
+    """The run in R, judged as if it had a jump on `d`: one that `find_runs` does not give,
+    for a photo elsewhere lies between. `judge` refuses it without leaning on that."""
+    runs = [dataclasses.replace(r, jump=(d,), jump_photos=(1,)) if r.region == R else r
+            for r in find_runs(obs)]
+    read = {r.region: [] for r in runs} | {R: list(visits)}
+    (run,) = [r for r in judge(runs, obs, read, since=None, until=None) if r.region == R]
+    return run
+
+
+def test_a_day_that_would_make_it_undated_cannot_be_included():
+    """A visit that has only a year, and the day is in it."""
+    shift = lambda o: dataclasses.replace(o, shot=dataclasses.replace(  # noqa: E731
+        o.shot, taken=o.shot.taken - dt.timedelta(120), taken_utc=o.shot.taken_utc
+        - dt.timedelta(120)))
+    obs = [*(ob(dt.date(2026, 4, n), Q) for n in (27, 28)),
+           jumped(dt.date(2026, 4, 30), hour=20), *stay(R, 1, 3), *stay(Q, 9, 10)]
+    # 1 May is 1 January of 2026, and the jump is on the last day of 2025.
+    run = one([shift(o) for o in obs], {R: [visit(2025, 2025)]})
+    assert run.jump == (dt.date(2025, 12, 31),)
+    assert (run.status, kinds(run)) == ("fixed", {"continuation"}) and run.includable == ()
+    run = with_jump([shift(o) for o in (*obs[:2], *obs[3:], ob(dt.date(2026, 5, 1), Q, 4))],
+                    dt.date(2025, 12, 31), [visit(2025, 2025)])
+    assert (run.status, run.includable) == ("offered", ())  # it is seen that they left
+
+
+def test_a_day_that_would_bring_another_undated_visit_cannot_be_included():
+    """The owner's words are about the visits that were shown, and no others."""
+    later = visit(None, None, id=1), visit(None, None, id=2)
+    assert one(LEFT, {R: list(later)}).status == "held" and includable(LEFT, later) == [15]
+    many = [*later, *(visit(None, None, id=n) for n in (3, 4, 5))]
+    assert includable(LEFT, many) == [15]
+    shift = lambda o: dataclasses.replace(o, shot=dataclasses.replace(  # noqa: E731
+        o.shot, taken=o.shot.taken - dt.timedelta(120), taken_utc=o.shot.taken_utc
+        - dt.timedelta(120)))
+    obs = [shift(o) for o in (ob(dt.date(2026, 4, 27), Q), ob(dt.date(2026, 5, 1), Q, 4),
+                              *stay(R, 1, 3), *stay(Q, 9, 10))]
+    for rows in (later, many):
+        run = with_jump(obs, dt.date(2025, 12, 31), [*rows, visit(2025, 2025, id=9)])
+        assert (run.status, kinds(run), run.includable) == ("held", {"undated"}, ())
+        assert with_jump(obs, dt.date(2025, 12, 31), rows).includable == run.jump
+
+
+def test_a_day_beside_an_unread_one_cannot_be_included():
+    for state in ("unread", "stale"):
+        obs = [*BEFORE, *stay(R, 10, 14), jumped(15, hour=8), ob(16, state=state),
+               *stay(Q, 18, 22)]
+        assert one(obs).status == "offered" and includable(obs) == []
+
+
+def test_every_variant_that_has_the_day_must_pass():
+    obs = [*BEFORE, jumped(9, hour=12), ob(9, Q, 8), *LEFT[len(BEFORE):]]
+    assert includable(obs) == [9, 15]
+    # With the 15th it would be another run, so the two together would be: neither is asked.
+    assert includable(obs, [visit(15, 15)]) == []
+    assert includable(obs, until=day(14)) == []
+    # A flight day at the other end is of every variant.
+    obs = [*BEFORE, flown(9, hour=12), ob(9, Q, 8), *LEFT[len(BEFORE):]]
+    run = one(obs)
+    assert (run.first, run.flight, run.includable) == (day(9), (day(9),), (day(15),))
+
+
+@pytest.mark.parametrize("visits, status", [
+    ([visit(10, 14)], "there"), ([visit(12, 13)], "fixed"), ([visit(8, 9)], "fixed"),
+])
+def test_nothing_is_included_in_a_run_that_takes_no_quality(visits, status):
+    run = one(LEFT, {R: visits})
+    assert (run.status, run.jump, run.includable) == (status, (day(15),), ())
+
+
+def test_a_held_run_takes_the_day_and_still_needs_words():
+    run = one(LEFT, {R: [visit(None, None)]})
+    assert (run.status, run.includable) == ("held", (day(15),))
+
+
+def test_a_day_that_would_run_into_another_run_cannot_be_included():
+    """`find_runs` never gives such runs; a caller could."""
+    runs = find_runs([*LEFT, *stay(R, 25, 26), *stay(Q, 28, 30)])
+    obs = [*LEFT, *stay(R, 25, 26), *stay(Q, 28, 30)]
+    far = [dataclasses.replace(r, jump=(day(25),)) if r.jump else r for r in runs]
+    read = {R: [], Q: []}
+    got = {(r.region, r.first): r for r in judge(far, obs, read, since=None, until=None)}
+    assert got[R, day(10)].jump == (day(25),) and got[R, day(10)].includable == ()
+    both = [dataclasses.replace(r, jump=(day(20),)) if r.region == R else r for r in runs]
+    got = judge(both, obs, read, since=None, until=None)
+    assert all(r.includable == () for r in got)
+
+
+def test_a_visit_of_the_days_with_it_is_there():
+    """Written once with the day, on a page where it was included."""
+    run = one(LEFT, {R: [visit(10, 15, id=31)]})
+    assert (run.status, kinds(run)) == ("there", {"there"})
+    assert (run.first, run.last, run.includable) == (day(10), day(14), ())
+    assert run.reasons == ("there: visit 31, 2026-05-10 to 2026-05-15",)
+    both = [*BEFORE, jumped(9, hour=12), ob(9, Q, 8), *LEFT[len(BEFORE):]]
+    for a, b in ((9, 14), (10, 15), (9, 15), (10, 14)):
+        assert one(both, {R: [visit(a, b)]}).status == "there", (a, b)
+    for a, b in ((9, 16), (8, 15), (10, 16), (11, 15), (9, 13)):
+        assert one(both, {R: [visit(a, b)]}).status == "fixed", (a, b)
+    # And with the flight day that it has, not without it.
+    one_fast = [*BEFORE, flown(9, hour=12), ob(9, Q, 8), *LEFT[len(BEFORE):]]
+    assert one(one_fast, {R: [visit(9, 15)]}).status == "there"
+    assert one(one_fast, {R: [visit(10, 15)]}).status == "fixed"
+    # An overlap beside it changes nothing of that, as for any run that is there.
+    rows = [visit(10, 15, id=31), visit(12, 13, id=32)]
+    for given in (rows, rows[::-1]):
+        assert one(LEFT, {R: given}).status == "there"
+    assert one([o for o in LEFT if o.shot.kind != "conflict"],
+               {R: [visit(10, 15)]}).status == "fixed"
+
+
+def test_including_is_never_past_a_check():
+    """Whatever is included, the row is one that judging the wider run would have let through,
+    with no reason that was not shown."""
+    rng = random.Random(61)
+    ends = [None, 2025, 2026, 2027, *range(1, 32)]
+    taken = there = 0
+    for _ in range(4000):
+        first = rng.randrange(3, 24)
+        last = first + rng.randrange(3)
+        obs = [ob(d, rng.choice((Q, Q, S)), rng.choice((1, 12, 23)))
+               for d in rng.sample(range(1, 31), rng.randrange(6))]
+        obs += stay(R, first, last)
+        obs += [flown(d, hour=rng.choice((2, 13, 22)), kind=rng.choice(("fast", "conflict",
+                                                                        "conflict")))
+                for d in (first - 1, first - 2, last + 1, last + 2) if rng.random() < 0.5]
+        rows = []
+        for n in range(rng.randrange(3)):
+            a, b = rng.choice(ends), rng.choice(ends)
+            if isinstance(a, int) and isinstance(b, int) and (a > 31) is (b > 31):
+                a, b = sorted((a, b))
+            rows.append(visit(a, b, id=n))
+        when = rng.choice(({"since": None, "until": None}, {"since": day(8), "until": day(20)}))
+        runs = find_runs(obs)
+        read = {r.region: [] for r in runs} | {R: rows}
+        for run in judge(runs, obs, read, **when):
+            assert set(run.includable) <= set(run.jump)
+            if run.region == R and run.jump and run.status == "there" and (
+                    visit(run.first, run.last) not in [dataclasses.replace(
+                        v, id=7, quality=3, trip_id=None) for v in rows]):
+                there += 1
+                assert any(v.date_from in (run.first, *run.jump)
+                           and v.date_to in (run.last, *run.jump) for v in rows)
+            for k in range(1, len(run.includable) + 1):
+                for some in itertools.combinations(run.includable, k):
+                    wide = dataclasses.replace(run, first=min(run.first, *some),
+                                               last=max(run.last, *some), jump=())
+                    others = [r for r in runs if (r.region, r.days) != (run.region, run.days)]
+                    (as_wide,) = [r for r in judge([*others, wide], obs, read, **when)
+                                  if (r.region, r.days) == (run.region, run.days)]
+                    assert as_wide.status in ("offered", "held")
+                    assert set(as_wide.reasons) <= set(run.reasons)
+                    assert as_wide.status == run.status or run.status == "held"
+                    taken += 1
+    assert taken > 100 and there > 2
 
 
 def test_a_visit_is_held_against_the_wider_run():
@@ -760,7 +1034,7 @@ def test_a_wider_run_is_never_freer():
                 continue
             change = (was.status, wide.status)
             if was.status != wide.status:
-                assert wide.flight
+                assert wide.flight or (wide.jump and wide.status == "there")
                 seen.add(change)
             assert change in {(a, b) for a in ("offered", "held", "fixed", "there")
                               for b in ("held", "fixed", "there")} | {("offered", "offered")}
@@ -1155,7 +1429,8 @@ def test_conflict_is_of_its_days_and_its_region():
     assert "conflict" in flags(one(settled(ob(14, kind="conflict", state="nearest"))))
     assert "conflict" not in flags(one(settled(ob(14, Q, kind="conflict"))))
     assert "conflict" not in flags(one(settled(ob(17, R, kind="conflict"))))
-    assert "conflict" in flags(one(settled(ob(15, R, kind="conflict"))))  # a flight day
+    assert "conflict" in flags(one(settled(ob(15, R, kind="fast"), ob(15, R, kind="conflict"))))
+    assert "conflict" not in flags(one(settled(ob(15, R, kind="conflict"))))  # not a day of it
 
 
 def test_fast_near_is_within_six_hours():
@@ -1527,7 +1802,7 @@ def test_nothing_here_speaks_to_the_server_or_to_a_clock():
 def test_the_shape_of_a_run():
     assert list(Run.__dataclass_fields__) == [
         "region", "first", "last", "days", "silent", "shots", "reasons", "flags", "status",
-        "flight", "flight_photos"]
+        "flight", "flight_photos", "jump", "jump_photos", "includable"]
 
 
 # -- the list: what the owner was shown -----------------------------------------------------
@@ -1584,7 +1859,7 @@ def test_a_list_comes_back_from_disk_as_it_was(tmp_path):
 
 def test_the_hash_of_a_trip_list_is_what_it_was():
     """Answers on disk name it. Another hash for the same list is another list to them."""
-    assert small().sha256 == "79231d035a2bc9dc6e2000182c437c92c67ac088af7dbe3fe7b7d6657d26b770"
+    assert small().sha256 == "5becd7bab2a70798b652d75613b2b11d15f060420fe35a7030a351dc726bb458"
 
 
 def test_what_the_list_says_of_a_run():
@@ -1612,7 +1887,7 @@ def test_the_list_has_no_coordinates_and_no_photos(tmp_path):
     assert set(m._stored()["runs"][0]) == {
         "region", "name", "first", "last", "days", "silent", "photos", "first_photo",
         "last_photo", "start", "end", "evidence", "flags", "reasons", "status", "flight",
-        "flight_photos"}
+        "flight_photos", "jump", "jump_photos", "includable"}
 
 
 def test_the_list_grades_the_photos_as_the_dossier_does():
@@ -2021,7 +2296,7 @@ def answers_file(tmp_path, raw):
 
 
 # Aldmoor with a flight day after it, Berrow with one before it and a silent day between.
-FLOWN = [*stay(R, 1, 3), flown(4, hour=7), flown(4, hour=8), flown(6, Q, kind="conflict"),
+FLOWN = [*stay(R, 1, 3), flown(4, hour=7), flown(4, hour=8), flown(6, Q),
          *stay(Q, 8, 9), *stay(S, 10, 11), ob(40, 8)]
 RF, QF = "1:2026-05-01:2026-05-04", "2:2026-05-06:2026-05-09"
 OUT_R, OUT_Q = {"out": ["2026-05-04"]}, {"out": ["2026-05-06"]}
@@ -2032,7 +2307,7 @@ def test_the_list_has_flight_days_and_they_come_back(tmp_path):
     r, q, s = m.runs
     assert (r.id, q.id) == (RF, QF) and s.flight == s.flight_photos == ()
     assert (r.days, r.flight, r.flight_photos) == ((day(1), day(2), day(3)), (day(4),), ((2, 0),))
-    assert (q.silent, q.flight, q.flight_photos) == ((day(7),), (day(6),), ((0, 1),))
+    assert (q.silent, q.flight, q.flight_photos) == ((day(7),), (day(6),), ((1, 0),))
     assert TripList.load(m.save(tmp_path / "m.json")) == m
     back = reload(tmp_path, rehashed(put(json.loads(m.to_json()), "runs.0.flight_photos",
                                          [[1, 1]])))
@@ -2045,6 +2320,7 @@ def test_the_list_has_flight_days_and_they_come_back(tmp_path):
     ("runs.0.flight", ["2026-05-03"]), ("runs.0.flight", ["2026-05-04", "2026-05-04"]),
     ("runs.0.flight", GONE), ("runs.0.flight", "2026-05-04"),
     ("runs.0.flight_photos", []), ("runs.0.flight_photos", [[0, 0]]),
+    ("runs.0.flight_photos", [[0, 2]]),  # none at speed
     ("runs.0.flight_photos", [[2]]), ("runs.0.flight_photos", [[2, -1]]),
     ("runs.0.flight_photos", [[True, 0]]), ("runs.0.flight_photos", [[2, 0], [1, 0]]),
     ("runs.0.flight_photos", None), ("runs.0.flight_photos", GONE), ("runs.0.flight_photos", [2]),
@@ -2146,6 +2422,183 @@ def test_leaving_a_day_out_releases_nothing():
     assert kinds(r) == {"open"} and r.last == day(4)
     drafts, (held, *_) = group(runs, bs, {"runs": {r.id: {"a": "3"} | OUT_R}, "cuts": {}})
     assert drafts == [] and any("needs words" in x for x in held.reasons)
+
+
+# Aldmoor with a jump after it, and Berrow with one before it and a silent day between.
+JUMPED = [*stay(S, -6, -5), *stay(R, 1, 3), jumped(4, hour=7), jumped(4, hour=8), ob(4, S, 20),
+          jumped(6, Q), *stay(Q, 8, 9), *stay(S, 11, 12), ob(40, 8)]
+RJ, QJ = "1:2026-05-01:2026-05-03", "2:2026-05-08:2026-05-09"
+IN_R, IN_Q = {"in": ["2026-05-04"]}, {"in": ["2026-05-06"]}
+
+
+def jump_list(**kw):
+    m = listed(JUMPED, **kw)
+    (r,), (q,) = ([x for x in m.runs if x.region == n] for n in (R, Q))
+    return m, r, q
+
+
+def test_the_list_has_the_days_beside_a_jump_and_they_come_back(tmp_path):
+    m, r, q = jump_list()
+    assert (r.id, q.id) == (RJ, QJ)
+    assert (r.jump, r.jump_photos, r.includable) == ((day(4),), (2,), (day(4),))
+    assert (q.jump, q.jump_photos, q.includable, q.silent) == ((day(6),), (1,), (day(6),), ())
+    assert TripList.load(m.save(tmp_path / "m.json")) == m
+    n = m.runs.index(r)
+    for path, value in (("jump_photos", [1]), ("includable", []),
+                        ("jump", ["2026-05-05"])):
+        raw = put(json.loads(m.to_json()), f"runs.{n}.{path}", value)
+        if path == "jump":
+            raw = put(raw, f"runs.{n}.includable", value)
+        assert reload(tmp_path, rehashed(raw)).sha256 != m.sha256
+
+
+@pytest.mark.parametrize("change", [
+    {"jump": ["2026-05-02"], "includable": []}, {"jump": ["2026-05-03"], "includable": []},
+    {"jump": []}, {"jump": ["2026-05-03"]}, {"jump": ["2026-05-02"]}, {"jump": None},
+    {"jump": ["2026-05-06"]}, {"jump": GONE}, {"jump": "2026-05-04"},
+    {"jump": ["2026-05-04", "2026-05-04"], "jump_photos": [1, 1]},
+    {"jump": ["2026-05-04", "2026-05-05"], "jump_photos": [1, 1]},
+    {"jump": ["2026-05-04", "2026-04-30"], "jump_photos": [1, 1]},
+    {"jump_photos": []}, {"jump_photos": [0]}, {"jump_photos": [1, 1]}, {"jump_photos": [True]},
+    {"jump_photos": [[2, 0]]}, {"jump_photos": None}, {"jump_photos": GONE},
+    {"includable": ["2026-05-05"]}, {"includable": ["2026-05-03"]}, {"includable": None},
+    {"includable": GONE}, {"includable": ["2026-05-04", "2026-05-04"]},
+    {"status": "fixed", "reasons": ["clock: x"]},                 # takes no quality
+    {"flight": ["2026-05-04"], "flight_photos": [[1, 0]], "last": "2026-05-04",
+     "jump": ["2026-05-05"], "includable": ["2026-05-05"]},       # one at each end
+], ids=str)
+def test_days_beside_a_jump_that_do_not_fit_are_refused(tmp_path, change):
+    m, r, _ = jump_list()
+    raw = json.loads(m.to_json())
+    for name, value in change.items():
+        raw = put(raw, f"runs.{m.runs.index(r)}.{name}", value)
+    if "last" in change or "status" in change:
+        raw["boundaries"] = [b | {k: v.replace(RJ, f"1:2026-05-01:{change.get('last', day(3))}")
+                                  for k, v in b.items() if k in ("before", "after")}
+                             for b in raw["boundaries"]]
+    with pytest.raises(PlanInvalid, match=r"m\.json"):
+        reload(tmp_path, rehashed(raw))
+
+
+@pytest.mark.parametrize("params", [{"flight_days": False}, {"gap_days": 1}])
+def test_days_beside_a_jump_fit_the_rule_of_the_list(tmp_path, params):
+    raw = json.loads(jump_list()[0].to_json())
+    raw["params"] |= params
+    with pytest.raises(PlanInvalid, match=r"too far|says there are none"):
+        reload(tmp_path, rehashed(raw))
+
+
+def test_two_runs_of_one_region_that_can_share_a_day_are_refused(tmp_path):
+    """Their rows could be in two trips of one plan, and on one day."""
+    obs = [*stay(S, -6, -5), *stay(R, 1, 3), jumped(4), *stay(S, 5, 6), *stay(R, 8, 9),
+           *stay(S, 11, 12), ob(40, 8)]
+    m = listed(obs)
+    n = [r.region for r in m.runs].index(R)
+    late = max(i for i, r in enumerate(m.runs) if r.region == R)
+    raw = json.loads(m.to_json())
+    assert raw["runs"][n]["includable"] == ["2026-05-04"] and late != n
+    for shared in ("2026-05-04", "2026-05-03"):
+        bad = put(put(put(raw, f"runs.{late}.jump", [shared]), f"runs.{late}.jump_photos", [1]),
+                  f"runs.{late}.includable", [shared])
+        bad["params"]["gap_days"] = 9
+        for b in bad["boundaries"]:
+            b["suggestions"] = [s for s in b["suggestions"] if kind_of(s) != "gap"]
+        with pytest.raises(PlanInvalid, match="share a day"):
+            reload(tmp_path, rehashed(bad))
+
+
+@pytest.mark.parametrize("more", [{"a": "3"}, {}, {"a": "no"}, {"a": "?"}])
+def test_a_day_beside_a_jump_can_be_included_where_a_quality_is_taken(tmp_path, more):
+    m, _, _ = jump_list()
+    path = answers_file(tmp_path, given(m, {RJ: IN_R | more}))
+    assert load_answers(path, m)["runs"] == {RJ: IN_R | more}
+
+
+@pytest.mark.parametrize("days", [
+    [], ["2026-05-03"], ["2026-05-05"], ["2026-05-06"], ["2026-05-04", "2026-05-04"],
+    "2026-05-04", None, {}, [20260504], ["2026-5-4"], [None], True, ["2026-05-04", "2026-05-05"],
+    [["2026-05-04"]], {"2026-05-04": True},
+], ids=str)
+def test_only_the_days_that_the_list_offers_can_be_included(tmp_path, days):
+    m, _, _ = jump_list()
+    with pytest.raises(PlanInvalid, match="include"):
+        load_answers(answers_file(tmp_path, given(m, {RJ: {"a": "3", "in": days}})), m)
+    with pytest.raises(PlanInvalid, match="include"):
+        group(m.runs, m.boundaries, {"runs": {RJ: {"a": "3", "in": days}}, "cuts": {}})
+
+
+def test_a_day_that_is_shown_and_not_offered_cannot_be_included(tmp_path):
+    for visits, until in (({R: [visit(1, 4)]}, 30), ({R: [visit(2, 2)]}, 30),
+                          ({R: [visit(4, 4)]}, 30), ({}, 3)):
+        m, r, _ = jump_list(visits=visits, until=until) if until == 30 else (
+            m3 := listed(JUMPED, until=3), next(x for x in m3.runs if x.region == R), None)
+        assert r.jump == (day(4),) and r.includable == ()
+        with pytest.raises(PlanInvalid):
+            load_answers(answers_file(tmp_path, given(m, {RJ: IN_R})), m)
+        with pytest.raises(PlanInvalid):
+            group(m.runs, m.boundaries, {"runs": {RJ: IN_R}, "cuts": {}})
+
+
+def test_group_takes_no_inclusion_where_no_quality_is_taken():
+    runs, bs = cuts(JUMPED)
+    fixed = [dataclasses.replace(r, status="fixed", reasons=("clock: x",)) for r in runs]
+    with pytest.raises(PlanInvalid, match="include"):
+        group(fixed, bs, {"runs": {RJ: IN_R}, "cuts": {}})
+
+
+def test_a_flight_day_is_not_included_nor_a_jump_left_out(tmp_path):
+    for m, row in ((listed(FLOWN), {RF: {"in": ["2026-05-04"]}}),
+                   (jump_list()[0], {RJ: {"out": ["2026-05-04"]}})):
+        with pytest.raises(PlanInvalid):
+            load_answers(answers_file(tmp_path, given(m, row)), m)
+
+
+def test_an_included_day_is_in_the_row_and_the_header():
+    m, _, _ = jump_list()
+    cut = {b.id: "cut" for b in m.boundaries}
+
+    def rows(r=None, q=None):
+        ans = {x.id: {"a": "no"} for x in m.runs if x.status in ("offered", "held", "fixed")}
+        ans |= {RJ: {"a": "3"} | (r or {}), QJ: {"a": "3"} | (q or {})}
+        drafts, _ = group(m.runs, m.boundaries, {"runs": ans, "cuts": cut})
+        return [([(x.first.day, x.last.day) for x in d.rows], d.date_from.day, d.date_to.day)
+                for d in drafts]
+    assert rows() == [([(1, 3)], 1, 3), ([(8, 9)], 8, 9)]
+    assert rows(r=IN_R) == [([(1, 4)], 1, 4), ([(8, 9)], 8, 9)]
+    assert rows(q=IN_Q) == [([(1, 3)], 1, 3), ([(6, 9)], 6, 9)]  # with the silent day
+
+
+def test_a_day_can_be_left_out_at_one_end_and_included_at_the_other(tmp_path):
+    obs = [*stay(S, -6, -5), flown(0), *JUMPED[4:]]
+    m = listed(obs)
+    (r,) = [x for x in m.runs if x.region == R]
+    assert (r.flight, r.includable) == ((day(0),), (day(4),))
+    cut = {b.id: "cut" for b in m.boundaries if not b.forced}
+    for row, want in (({}, (0, 3)), (IN_R, (0, 4)), ({"out": [str(day(0))]}, (1, 3)),
+                      (IN_R | {"out": [str(day(0))]}, (1, 4))):
+        path = answers_file(tmp_path, given(m, {r.id: {"a": "3"} | row}, cut))
+        ((d,), _) = group(m.runs, m.boundaries, load_answers(path, m))
+        assert (d.date_from, d.date_to) == (day(want[0]), day(want[1]))
+
+
+def test_including_a_day_releases_nothing():
+    obs = [*stay(S, -6, -5), *stay(R, 1, 3), jumped(4)]
+    runs, bs = cuts(obs)
+    r = runs[-1]
+    assert kinds(r) == {"open"} and r.includable == (day(4),)
+    _, held = group(runs, bs, {"runs": {r.id: {"a": "3"} | IN_R}, "cuts": {}})
+    assert any("needs words" in x for n in held for x in n.reasons)
+    said = {"runs": {r.id: {"a": "3", "words": "home on the 5th"} | IN_R},
+            "cuts": {b.id: "cut" for b in bs}}
+    ((d,), _) = group(runs, bs, said)
+    assert (d.date_from, d.date_to) == (day(1), day(4))
+
+
+def test_trips_over_the_included_days_are_shown_too():
+    for d in ("2026-05-06", "2026-05-07"):
+        before = header(d, d)
+        assert [t["id"] for t in jump_list(trips=[before])[0].trips] == [before["id"]]
+        assert listed([o for o in JUMPED if o.shot.kind != "conflict"], trips=[before]).trips == []
 
 
 R_ID, Q_ID, S_ID = "1:2026-05-01:2026-05-03", "2:2026-05-03:2026-05-05", "3:2026-05-06:2026-05-08"
@@ -2321,6 +2774,10 @@ RULES = [
     (FLOWN, {R: "3", Q: "3", S: "3"}, {(R, Q): "same"}, {}, {}, 30, {R: OUT_R, Q: OUT_Q}),
     (FLOWN, {R: "3", Q: "3", S: "3"}, {(R, Q): "cut"}, {}, {}, 30, {Q: OUT_Q}),
     (FLOWN, {R: "no", Q: "?", S: "3"}, {(R, Q): "cut"}, {}, {}, 30, {R: OUT_R, Q: OUT_Q}),
+    (JUMPED, {R: "3", Q: "3"}, {}, {}, {}, 30),
+    (JUMPED, {R: "3", Q: "3", S: "no"}, {(R, S): "cut", (S, Q): "cut"}, {}, {}, 30,
+     {R: IN_R, Q: IN_Q}),
+    (JUMPED, {R: "3", Q: "3", S: "no"}, {(R, S): "same", (S, Q): "same"}, {}, {}, 30, {Q: IN_Q}),
 ]
 
 
@@ -2359,6 +2816,7 @@ def any_list(rng):
         a, b = (dt.datetime.combine(d, dt.time(6 + 12 * e, n)) for e, d in enumerate((first, last)))
         region, reasons = rng.choice((R, R, Q, S, 4)), rng.choice(REASONS)
         step = [rng.choice((0, 0, 1, 2)) for _ in range(2)]
+        beside = [rng.choice((0, 0, 1, 2)) for _ in range(2)]
         wide = first - dt.timedelta(step[0]), last + dt.timedelta(step[1])
         flight = tuple(d for d, n in zip(wide, step, strict=True) if n)
         silent = (*([first - dt.timedelta(1)] * (step[0] == 2)),
@@ -2367,7 +2825,18 @@ def any_list(rng):
             region, NAMES[region], *wide, tuple(sorted({first, last})), silent, 4,
             PhotoTime(a, 0), PhotoTime(b, 0), a.replace(tzinfo=UTC), b.replace(tzinfo=UTC),
             "thin", ("evidence thin",), reasons, status_of(reasons), flight,
-            tuple(rng.choice(((1, 0), (0, 2), (1, 1))) for _ in flight)))
+            tuple(rng.choice(((1, 0), (2, 0), (1, 1))) for _ in flight)))
+        jump = tuple(d for d, n, s in ((wide[0] - dt.timedelta(beside[0]), beside[0], step[0]),
+                                       (wide[1] + dt.timedelta(beside[1]), beside[1], step[1]))
+                     if n and not s)
+        status = status_of(reasons)
+        runs[-1] = dataclasses.replace(
+            runs[-1], jump=jump, jump_photos=tuple(1 for _ in jump), includable=tuple(
+                d for d in jump if status in ("offered", "held") and rng.random() < 0.8))
+        at = lambda r: (min(r.first, *r.jump, r.last), max(r.last, *r.jump, r.first))  # noqa: E731
+        if any(r.region == region and at(r)[0] <= at(runs[-1])[1] and at(runs[-1])[0] <= at(r)[1]
+               for r in runs[:-1]):
+            runs.pop()  # two runs of one region share no day
     if len({r.id for r in runs}) < len(runs):
         return any_list(rng)
     bs = []
@@ -2391,6 +2860,8 @@ def any_list(rng):
         out = [str(d) for d in r.flight if rng.random() < 0.4]
         if out and r.status in ("offered", "held"):
             row["out"] = out
+        if within := [str(d) for d in r.includable if rng.random() < 0.6]:
+            row["in"] = within
         if row:
             ans[r.id] = row
     cut = {b.id: c for b in bs if (c := rng.choice((None, "cut", "same", "same")))}
@@ -2551,7 +3022,7 @@ def test_the_page_groups_whatever_the_answers_are(tmp_path):
     got = run(tmp_path, small(), GROUP, cases=[[page_data(m), a] for m, a in cases])
     for (m, ans), page in zip(cases, got, strict=True):
         assert page == as_text(*group(m.runs, m.boundaries, ans))
-    assert sum(len(g["trips"]) for g in got) > 200 and sum(len(g["notMade"]) for g in got) > 200
+    assert sum(len(g["trips"]) for g in got) > 150 and sum(len(g["notMade"]) for g in got) > 200
     assert max(len(t["rows"]) for g in got for t in g["trips"]) > 2
 
 
@@ -3291,8 +3762,8 @@ def test_a_flight_day_is_said_and_can_be_left_out_and_taken_back(tmp_path):
     """)
     assert got[0] == ["The last day is a flight day: 2026-05-04, 2 photos taken at speed in the "
                       "region"]
-    assert got[1] == ["The first day is a flight day: 2026-05-06, 1 photo in the region beside an "
-                      "impossible jump, as when a phone keeps its position through a flight"]
+    assert got[1] == ["The first day is a flight day: 2026-05-06, 1 photo taken at speed in the "
+                      "region"]
     assert got[2] == 0 and got[3] == [["Leave this day out", "false"]] and got[4] == 0
     (key,) = stored(m, f"out:{RF}:2026-05-04")
     pressed, kept, (trip,) = got[5]
@@ -3306,6 +3777,88 @@ def test_a_flight_day_is_said_and_can_be_left_out_and_taken_back(tmp_path):
     assert got[8] == got[5]
     for text, want in ((got[9], OUT_R | {"a": "3"}), (got[10], {"a": "3"})):
         assert load_answers(answers_file(tmp_path, text), m)["runs"] == {RF: want}
+
+
+@needs_node
+def test_a_day_beside_a_jump_is_said_and_can_be_included_and_taken_back(tmp_path):
+    m, _, _ = jump_list()
+    got = run(tmp_path, m, """
+      const p = open();
+      const r = p.run("Aldmoor"), q = p.run("Berrow");
+      const text = (box) => box.cls("flight").map((f) => f.children[0].textContent);
+      const out = [text(r), text(q), r.cls("flight")[0].all((e) => e.tag === "button").map((b) => [
+        b.textContent, b.getAttribute("aria-pressed")]), p.storage.held.size];
+      const state = () => [p.pressed(r), Object.fromEntries(p.storage.held),
+                           p.byId.preview.cls("trip").map((t) => t.textContent)];
+      for (const b of p.betweens()) {
+        if (p.buttons(b).length) p.press(b, "A new trip starts here");
+      }
+      p.press(r, "3 good visit");
+      p.press(q, "3 good visit");
+      out.push(state());
+      p.press(r, "Include this day");
+      p.press(q, "Include this day");
+      out.push(state());
+      p.byId.download.click();
+      out.push(p.pressed(open({ storage: p.storage }).run("Aldmoor")).length, p.blobs[0].text);
+      p.press(r, "Include this day");
+      p.press(q, "Include this day");
+      out.push(state());
+      p.byId.download.click();
+      return [...out, p.blobs[1].text, p.byId.about.textContent];
+    """)
+    assert got[0] == ["A day after it, 2026-05-04, has 2 photos in the region beside an impossible "
+                      "jump, as when a phone keeps its position through a flight. It is not in "
+                      "the dates unless you include it."]
+    assert got[1] == ["A day before it, 2026-05-06, has 1 photo in the region beside an impossible "
+                      "jump, as when a phone keeps its position through a flight. It is not in "
+                      "the dates unless you include it."]
+    assert got[2] == [["Include this day", "false"]] and got[3] == 0
+    key, other = stored(m, f"in:{RJ}:2026-05-04", f"in:{QJ}:2026-05-06")
+    _, kept, trips_ = got[4]
+    assert key not in kept and "2026-05-01 to 2026-05-03: 3 good visit" in trips_[0]
+    pressed, kept, trips_ = got[5]
+    assert "Include this day" in pressed and kept[key] == kept[other] == "in"
+    assert "Trip: 2026-05-01 to 2026-05-04" in trips_[0]
+    assert "Aldmoor (1), 2026-05-01 to 2026-05-04: 3 good visit" in trips_[0]
+    assert "Berrow (2), 2026-05-06 to 2026-05-09: 3 good visit" in trips_[1]
+    assert got[6] == 2 and got[8] == got[4]
+    for text, want in ((got[7], {RJ: IN_R | {"a": "3"}, QJ: IN_Q | {"a": "3"}}),
+                       (got[9], {RJ: {"a": "3"}, QJ: {"a": "3"}})):
+        assert load_answers(answers_file(tmp_path, text), m)["runs"] == want
+    assert "A day with photos beside a jump only is out unless you include it" in got[10]
+
+
+@needs_node
+@pytest.mark.parametrize("visits", [{R: [visit(1, 4)]}, {R: [visit(2, 2)]}, {R: [visit(4, 4)]}],
+                         ids=["there", "overlap", "continuation"])
+def test_a_day_that_cannot_be_included_is_said_and_has_no_button(tmp_path, visits):
+    m, _, _ = jump_list(visits=visits)
+    got = run(tmp_path, m, """
+      const s = new Storage();
+      s.setItem(key, "in");
+      const p = open({ storage: s });
+      const r = p.run("Aldmoor");
+      p.byId.show.click();
+      return [r.cls("flight")[0].textContent, p.buttons(r), p.byId.text.value];
+    """, key=stored(m, f"in:{RJ}:2026-05-04")[0])
+    assert got[0].startswith("A day after it, 2026-05-04, has 2 photos")
+    assert got[0].endswith("It is not in the dates.") and "Include this day" not in got[1]
+    assert json.loads(got[2])["runs"] == {}
+
+
+@needs_node
+@pytest.mark.parametrize("junk", ["out", "", "IN", "2026-05-04"])
+def test_a_stored_inclusion_that_is_none_is_not_used(tmp_path, junk):
+    m, _, _ = jump_list()
+    got = run(tmp_path, m, """
+      const s = new Storage();
+      s.setItem(key, junk);
+      const p = open({ storage: s });
+      p.byId.show.click();
+      return [JSON.parse(p.byId.text.value).runs, p.byId.unused.hidden];
+    """, key=stored(m, f"in:{RJ}:2026-05-04")[0], junk=junk)
+    assert got == [{}, False]
 
 
 @needs_node
