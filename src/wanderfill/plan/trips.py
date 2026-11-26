@@ -76,9 +76,15 @@ class Home:
     last: dt.date | None = None
 
     def holds(self, run: AnyRun) -> bool:
-        """Whether every day of the run is in it."""
-        return (run.region == self.region and (self.first is None or run.first >= self.first)
-                and (self.last is None or run.last <= self.last))
+        """Whether every day with proof of the run is in it.
+
+        Its flight days and the days beside a jump are left out of this on purpose: they only
+        ever add days around these, so a stay that is not home by its own days can make no
+        row of a trip that is all inside the range, whatever is left out or included.
+        """
+        return (run.region == self.region
+                and (self.first is None or run.days[0] >= self.first)
+                and (self.last is None or run.days[-1] <= self.last))
 
     def touches(self, run: AnyRun) -> bool:
         return (run.region == self.region and (self.first is None or run.last >= self.first)
@@ -733,7 +739,8 @@ def judge(
     offered or held, for no reason that the run does not have already. The dates, the reasons
     and the status stay the run's own, so that to include a day releases nothing.
 
-    A run whose days are all inside a range of ``home``, which only the owner gives, is
+    A run whose days with proof are all inside a range of ``home`` (:meth:`Home.holds`: its
+    flight days and the days beside a jump are not looked at), which only the owner gives, is
     ``home`` and has no other reason: it takes no answer and is in no trip, and no day beside
     it can be included. One that is partly inside such a range is judged as any other, with the
     flag ``home part``, which holds nothing.

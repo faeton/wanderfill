@@ -394,10 +394,13 @@ const Trips = (() => {
 
   /* The answers as the file has them, in the order of the list. Words that cannot be taken are
      not in it: the file is not given out while there are any. */
+  /* With a focus, only what is shown is given: `read_answers` refuses the rest. */
   function given(data, store) {
     const runs = {};
     const cuts = {};
-    for (const run of data.runs) {
+    const view = inView(data);
+    for (const [n, run] of data.runs.entries()) {
+      if (view && !view.has(n)) continue;
       const row = {};
       const a = store.get("run:" + idOf(run));
       const words = store.get("words:" + idOf(run));
@@ -409,7 +412,8 @@ const Trips = (() => {
       if (within.length) row.in = within;
       if (Object.keys(row).length) runs[idOf(run)] = row;
     }
-    for (const edge of data.boundaries) {
+    for (const [n, edge] of data.boundaries.entries()) {
+      if (view && !(view.has(n) && view.has(n + 1))) continue;
       const cut = store.get("cut:" + cutOf(edge));
       if (cut) cuts[cutOf(edge)] = cut;
     }
@@ -423,6 +427,7 @@ const Trips = (() => {
   }
 
   const problems = (data, store) => data.runs
+    .filter((run, n) => !inView(data) || inView(data).has(n))
     .map((run) => [run, problemOf(data, store, run)])
     .filter(([, why]) => why)
     .map(([run, why]) => runTitle(data, run) + ": " + why);

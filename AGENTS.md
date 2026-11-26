@@ -329,7 +329,8 @@ and let them choose. Record the chosen parameters in the plan.
 That is `segment` and `wanderfill sweep`, on a day-level track. For photos use
 `wanderfill trips review`, next. It asks for no home by default and has no cap: it shows
 the stays, suggests where a trip may end, and the owner answers. `--home ID[:FROM[:TO]]` is
-the owner's to give: a stay with all its days inside a range they gave takes no answer and
+the owner's to give: a stay whose days on the ground are all inside a range they gave (a
+flight day beside it does not count) takes no answer and
 ends a trip and starts the next. The region and the dates are their words, never read from
 the photos or from `homebase` (the command prints that one as a hint and applies nothing).
 A stay partly inside a range is asked about as any other, and named.

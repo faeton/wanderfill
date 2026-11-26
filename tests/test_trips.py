@@ -4603,3 +4603,67 @@ def test_a_focused_page_shows_the_named_trips_whole_and_nothing_else(tmp_path):
     m = listed(HOMELY, home=homes((S, None, None)), focus=[Q, S])
     shown, *_ = run(tmp_path, m, read)
     assert shown == ["Aldmoor", "Berrow"]
+
+
+def test_a_focused_list_takes_no_answer_to_what_it_does_not_show(tmp_path):
+    """Codex: with focus on Dunvale, answers to Aldmoor and Berrow made a trip of their own."""
+    m = listed(visits=KNOWN, focus=[4])
+    runs, cuts_ = trip_list.in_view(m)
+    assert [r.region for r in runs] == [4] and cuts_ == []
+    head = {"format": 1, "account": 1, "manifest": m.sha256}
+    four = next(r.id for r in m.runs if r.region == 4)
+    for runs_, cut in (({R_ID: {"a": "3"}}, {}), ({Q_ID: {"a": "3", "words": "mine"}}, {}),
+                       ({}, {CUT_RQ: "same"})):
+        with pytest.raises(PlanInvalid, match="not shown on this list, which is focused"):
+            load_answers(answers_file(tmp_path, head | {"runs": runs_, "cuts": cut}), m)
+    ok = load_answers(answers_file(tmp_path, head | {"runs": {four: {"a": "3"}}, "cuts": {}}), m)
+    assert ok == {"runs": {four: {"a": "3"}}, "cuts": {}}
+    whole = listed(visits=KNOWN)  # and without a focus, all of it is answered as before
+    assert trip_list.in_view(whole) == (whole.runs, whole.boundaries)
+
+
+@needs_node
+def test_a_focused_page_exports_only_what_it_shows(tmp_path):
+    m = listed(visits=KNOWN, focus=[4])
+    four = next(r.id for r in m.runs if r.region == 4)
+    got = run(tmp_path, m, """
+      const storage = new Storage();
+      for (const [k, v] of stored) storage.held.set(k, v);
+      const p = open({storage});
+      p.press(p.run("Dunvale"), "3 – good visit");
+      p.byId.download.click();
+      return [p.blobs[0].text, p.byId.preview.textContent, p.byId.counts.textContent];
+    """, stored=[[k, v] for k, v in zip(
+        stored(m, f"run:{R_ID}", f"run:{Q_ID}", f"words:{Q_ID}", f"cut:{CUT_RQ}"),
+        ["3", "3", "mine", "same"], strict=True)])
+    text, preview, counts = got
+    assert json.loads(text)["runs"] == {four: {"a": "3"}} and json.loads(text)["cuts"] == {}
+    assert load_answers(answers_file(tmp_path, text), m)["runs"] == {four: {"a": "3"}}
+    assert "Aldmoor" not in preview and "1 trip with 1 region" in counts
+
+
+@pytest.mark.parametrize("ranges, home", [
+    ([(R, None, 3)], True),     # Codex: ground days 1-3 at home, a flight day on the 4th
+    ([(R, 1, 3)], True), ([(R, None, 4)], True),
+    ([(R, 2, None)], False), ([(R, None, 2)], False),
+])
+def test_home_is_judged_by_the_days_with_proof_and_no_row_can_land_inside_it(ranges, home):
+    for obs, extra in ((FLOWN, "out"), (JUMPED, "in")):
+        runs, bs = cuts(obs, until=day(30), home=homes(*ranges))
+        (r,) = [x for x in runs if x.region == R]
+        assert (r.status == "home") is home, obs
+        assert (trips.HOME_PART in r.flags) is not home
+        if home:
+            assert r.includable == ()
+            with pytest.raises(PlanInvalid, match="takes no quality"):
+                group(runs, bs, {"runs": {r.id: {"a": "3"}}, "cuts": {}})
+            continue
+        # Not home by its own days: no flight day left out, nor day included, puts a row inside.
+        days = {"out": list(map(str, r.flight)), "in": list(map(str, r.includable))}[extra]
+        row = {"a": "3", **({extra: days} if days else {})}
+        every = {"runs": {x.id: {"a": "3"} for x in runs if x.status == "offered"} | {r.id: row},
+                 "cuts": {b.id: "cut" for b in bs if not b.forced}}
+        drafts, _ = group(runs, bs, every)
+        (mine,) = [w for d in drafts for w in d.rows if w.run.id == r.id]
+        assert not any(h.holds(dataclasses.replace(r, days=(mine.first, mine.last)))
+                       for h in homes(*ranges))

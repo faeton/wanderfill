@@ -17,7 +17,7 @@ import datetime as dt
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from importlib.resources import files
 from itertools import pairwise
@@ -59,6 +59,7 @@ from .trips import (
     _says,
     _some_of,
     evidence_grade,
+    in_focus,
     kind_of,
     status_of,
 )
@@ -896,19 +897,40 @@ def read_answers(path: str | Path, trip_list: TripList) -> tuple[Answers, str]:
         if raw["manifest"] != trip_list.sha256:
             raise ValueError("these are answers to another list than this one; open the page that "
                              "was made with this list, and answer that")
-        runs = _read_each(raw["runs"], "runs", {r.id: r for r in trip_list.runs}, _run_answer)
-        cuts = _read_each(raw["cuts"], "cuts", {b.id: b for b in trip_list.boundaries}, _cut)
+        runs_in, cuts_in = in_view(trip_list)
+        runs = _read_each(raw["runs"], "runs", {r.id: r for r in runs_in}, _run_answer,
+                          hidden={r.id for r in trip_list.runs})
+        cuts = _read_each(raw["cuts"], "cuts", {b.id: b for b in cuts_in}, _cut,
+                          hidden={b.id for b in trip_list.boundaries})
     except ValueError as exc:
         raise PlanInvalid(f"{path}: {exc}") from None
     return {"runs": runs, "cuts": cuts}, hashlib.sha256(data).hexdigest()
 
 
+def in_view(trip_list: TripList) -> tuple[list[ListedRun], list[Boundary]]:
+    """The runs and the boundaries that the page shows, and so can answer.
+
+    All of them, or with a focus those of :func:`~wanderfill.plan.trips.in_focus`, and the
+    boundaries with a run shown on both sides.
+    """
+    focus = trip_list.params.get("focus")
+    if not focus:
+        return list(trip_list.runs), list(trip_list.boundaries)
+    shown = {n for part in in_focus(trip_list.runs, trip_list.boundaries, focus) for n in part}
+    return ([r for n, r in enumerate(trip_list.runs) if n in shown],
+            [b for n, b in enumerate(trip_list.boundaries) if n in shown and n + 1 in shown])
+
+
 def _read_each(
-    raw: object, what: str, known: Mapping[str, Any], read: Callable[[Any, object, str], Any]
+    raw: object, what: str, known: Mapping[str, Any], read: Callable[[Any, object, str], Any],
+    hidden: Collection[str] = (),
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{what} must be an object, not {_r(raw)}")
     for key in raw:
+        if key in hidden and key not in known:
+            raise ValueError(f"{what}: {_r(key)} is not shown on this list, which is focused on "
+                             "the regions you named, so it takes no answer")
         if key not in known:
             raise ValueError(f"{what}: {_r(key)} is not on this list")
     return {key: read(known[key], value, f"{what}: {key}") for key, value in raw.items()}
@@ -957,6 +979,7 @@ __all__ = [
     "build_list",
     "home_ranges",
     "homes_of",
+    "in_view",
     "left_out",
     "load_answers",
     "read_answers",

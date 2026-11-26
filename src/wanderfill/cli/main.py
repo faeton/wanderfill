@@ -2464,7 +2464,8 @@ def _trips_parser(sub) -> None:
     r.add_argument("--home", type=_homes_arg, action="extend", metavar="ID[:FROM[:TO]]",
                    help="a region that was your home, from FROM to TO (YYYY-MM-DD, inclusive; "
                         "either may be left out), and may be given again. A stay with all its "
-                        "days in it takes no answer, and ends a trip and starts the next. Only "
+                        "days on the ground in it takes no answer, and ends a trip and starts "
+                        "the next; a flight day beside it does not count. Only "
                         "you say this: it is never read from your profile")
     t = r.add_mutually_exclusive_group(required=True)
     t.add_argument("--track", action="extend", nargs="+", metavar="FILE",
