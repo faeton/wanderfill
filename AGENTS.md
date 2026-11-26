@@ -382,8 +382,8 @@ What holds a run, and what releases it:
 | reason | what it means | released by |
 |---|---|---|
 | `open` | no photo on a later day shows them in another region, so the stay may not be over | their words, or a later review |
-| `brief` | one photo, or all within 15 minutes, or all at one coordinate | their words |
-| `layover?` | under 24 hours, with a fast photo before and after | their words |
+| `brief` | one photo, or all within 15 minutes, or all at one coordinate | their words, or their answer 1 (transit) |
+| `layover?` | under 24 hours, with a fast photo before and after | their words, or their answer 1 (transit) |
 | `undated` | a visit of the region with no date, or only a year, may be this one | their words, that say why it is another visit |
 | `overlap` | it shares a day with a visit that is there | nothing |
 | `continuation` | nothing shows that they left between it and a visit or another run | nothing |
@@ -401,7 +401,10 @@ say. What nothing releases goes on by hand, or waits.
 over, and not because the trip would look better with it: a stay that is extended later
 leaves its trip's header behind (above). A layover is theirs to judge: some count one,
 most do not. Do not cut or join anything for them either: where a new trip starts is
-asked on the page.
+asked on the page. A boundary they leave blank is the same trip, suggestion or not: the
+owner said so on 2026-11-26. Their answer 1 (transit) releases a run held only for
+`brief` or `layover?` without words, also their rule of that day; any other reason with
+it, `undated` or `open`, still needs words, and so does any other quality.
 
 **A region is in a trip once.** Two stays in one region with other regions between them are
 two visits. A journey through one hub (A, B, A) is not made until the

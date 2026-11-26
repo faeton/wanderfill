@@ -424,8 +424,8 @@ def test_photos_at_the_airport_on_the_last_day_are_a_flight_day(site, capsys):
     assert status(m)[1] == ("offered", []) and r.flight_photos == ((2, 0),)
     assert m.params["flight_days"] is True
     assert "1 run with a flight day at an end" in capsys.readouterr().out
-    assert do_plan({1: "3", 2: "3"}) == 0
-    assert "not answered whether" in capsys.readouterr().out  # the flight between them
+    assert do_plan({1: "3", 2: "3"}, "--plan", "blank.json") == 0  # not answered: one trip
+    assert Plan.load("blank.json").ops[0].regions[0]["day_to"] == 5
     assert do_plan({1: "3", 2: "3"}, cuts={(1, 2): "same"}) == 0
     plan = Plan.load("plan-trips.json")
     (op,) = plan.ops
@@ -1423,8 +1423,8 @@ def test_the_answers_decide_the_trips(site, capsys):
            *days(HOME, 19, 20))
     m, _ = listed()
     assert [bool(b.suggestions) for b in m.boundaries] == [False, True, True]
-    assert do_plan({1: "3", 2: "3", 3: "3"}) == 0  # neither edge is answered
-    assert "not answered whether" in capsys.readouterr().out
+    assert do_plan({1: "3", 2: "3", 3: "3"}, "--plan", "blank.json") == 0  # one trip
+    assert rows(Plan.load("blank.json")) == [[(1, 3), (2, 3), (3, 3)]]
     both = {(2, 3): "cut", (3, HOME): "cut"}
     assert do_plan({1: "3", 2: "3", 3: "3"}, cuts=both) == 0
     assert rows(Plan.load("plan-trips.json")) == [[(1, 3), (2, 3)], [(3, 3)]]

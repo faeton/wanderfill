@@ -450,9 +450,6 @@ const Trips = (() => {
       const said = edge ? answers.cuts[cutOf(edge)] : undefined;
       if (edge === null || edge.forced || openEnd || said === "cut") {
         stretches.push({ members: [], holds: [] });
-      } else if (edge.suggestions.length && said === undefined) {
-        stretches[stretches.length - 1].holds.push("between " + edge.before + " and " +
-          edge.after + " it is not answered whether a new trip starts");
       }
       stretches[stretches.length - 1].members.push(run);
     });
@@ -468,7 +465,8 @@ const Trips = (() => {
           holds.push(idOf(run) + " is not answered");
         } else if (answer === "?") {
           holds.push(idOf(run) + " is answered with a question mark");
-        } else if (run.status === "held" && !says(data, wordsOf(run))) {
+        } else if (run.status === "held" && !says(data, wordsOf(run)) &&
+            !(answer === ONE && oneWillDo(run))) {
           holds.push(idOf(run) + " needs words of yours");
         } else {
           /* Without a flight day, the silent days between it and the rest are not in it. */
@@ -573,15 +571,25 @@ const Trips = (() => {
     undated: "it may be the visit on your profile",
   };
 
-  function wordsLabel(run) {
+  /* The answer "1" and the reasons it answers by itself, as in trips.py. */
+  const ONE = "1";
+  const SHORT_ONLY = ["brief", "layover?"];
+  const oneWillDo = (run) => run.reasons.every((r) => SHORT_ONLY.includes(kindOf(r)));
+
+  function wordsLabel(data, run) {
     const kinds = [...new Set(run.reasons.map(kindOf))];
+    if (oneWillDo(run)) {
+      return 'Answer "' + answerWord(data, ONE) + '" and nothing more is needed. For any other ' +
+        "answer you also need your own words: write only what you remember yourself. They are " +
+        "needed because " + kinds.map((k) => RELEASES[k]).join("; ") + ".";
+    }
     return "Needed: your own words. Write only what you remember yourself. Without them this " +
       "stretch goes into no trip. They are needed because " +
       kinds.map((k) => RELEASES[k]).join("; ") + ".";
   }
 
   const WHY_NOT = {
-    held: "This stretch needs your own words, as well as an answer.",
+    held: "Photos alone do not show this visit. See below what it needs.",
     fixed: "This stretch cannot go into a trip.",
     there: "This stretch is on your profile already. Nothing to answer.",
     home: "You said this region was home on these days. Nothing to answer.",
@@ -715,12 +723,11 @@ const Trips = (() => {
       parts.join(", ") + "). ";
   }
 
-  /* How many questions in a fold are not answered: they hold the trip they are in, as anywhere. */
+  /* How many stretches in a fold are not answered: they hold the trip they are in, as
+     anywhere. A boundary with no answer is one trip, so it is no open question. */
   function openIn(data, store, fold) {
-    return fold.items.filter((i) => ("run" in i
-      ? takes(data, data.runs[i.run]).length && !store.get("run:" + idOf(data.runs[i.run]))
-      : !data.boundaries[i.edge].forced && data.boundaries[i.edge].suggestions.length &&
-        !store.get("cut:" + cutOf(data.boundaries[i.edge])))).length;
+    return fold.items.filter((i) => "run" in i && takes(data, data.runs[i.run]).length &&
+      !store.get("run:" + idOf(data.runs[i.run]))).length;
   }
 
   const openText = (n) => (n ? plural(n, "question") + " in here " + (n === 1 ? "has" : "have") +
@@ -782,6 +789,7 @@ const Trips = (() => {
 
   const STANDING = 'Nothing here suggests a new trip, so it stands at "' + CUT_WORDS.same +
     '". You can change it.';
+  const STANDS = 'Unless you press "' + CUT_WORDS.cut + '", it is one trip.';
 
   /* What the answers mean, with the site's own words for each quality. */
   function meanings(data) {
@@ -1093,7 +1101,7 @@ const Trips = (() => {
     idOf, inOf, incomplete, joinable, jumpText, keptNote, leavable, leftOut, marksNothing, openStore,
     outOf, plainText, preview, problemOf, problems, refusal, runTitle, says, sources, takes,
     tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel, wordsProblem,
-    ASK_FIXED, ASK_RUN, NAMED, STANDING, answerable, hiddenText, inFocus, inView, isNamed,
+    ASK_FIXED, ASK_RUN, NAMED, STANDING, STANDS, answerable, hiddenText, inFocus, inView, isNamed,
     stretchesOf, tripHead, edgeQuestion, flat, foldText, foundText, howMany,
     layout, legend, longDay, longSpan, matches, meanings, openIn, openText, regionName, whenText,
   };
@@ -1274,7 +1282,7 @@ const Trips = (() => {
   /* Kept as typed, whatever it is. What cannot be taken is said here, and stops the file. */
   function drawWords(box, run, n) {
     const key = "words:" + Trips.idOf(run);
-    const label = el("label", "", Trips.wordsLabel(run));
+    const label = el("label", "", Trips.wordsLabel(data, run));
     const field = el("textarea", "words");
     const problem = el("p", "problem warn");
     label.setAttribute("for", "words-" + n);
@@ -1300,7 +1308,7 @@ const Trips = (() => {
     if (!edge.forced) box.append(el("p", "ask", Trips.edgeQuestion(data, prior, after)));
     const notes = Trips.edgeNotes(data, edge, after);
     if (notes.length) box.append(listOf("", notes));
-    else if (!edge.forced) box.append(el("p", "soft", Trips.STANDING));
+    if (!edge.forced) box.append(el("p", "soft", notes.length ? Trips.STANDS : Trips.STANDING));
     const row = el("div", "buttons");
     row.setAttribute("role", "group");
     row.setAttribute("aria-label", "Between " + Trips.runTitle(data, prior) + " and " +

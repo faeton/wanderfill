@@ -1005,6 +1005,16 @@ def _some_of(said: object, days: Iterable[dt.date]) -> bool:
     return isinstance(said, list) and said != [] and said == [d for d in known if d in said]
 
 
+ONE = "1"
+"""The answer that is a transit, and the reasons it answers by itself."""
+SHORT_ONLY = frozenset({"brief", "layover?"})
+
+
+def _one_will_do(run: AnyRun) -> bool:
+    """Whether "1" is enough for this held run: every reason is that it is short."""
+    return {kind_of(r) for r in run.reasons} <= SHORT_ONLY
+
+
 def _row(run: AnyRun, quality: int, answer: RunAnswer) -> TripRow:
     """Without a flight day, the silent days between it and the proof are not in it either.
     With a day beside a jump, they are."""
@@ -1054,12 +1064,16 @@ def group(
     ``runs`` and ``boundaries`` are the judged runs and all their boundaries, or those of a
     :class:`~wanderfill.plan.trip_list.TripList`, which come to the same. A trip is
     what is between two cuts. There is a cut where one is forced, where the owner cut, and
-    before an open run that the owner put no words to. A boundary with a suggestion and no
-    answer is no cut and holds what is on both sides of it.
+    before an open run that the owner put no words to. A boundary with no answer is no cut,
+    with a suggestion or without: the owner said so on 2026-11-26.
 
     Runs answered "no" are left out, and the rest is the trip. A run with no answer or
     with "?", a held run with a quality and no words, and a region that is in it twice, each
-    hold the whole trip. A row has the run's days without the flight days that were left out
+    hold the whole trip. A held run answered "1", transit, whose only reasons are ``brief``
+    and ``layover?``, needs no words: that answer is the owner saying what it was (also
+    2026-11-26). Any other reason, or any other quality, still needs them.
+
+    A row has the run's days without the flight days that were left out
     and with the days beside a jump that were included; no reason is judged again for that, so
     it releases nothing. A stretch with nothing in it and nothing that holds it is no trip, and
     is in neither list, and neither is a run that is there.
@@ -1077,10 +1091,6 @@ def group(
         said = answers["cuts"].get(edge.id) if edge else None
         if edge is None or edge.forced or open_end or said == "cut":
             stretches.append(([], []))
-        elif edge.suggestions and said is None:
-            stretches[-1][1].append(
-                f"between {edge.before} and {edge.after} it is not answered whether a new trip "
-                "starts")
         stretches[-1][0].append(run)
 
     drafts, not_made = [], []
@@ -1094,7 +1104,8 @@ def group(
                 holds.append(f"{run.id} is not answered")
             elif answer == "?":
                 holds.append(f"{run.id} is answered with a question mark")
-            elif run.status == "held" and not _says(words.get(run.id, "")):
+            elif run.status == "held" and not _says(words.get(run.id, "")) and not (
+                    answer == ONE and _one_will_do(run)):
                 holds.append(f"{run.id} needs words of yours")
             else:
                 rows.append(_row(run, int(answer), answers["runs"][run.id]))

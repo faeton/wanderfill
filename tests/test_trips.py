@@ -1588,11 +1588,39 @@ def test_a_cut_makes_two_trips():
     assert [(d.date_from.day, d.date_to.day) for d in drafts] == [(1, 5), (6, 10), (13, 14)]
 
 
-def test_a_suggested_cut_that_is_not_answered_holds_both_sides():
-    drafts, (n,) = made(JOURNEY, ALL)
-    assert drafts == [] and len(n.runs) == 5 and "9:2026-05-13" in " ".join(n.reasons)
-    drafts, (n,) = made(JOURNEY, ALL, {(Q, S): "cut"})
-    assert regions(drafts) == [[R, Q]] and len(n.runs) == 3
+def test_a_suggested_cut_that_is_not_answered_is_one_trip():
+    """The owner's rule of 2026-11-26: a boundary with no answer is the same trip."""
+    assert any(b.suggestions for b in cuts(JOURNEY, None, until=day(30))[1])
+    drafts, not_made = made(JOURNEY, ALL)
+    assert regions(drafts) == [[R, Q, S, 4, 9]] and not_made == []
+    drafts, not_made = made(JOURNEY, ALL, {(Q, S): "cut"})
+    assert regions(drafts) == [[R, Q], [S, 4, 9]] and not_made == []
+
+
+BRIEF = [*stay(R, 1, 3), ob(5, S), *stay(Q, 7, 9), ob(40, 8)]
+
+
+@pytest.mark.parametrize("answer, words, made_", [
+    ("1", None, True), ("2", None, False), ("3", None, False), ("2", "a stop for lunch", True)])
+def test_a_brief_run_answered_one_needs_no_words(answer, words, made_):
+    """The owner's rule of 2026-11-26: "1" is the answer for a stretch that is only short."""
+    runs, _ = cuts(BRIEF, None, until=day(30))
+    assert {r.region: kinds(r) for r in runs if r.status == "held"} == {S: {"brief"}}
+    drafts, not_made = made(BRIEF, {R: "3", S: answer, Q: "3"},
+                            words={S: words} if words else None)
+    assert bool(drafts) is made_ and bool(not_made) is not made_
+    if made_:
+        assert regions(drafts) == [[R, S, Q]]
+    else:
+        assert "needs words of yours" in " ".join(not_made[0].reasons)
+
+
+def test_one_is_not_enough_where_the_run_may_be_a_visit_on_the_profile():
+    from_profile = {S: [visit(None, None, S)]}
+    runs, _ = cuts(BRIEF, from_profile, until=day(30))
+    assert {r.region: kinds(r) for r in runs if r.status == "held"} == {S: {"brief", "undated"}}
+    drafts, (n,) = made(BRIEF, {R: "3", S: "1", Q: "3"}, visits=from_profile)
+    assert drafts == [] and "needs words of yours" in " ".join(n.reasons)
 
 
 @pytest.mark.parametrize("answer", [None, "?"])
@@ -2782,6 +2810,9 @@ RULES = [
     (JUMPED, {R: "3", Q: "3", S: "no"}, {(R, S): "cut", (S, Q): "cut"}, {}, {}, 30,
      {R: IN_R, Q: IN_Q}),
     (JUMPED, {R: "3", Q: "3", S: "no"}, {(R, S): "same", (S, Q): "same"}, {}, {}, 30, {Q: IN_Q}),
+    *[(BRIEF, {R: "3", S: a, Q: "3"}, {}, {}, w, 30)
+      for a, w in (("1", {}), ("2", {}), ("2", {S: "lunch"}))],
+    (BRIEF, {R: "3", S: "1", Q: "3"}, {}, {S: [visit(None, None, S)]}, {}, 30),
 ]
 
 
@@ -2806,6 +2837,7 @@ def test_group_is_the_same_on_a_list_that_was_read_back(tmp_path, case):
 
 
 REASONS = [(), (), (), (), ("open: x",), ("brief: one photo",), ("open: x", "undated: y"),
+           ("brief: x", "layover?: x"), ("brief: x", "undated: y"),
            ("layover?: x",), ("overlap: x",), ("overlap: x", "open: x"), ("continuation: x",),
            ("not read: x", "open: x"), ("there: visit 5, x",), ("clock: x",)]
 WORDS = [None, None, " ", "‎", "home", " a \U0001f5fc "]
@@ -3015,8 +3047,7 @@ def test_the_page_groups_by_every_rule_of_group(tmp_path):
     for (m, ans), page in zip(cases, got, strict=True):
         assert page == as_text(*group(m.runs, m.boundaries, ans))
     said = " ".join(r for g in got for n in g["notMade"] for r in n["reasons"])
-    for rule in ("it is not answered whether a new trip starts", "is not answered", "question mark",
-                 "needs words of yours",
+    for rule in ("is not answered", "question mark", "needs words of yours",
                  f'press "{cut_label()}" somewhere between the two'):
         assert rule in said, rule
 
