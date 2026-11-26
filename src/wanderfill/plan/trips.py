@@ -48,7 +48,7 @@ ZOOM = 10  # of the region tiles
 _MAP_ENDS = 85.05  # a web map has no tile beyond, and no y to compute at the pole
 
 State = Literal["inside", "edge", "nearest", "nowhere", "unread", "stale"]
-Status = Literal["offered", "held", "fixed", "there"]
+Status = Literal["offered", "held", "fixed", "there", "home"]
 
 # Reasons and flags are text that starts with one of these and, mostly, a colon. Words of
 # the owner's release a run whose reasons are all of the first kind, and nothing releases one
@@ -56,6 +56,38 @@ Status = Literal["offered", "held", "fixed", "there"]
 RELEASED_BY_WORDS = frozenset({"open", "brief", "layover?", "undated"})
 NEVER_RELEASED = frozenset({"overlap", "continuation", "not read", "stale map", "across",
                             "clock", "not judged"})
+
+# A run of a region the owner said is home: no visit to put in a trip, and a cut on each side.
+HOME = "home: you said this region is home"
+HOME_CUT = "home: one of them is home, so a trip ends or starts here"
+
+HOME_PART = "home part"
+
+
+@dataclass(frozen=True)
+class Home:
+    """A region the owner said was home from ``first`` to ``last``, inclusive.
+
+    ``None`` is an open end. Only the owner gives these: never photos, never settings.
+    """
+
+    region: int
+    first: dt.date | None = None
+    last: dt.date | None = None
+
+    def holds(self, run: AnyRun) -> bool:
+        """Whether every day of the run is in it."""
+        return (run.region == self.region and (self.first is None or run.first >= self.first)
+                and (self.last is None or run.last <= self.last))
+
+    def touches(self, run: AnyRun) -> bool:
+        return (run.region == self.region and (self.first is None or run.last >= self.first)
+                and (self.last is None or run.first <= self.last))
+
+    def text(self) -> str:
+        return (f"region {self.region}, from {self.first or 'any day'} to "
+                f"{self.last or 'any day'}")
+
 
 TrackRow = tuple[dt.date, int | None]
 """A day-level row and its region, or ``None`` where it was not placed in one."""
@@ -665,7 +697,8 @@ def evidence_grade(run: Run, assets: Mapping[str, PhotoAsset]) -> evidence.Grade
 def status_of(reasons: Iterable[str]) -> Status:
     """What the reasons of a judged run make it."""
     found = {kind_of(s) for s in reasons}
-    return ("there" if "there" in found else
+    return ("home" if "home" in found else
+            "there" if "there" in found else
             "offered" if not found else
             "held" if found <= RELEASED_BY_WORDS else "fixed")
 
@@ -679,6 +712,7 @@ def judge(
     until: dt.date | None,
     track: Iterable[TrackRow] = (),
     assets: Mapping[str, PhotoAsset] | None = None,
+    home: Collection[Home] = (),
 ) -> list[Run]:
     """The runs that touch ``since`` to ``until``, with reasons, flags and status (4-7b).
 
@@ -698,6 +732,11 @@ def judge(
     day. If it is offered or held, a day is ``includable`` where every such run that has it is
     offered or held, for no reason that the run does not have already. The dates, the reasons
     and the status stay the run's own, so that to include a day releases nothing.
+
+    A run whose days are all inside a range of ``home``, which only the owner gives, is
+    ``home`` and has no other reason: it takes no answer and is in no trip, and no day beside
+    it can be included. One that is partly inside such a range is judged as any other, with the
+    flag ``home part``, which holds nothing.
     """
     obs = list(obs)
     runs = _in_order(runs)
@@ -729,6 +768,10 @@ def judge(
 
     out = []
     for run in chosen:
+        if any(h.holds(run) for h in home):
+            out.append(replace(run, reasons=(HOME,), status="home", includable=(),
+                               flags=tuple(_flags(ix, run, rows, assets or {}))))
+            continue
         halves = half_of[run.id]
         reasons = reasons_of(run, halves)
         wider = {days: reasons_of(_reaching(run, days), halves)
@@ -740,8 +783,9 @@ def judge(
         refused = {d for days, said in wider.items() if not set(said) <= set(reasons)
                    for d in days}
         free = status in ("offered", "held") and not _shares(run, by_region[run.region])
+        part = [HOME_PART] if any(h.touches(run) for h in home) else []
         out.append(replace(run, reasons=tuple(reasons), status=status,
-                           flags=tuple(_flags(ix, run, rows, assets or {})),
+                           flags=(*_flags(ix, run, rows, assets or {}), *part),
                            includable=tuple(d for d in run.jump if free and d not in refused)))
     return out
 
@@ -825,7 +869,11 @@ class Boundary:
 
 
 def _cuts_itself_off(run: AnyRun) -> bool:
-    """On the profile already, for certain: an overlap can only be left out (8a)."""
+    """On the profile already, for certain: an overlap can only be left out (8a). Or home."""
+    return _on_profile(run) or run.status == "home"
+
+
+def _on_profile(run: AnyRun) -> bool:
     return run.status == "there" or "overlap" in map(kind_of, run.reasons)
 
 
@@ -858,8 +906,10 @@ def boundaries(
         if (b.first - a.last).days > gap_days:
             why.append(f"gap: nothing from {a.last} to {b.first}")
         forced = _cuts_itself_off(a) or _cuts_itself_off(b)
-        if forced:
+        if _on_profile(a) or _on_profile(b):
             why.append("profile: one of them is on the profile already")
+        if "home" in (a.status, b.status):
+            why.append(HOME_CUT)
         out.append(Boundary(a.id, b.id, tuple(why), forced))
     return out
 
@@ -1031,7 +1081,7 @@ def group(
         rows: list[TripRow] = []
         for run in members:
             answer = answers["runs"].get(run.id, {}).get("a")
-            if run.status == "there" or answer == "no":
+            if run.status in ("there", "home") or answer == "no":
                 continue
             if answer is None:
                 holds.append(f"{run.id} is not answered")
@@ -1054,6 +1104,44 @@ def group(
             drafts.append(TripDraft(tuple(rows), min(r.first for r in rows),
                                     max(r.last for r in rows)))
     return drafts, not_made
+
+
+def stretches(runs: Sequence[AnyRun], boundaries: Sequence[Boundary]) -> list[list[int]]:
+    """The places of the runs in each stretch that :func:`group` makes when nothing is answered.
+
+    A stretch starts at the first run, at a forced boundary, and before an open run. A
+    boundary with a suggestion does not split one. ``runs`` are in the order of the list.
+    """
+    out: list[list[int]] = []
+    for n, run in enumerate(runs):
+        if n == 0 or boundaries[n - 1].forced or "open" in map(kind_of, run.reasons):
+            out.append([])
+        out[-1].append(n)
+    return out
+
+
+def in_focus(
+    runs: Sequence[AnyRun], boundaries: Sequence[Boundary], focus: Iterable[int]
+) -> list[list[int]]:
+    """The stretches of :func:`stretches` that a page with ``focus`` shows, in order.
+
+    Each stretch with a run of a focus region and a run that takes an answer (one that is
+    there or home alone takes none, and holds nothing), and the stretch before every one that
+    starts at an open run with no forced boundary before it: words of the owner on that run
+    take its cut away, and :func:`group` would join the two. So the stretches that are not
+    shown take no answer, are joined to none that is, and hold none of them, whatever is
+    answered on the page.
+    """
+    focus = set(focus)
+    parts = stretches(runs, boundaries)
+    shown = {k for k, part in enumerate(parts)
+             if any(runs[n].region in focus for n in part)
+             and any(runs[n].status not in ("there", "home") for n in part)}
+    for k in sorted(shown, reverse=True):
+        while k and not boundaries[parts[k][0] - 1].forced:  # it starts at an open run
+            k -= 1
+            shown.add(k)
+    return [parts[k] for k in sorted(shown)]
 
 
 # -- at other gaps -------------------------------------------------------------------------
@@ -1080,6 +1168,7 @@ def sweep(
     fast_kmh: float | None = None,
     flight_days: bool = True,
     unplaced: Collection[dt.date] = (),
+    home: Collection[Home] = (),
 ) -> list[SweepRow]:
     """What the same photos come to at other settings of ``gap_days`` (13).
 
@@ -1090,7 +1179,7 @@ def sweep(
     for gap in gaps:
         found = find_runs(obs, gap_days=gap, track=track, flight_days=flight_days,
                           unplaced=unplaced)
-        runs = judge(found, obs, visits, since=since, until=until, track=track)
+        runs = judge(found, obs, visits, since=since, until=until, track=track, home=home)
         cuts = boundaries(runs, gap_days=gap, obs=obs, fast_kmh=fast_kmh)
         out.append(SweepRow(gap, len(runs),
                             sum(bool(b.suggestions) and not b.forced for b in cuts),
@@ -1100,6 +1189,9 @@ def sweep(
 
 __all__ = [
     "GAP_DAYS",
+    "HOME",
+    "HOME_CUT",
+    "HOME_PART",
     "NEVER_RELEASED",
     "RELEASED_BY_WORDS",
     "SAYS_NOTHING",
@@ -1108,6 +1200,7 @@ __all__ = [
     "Answers",
     "AnyRun",
     "Boundary",
+    "Home",
     "NotMade",
     "Obs",
     "Place",
@@ -1120,6 +1213,7 @@ __all__ = [
     "evidence_grade",
     "find_runs",
     "group",
+    "in_focus",
     "judge",
     "kind_of",
     "observe",
@@ -1127,5 +1221,6 @@ __all__ = [
     "region_resolver",
     "regions_to_read",
     "status_of",
+    "stretches",
     "sweep",
 ]

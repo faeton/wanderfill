@@ -110,11 +110,13 @@ def spans(runs, region=None):
     return [(r.first.day, r.last.day) for r in runs if region in (None, r.region)]
 
 
-def judged(obs, visits=None, *, since=None, until=None, gap_days=2, track=(), assets=None):
+def judged(obs, visits=None, *, since=None, until=None, gap_days=2, track=(), assets=None,
+           home=()):
     """The runs by `(region, first day)`, every region's list read and empty unless given."""
     runs = find_runs(obs, gap_days=gap_days, track=track)
     read = {r.region: [] for r in runs} | (visits or {})
-    return judge(runs, obs, read, since=since, until=until, track=track, assets=assets)
+    return judge(runs, obs, read, since=since, until=until, track=track, assets=assets,
+                 home=home)
 
 
 def one(obs, visits=None, **kw):
@@ -1826,11 +1828,13 @@ SWEEP = [SweepRow(1, 6, 2, 1), SweepRow(2, 5, 1, 2)]
 TRIP = {"id": 551, "date_from": "2026-05-03", "date_to": "2026-05-04", "description": "hills"}
 
 
-def listed(obs=JOURNEY, visits=None, *, until=30, **kw):
-    runs, bs = cuts(obs, visits, until=day(until))
+def listed(obs=JOURNEY, visits=None, *, until=30, home=(), focus=None, **kw):
+    runs, bs = cuts(obs, visits, until=day(until), home=home)
+    params = PARAMS | ({"home": trip_list.home_ranges(home)} if home else {}) | (
+        {"focus": focus} if focus else {})
     return build_list(runs, bs, **{
         "account": 1, "created": "2026-06-01T10:00:00+00:00", "names": NAMES,
-        "visits": {r.region: [] for r in runs} | (visits or {}), "trips": [], "params": PARAMS,
+        "visits": {r.region: [] for r in runs} | (visits or {}), "trips": [], "params": params,
         "sources": [PHOTOS], "no_track": True, "coverage": COVERAGE, "left_out": LEFT_OUT,
         "sweep": SWEEP, "assets": {}} | kw)
 
@@ -4208,10 +4212,15 @@ def test_every_reason_and_flag_is_said_in_plain_words(tmp_path):
         "fast: over 150 km/h from one to the other": "150 km/h",
         "gap: nothing from 2026-05-10 to 2026-05-13": "2026-05-10 to 2026-05-13",
         "profile: one of them is on the profile already": "on your profile already",
+        "home: you said this region is home": "You said this region is home.",
+        "home: one of them is home, so a trip ends or starts here":
+            "One of them is home, so a trip ends or starts here.",
+        "home part": "Partly inside a home range you gave",
     }
     assert {kind_of(t) for t in texts} == (
-        trips.RELEASED_BY_WORDS | trips.NEVER_RELEASED | {"there"}) - {"not judged"} | {
-        "conflict", "evidence thin", "fast near", "track", "fast", "gap", "profile"}
+        trips.RELEASED_BY_WORDS | trips.NEVER_RELEASED | {"there", "home"}) - {"not judged"} | {
+        "conflict", "evidence thin", "fast near", "track", "fast", "gap", "profile",
+        "home part"}
     assert {kind_of(t) for t in texts} == trip_list._KINDS
     got = run(tmp_path, small(), "return texts.map((t) => logic.plainText(data, t));",
               texts=list(texts))
@@ -4358,3 +4367,239 @@ def test_the_list_speaks_to_nobody_and_writes_only_where_it_is_told():
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
         n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not names & {"NomadMania", "Transport", "today", "now", "open", "urlopen"}
+
+
+# -- trips while nothing is answered, a focus, and home ------------------------------------
+
+
+def some_answers(rng, m, runs_ok=None, cuts_ok=None):
+    """Answers of every kind the page can give, to the runs and the cuts that are `ok`."""
+    rows = {}
+    for r in m.runs:
+        if runs_ok is not None and r.id not in runs_ok:
+            continue
+        takes = {"offered": "123456", "held": "123456", "fixed": ""}.get(r.status)
+        row = {}
+        if takes is not None and (a := rng.choice([None, "no", *(["?"] if takes else []),
+                                                   *takes, *takes])):
+            row["a"] = a
+        if r.status == "held" and rng.random() < 0.6:
+            row["words"] = rng.choice(["home", "as a child", " "])
+        if row:
+            rows[r.id] = row
+    cut = {b.id: c for b in m.boundaries
+           if not b.forced and (cuts_ok is None or b.id in cuts_ok)
+           and (c := rng.choice((None, "cut", "same", "same")))}
+    return {"runs": rows, "cuts": cut}
+
+
+def quiet(run):
+    return run.status in ("there", "home")
+
+
+def test_stretches_are_the_trips_that_group_holds_with_nothing_answered():
+    rng = random.Random(20261126)
+    seen = 0
+    for _ in range(400):
+        m, _ = any_list(rng)
+        parts = trips.stretches(m.runs, m.boundaries)
+        assert [n for p in parts for n in p] == list(range(len(m.runs)))
+        _, not_made = group(m.runs, m.boundaries, {"runs": {}, "cuts": {}})
+        want = [tuple(m.runs[n].id for n in p) for p in parts
+                if not all(quiet(m.runs[n]) for n in p)]
+        assert [n.runs for n in not_made] == want
+        seen += len(parts)
+    assert seen > 800
+
+
+def shown_and_holds(m, shown, rng):
+    """Whether answers to `shown` alone make a trip, or hold one, across what is not shown."""
+    edges = {b.id for b in m.boundaries if b.before in shown and b.after in shown}
+    drafts, not_made = group(m.runs, m.boundaries, some_answers(rng, m, shown, edges))
+    for ids in [{row.run.id for row in d.rows} for d in drafts] + [set(n.runs) for n in not_made]:
+        if ids & shown and not ids <= shown:
+            return True
+    return any(r.id in reason for n in not_made if set(n.runs) & shown
+               for reason in n.reasons for r in m.runs if r.id not in shown)
+
+
+def test_what_a_focus_does_not_show_neither_holds_nor_joins_what_it_shows():
+    """The line on the page says so; without the trip before an open stay it would be false."""
+    rng = random.Random(20261127)
+    naive_broke = 0
+    for _ in range(1500):
+        m, _ = any_list(rng)
+        if not m.runs:
+            continue
+        regions = sorted({r.region for r in m.runs})
+        focus = rng.sample(regions, rng.randint(1, len(regions)))
+        parts = trips.in_focus(m.runs, m.boundaries, focus)
+        shown = {m.runs[n].id for p in parts for n in p}
+        assert not shown_and_holds(m, shown, rng)
+        for p in parts:
+            assert not all(quiet(m.runs[n]) for n in p)
+        naive = {m.runs[n].id for p in trips.stretches(m.runs, m.boundaries)
+                 if any(m.runs[n].region in focus for n in p)
+                 and not all(quiet(m.runs[n]) for n in p) for n in p}
+        naive_broke += shown_and_holds(m, naive, rng)
+    assert naive_broke > 5
+
+
+@needs_node
+def test_the_page_splits_and_focuses_as_trips_py_does(tmp_path):
+    rng = random.Random(20261128)
+    cases = []
+    for _ in range(300):
+        m, _ = any_list(rng)
+        if m.runs:
+            regions = sorted({r.region for r in m.runs} | {99})
+            cases.append((m, sorted(rng.sample(regions, rng.randint(1, len(regions))))))
+    got = run(tmp_path, small(), """
+      return cases.map(([d, focus]) => [logic.stretchesOf(d),
+        logic.inFocus({...d, params: {...d.params, focus}}), logic.inFocus(d)]);
+    """, cases=[[page_data(m), focus] for m, focus in cases])
+    for (m, focus), (parts, focused, none) in zip(cases, got, strict=True):
+        assert parts == trips.stretches(m.runs, m.boundaries)
+        assert focused == trips.in_focus(m.runs, m.boundaries, focus) and none is None
+
+
+HOMELY = [*stay(R, 1, 3), *stay(Q, 4, 6), *stay(S, 7, 9), *stay(R, 11, 12), *stay(4, 13, 14),
+          ob(40, 8)]
+
+
+def homes(*ranges):
+    return [trips.Home(r, *(None if d is None else day(d) for d in ends))
+            for r, *ends in ranges]
+
+
+@pytest.mark.parametrize("ranges, home, part", [
+    ([(Q, None, None)], {Q}, set()),
+    ([(Q, 4, 6)], {Q}, set()),                     # to the day, both ends inclusive
+    ([(Q, 4, None)], {Q}, set()), ([(Q, None, 6)], {Q}, set()),
+    ([(Q, 5, None)], set(), {Q}), ([(Q, None, 5)], set(), {Q}), ([(Q, 5, 5)], set(), {Q}),
+    ([(Q, 7, None)], set(), set()), ([(Q, None, 3)], set(), set()),
+    ([(R, None, 3)], {(R, 1)}, set()),            # the same region, the other stay is not home
+    ([(R, None, 3), (R, 11, None)], {(R, 1), (R, 11)}, set()),
+    ([(R, None, 3), (R, 12, None)], {(R, 1)}, {(R, 11)}),
+], ids=str)
+def test_a_home_range_takes_a_stay_whole_and_names_one_it_only_touches(ranges, home, part):
+    runs, bs = cuts(HOMELY, until=day(30), home=homes(*ranges))
+    key = lambda r: r.region if r.region != R else (R, r.first.day)  # noqa: E731
+    assert {key(r) for r in runs if r.status == "home"} == home
+    assert {key(r) for r in runs if trips.HOME_PART in r.flags} == part
+    for n, r in enumerate(runs):
+        if r.status == "home":
+            assert r.reasons == (trips.HOME,) and r.includable == ()
+            for b in bs[max(0, n - 1):n + 1]:
+                assert b.forced and trips.HOME_CUT in b.suggestions
+        else:
+            assert r.status == "offered" and trips.HOME not in r.reasons
+    assert not [b for b in bs if b.forced and trips.HOME_CUT not in b.suggestions]
+
+
+def test_home_ends_a_trip_and_starts_the_next_and_holds_neither():
+    runs, bs = cuts(HOMELY, until=day(30), home=homes((S, None, None)))
+    every = {"runs": {r.id: {"a": "3"} for r in runs if r.status == "offered"},
+             "cuts": {b.id: "same" for b in bs if not b.forced}}
+    drafts, not_made = group(runs, bs, every)
+    assert [[row.run.region for row in d.rows] for d in drafts] == [[R, Q], [R, 4]]
+    assert not_made == []
+    drafts, not_made = group(runs, bs, {"runs": {}, "cuts": {}})
+    assert [[r.split(":")[0] for r in n.runs] for n in not_made] == [["1", "2"], ["1", "4"]]
+    with pytest.raises(PlanInvalid, match="takes no quality"):
+        group(runs, bs, every | {"runs": every["runs"] | {runs[2].id: {"a": "3"}}})
+
+
+def test_a_list_keeps_its_home_ranges_and_focus_and_refuses_what_does_not_follow(tmp_path):
+    h = homes((S, 7, None), (R, None, 3))
+    m = listed(HOMELY, home=h, focus=[Q, 4])
+    assert m.params["home"] == [{"region": R, "from": None, "to": "2026-05-03"},
+                                {"region": S, "from": "2026-05-07", "to": None}]
+    back = TripList.load(m.save(tmp_path / "m.json"))
+    assert back == m and back.params["focus"] == [Q, 4]
+    assert trip_list.homes_of(back.params) == sorted(h, key=lambda x: x.region)
+    assert listed(HOMELY).sha256 != m.sha256 != listed(HOMELY, home=h).sha256
+    assert "home" not in listed(HOMELY).params and "focus" not in listed(HOMELY).params
+    runs, bs = cuts(HOMELY, until=day(30))
+    with pytest.raises(PlanInvalid, match="is home exactly where"):
+        build_list(runs, bs, account=1, created="", names=NAMES, visits={
+            r.region: [] for r in runs}, trips=[], params=PARAMS | {
+            "home": [{"region": S, "from": None, "to": None}]}, sources=[PHOTOS],
+            no_track=True, coverage=COVERAGE, left_out=LEFT_OUT, sweep=SWEEP, assets={})
+    for bad, says in (([{"region": S, "from": "2026-05-09", "to": "2026-05-08"}], "after to"),
+                      ([], "ranges"), ([{"region": S, "from": None}], "no 'to'")):
+        with pytest.raises(PlanInvalid, match=says):
+            listed(HOMELY, params=PARAMS | {"home": bad})
+    for bad in ([], [4, Q], [Q, Q], ["2"]):
+        with pytest.raises(PlanInvalid, match="focus"):
+            listed(HOMELY, params=PARAMS | {"focus": bad})
+
+
+@needs_node
+def test_the_page_groups_home_as_group_does(tmp_path):
+    rng = random.Random(20261129)
+    cases = []
+    for _ in range(120):
+        ranges = rng.sample([(R, None, 3), (R, 11, None), (Q, None, None), (Q, 5, None),
+                             (S, 7, 9), (4, None, None)], rng.randint(0, 3))
+        m = listed(HOMELY, rng.choice([None, {Q: [visit(None, None, Q, id=72)]}]),
+                   home=homes(*ranges))
+        cases.append((m, some_answers(rng, m)))
+    got = run(tmp_path, small(), GROUP, cases=[[page_data(m), a] for m, a in cases])
+    for (m, ans), page in zip(cases, got, strict=True):
+        assert page == as_text(*group(m.runs, m.boundaries, ans))
+    assert sum(r.status == "home" for m, _ in cases for r in m.runs) > 50
+
+
+@needs_node
+def test_a_home_stay_is_folded_takes_no_answer_and_says_why(tmp_path):
+    m = listed(visits=MIXED, home=homes((S, None, None)))
+    got = run(tmp_path, m, FIND + """
+      const cray = p.run("Cray");
+      return [p.buttons(cray), cray.className, cray.textContent,
+              folds()[0].all((e) => e.tag === "summary")[0].textContent,
+              p.byId.howmany.textContent, p.byId.preview.textContent];
+    """)
+    buttons, cls, text, summary, howmany, preview = got
+    assert buttons == [] and "grey" in cls
+    assert "You said this region was home on these days. Nothing to answer." in text
+    assert "You said this region is home." in text
+    assert summary == "Folded here: 1 more stretch (1 at home). "
+    assert "at home, or cannot go into a trip" in howmany
+    assert "Cray Islands (3), 2026-05-06 to 2026-05-08, which you said was home" in preview
+
+
+@needs_node
+def test_a_focused_page_shows_the_named_trips_whole_and_nothing_else(tmp_path):
+    read = FIND + """
+      const tagged = p.runs().filter((r) => r.cls("tag").length)
+        .map((r) => r.cls("name")[0].textContent);
+      return [seen()[0], tagged, p.byId.howmany.textContent,
+              p.byId.list.children.map((c) => c.className), p.byId.counts.textContent,
+              p.byId.preview.textContent, p.byId.unfold.hidden,
+              p.byId.list.cls("hidden-runs").map((e) => e.textContent),
+              p.byId.list.cls("trip-head").map((e) => e.textContent)];
+    """
+    shown, tagged, howmany, kids, counts, preview, unfold, hidden, heads = run(
+        tmp_path, listed(visits=KNOWN, focus=[4]), read)
+    assert shown == tagged == ["Dunvale"] and unfold is True
+    assert howmany == ("Showing the 1 trip with the regions you named (Dunvale). 4 other "
+                       "stretches are not shown: what is not shown is not answered, and does "
+                       "not hold these trips.")
+    assert kids == ["hidden-runs soft", "trip-group", "hidden-runs soft"]
+    assert hidden == ["3 stretches not shown here.", "1 stretch not shown here."]
+    assert heads == ["A trip: Sat 9 May to Sun 10 May 2026 · 1 stretch"]
+    assert "0 of 1 stretch and 0 of 0 questions" in counts and "1 not made" in counts
+    assert "Aldmoor" not in preview and "Fenmark" not in preview and "Dunvale" in preview
+    shown, tagged, howmany, kids, *_ = run(tmp_path, listed(visits=KNOWN, focus=[R, 99]), read)
+    assert shown == ["Aldmoor", "Berrow"] and tagged == ["Aldmoor"]  # its neighbour, not named
+    assert "(Aldmoor, region 99, with no stretch on this list)" in howmany
+    assert kids == ["trip-group", "hidden-runs soft"]
+    # An open stay starts its own trip, and words on it would join the one before: shown too.
+    shown, _, howmany, kids, *_ = run(tmp_path, listed(OPEN, focus=[Q]), read)
+    assert shown == ["Aldmoor", "Berrow"] and kids == ["trip-group", "between", "trip-group"]
+    assert "and 1 trip just before them" in howmany
+    # And a home stay is no neighbour that needs an answer.
+    m = listed(HOMELY, home=homes((S, None, None)), focus=[Q, S])
+    shown, *_ = run(tmp_path, m, read)
+    assert shown == ["Aldmoor", "Berrow"]

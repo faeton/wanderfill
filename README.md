@@ -600,6 +600,8 @@ Until you do, the trip is not made, and the page says which two stays it is abou
 | `--fast-kmh N` | over this a photo is in the air; 150 unless you say |
 | `--no-flight-days` | a run begins and ends on a day with a photo on the ground, and no day beside a jump is shown or can be included |
 | `--spans FILE` | stretches that prove nothing, as for `series` |
+| `--focus ID[,ID...]` | regions you name: the page shows only the trips with a stay in one of them, whole, with their other stays, and the trip before one that starts at a stay that may not be over. What is not shown takes no answer and holds none of them |
+| `--home ID[:FROM[:TO]]` | a region that was your home, from FROM to TO (inclusive; either may be left out), and may be given again. A stay with all its days inside takes no answer and ends one trip and starts the next; one partly inside is asked about as any other, and named. Nothing asks for a home unless you give one: your profile's homebase is only printed as a hint |
 | `--library`, `--out` | another Photos library, another directory |
 
 The first run is the slow one: it reads the map tiles for your whole library, which later

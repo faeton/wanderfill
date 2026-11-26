@@ -327,8 +327,12 @@ Sweep the parameters, show the user the resulting trip counts at each setting,
 and let them choose. Record the chosen parameters in the plan.
 
 That is `segment` and `wanderfill sweep`, on a day-level track. For photos use
-`wanderfill trips review`, next. It asks for no home and has no cap: it shows the
-stays, suggests where a trip may end, and the owner answers.
+`wanderfill trips review`, next. It asks for no home by default and has no cap: it shows
+the stays, suggests where a trip may end, and the owner answers. `--home ID[:FROM[:TO]]` is
+the owner's to give: a stay with all its days inside a range they gave takes no answer and
+ends a trip and starts the next. The region and the dates are their words, never read from
+the photos or from `homebase` (the command prints that one as a hint and applies nothing).
+A stay partly inside a range is asked about as any other, and named.
 
 ### Trips from photos go through a page the owner answers
 
@@ -404,9 +408,13 @@ owner presses "A new trip starts here" somewhere between the two stays in A, als
 nothing suggests a cut. The owner picks where; do not pick it for them, and do not
 propose a place.
 
-`--gap-days`, `--fast-kmh`, `--spans` and `--until` are theirs to choose, as for series.
-With a larger gap more days without a photo are inside a stay, and the gap table says
-what that changes.
+`--gap-days`, `--fast-kmh`, `--spans`, `--until`, `--home` and `--focus` are theirs to
+choose, as for series. With a larger gap more days without a photo are inside a stay, and
+the gap table says what that changes. `--focus ID[,ID...]` is the regions they named: the
+page then shows only the trips with a stay there, whole, neighbours included, and the trip
+before one that starts at an open stay, since words on that stay would join the two. What
+is not shown takes no answer and holds none of the trips shown. Do not pick the regions
+for them.
 
 ---
 

@@ -77,6 +77,13 @@ summary { cursor: pointer; padding: 0.5rem 0; min-height: 2.75rem; }
 }
 .run.held { border-left: 6px solid var(--warn-ink); }
 .grey { background: none; border-style: dashed; color: var(--soft); }
+.tag {
+  display: inline-block; margin: 0 0 0.4rem; padding: 0.1rem 0.6rem; border-radius: 999px;
+  background: var(--accent); color: var(--on-accent); font-size: 0.85rem; font-weight: 600;
+}
+.trip-group { border-left: 4px solid var(--accent); padding-left: 0.75rem; margin: 1.25rem 0; }
+.trip-head { font-weight: 700; margin: 0.5rem 0; }
+.hidden-runs { text-align: center; font-style: italic; }
 .fold { border: 1px dashed var(--line); border-radius: 8px; padding: 0 0.75rem; margin: 0.75rem 0; }
 .fold > summary { color: var(--soft); }
 .fold-open { margin-left: 0.5rem; }
@@ -268,7 +275,7 @@ const Trips = (() => {
 
   /* The answers that a run takes, in the order of its buttons. */
   function takes(data, run) {
-    if (run.status === "there") return [];
+    if (run.status === "there" || run.status === "home") return [];
     return run.status === "fixed" ? ["no"] : [...qualities(data), "no", "?"];
   }
 
@@ -451,7 +458,7 @@ const Trips = (() => {
       const rows = [];
       for (const run of members) {
         const answer = rowOf(run).a;
-        if (run.status === "there" || answer === "no") continue;
+        if (run.status === "there" || run.status === "home" || answer === "no") continue;
         if (answer === undefined) {
           holds.push(idOf(run) + " is not answered");
         } else if (answer === "?") {
@@ -544,6 +551,8 @@ const Trips = (() => {
     gap: (d, data) => "More than " + plural(data.params.gap_days, "day") + " between them: " +
       d.replace(/^nothing from /, "") + ".",
     profile: () => "One of them is on your profile already, so a new trip always starts here.",
+    home: (d) => cap(d) + ".",
+    "home part": () => "Partly inside a home range you gave, so it is asked about as any other.",
   };
 
   function plainText(data, text) {
@@ -570,8 +579,50 @@ const Trips = (() => {
     held: "This stretch needs your own words, as well as an answer.",
     fixed: "This stretch cannot go into a trip.",
     there: "This stretch is on your profile already. Nothing to answer.",
+    home: "You said this region was home on these days. Nothing to answer.",
     offered: "",
   };
+
+  /* -- the trips there are while nothing is answered: the same rule as `stretches` in trips.py.
+     A new one starts at a forced boundary and before an open run; a suggested cut splits none. */
+
+  function stretchesOf(data) {
+    const out = [];
+    data.runs.forEach((run, n) => {
+      if (!n || data.boundaries[n - 1].forced || run.reasons.map(kindOf).includes("open")) {
+        out.push([]);
+      }
+      out[out.length - 1].push(n);
+    });
+    return out;
+  }
+
+  const focusOf = (data) => data.params.focus || null;
+
+  /* The same as `in_focus` in trips.py: the trips with a run of a focus region and a run that
+     takes an answer, and the one before each that starts at an open run with no forced boundary
+     before it, for words on that run would join the two. Null with no focus. */
+  function inFocus(data) {
+    const focus = focusOf(data);
+    if (!focus) return null;
+    const parts = stretchesOf(data);
+    const quiet = (run) => run.status === "there" || run.status === "home";
+    const shown = new Set();
+    parts.forEach((part, k) => {
+      if (part.some((n) => focus.includes(data.runs[n].region)) &&
+          part.some((n) => !quiet(data.runs[n]))) shown.add(k);
+    });
+    for (const k of [...shown].sort((a, b) => b - a)) {
+      for (let j = k; j && !data.boundaries[parts[j][0] - 1].forced; j -= 1) shown.add(j - 1);
+    }
+    return [...shown].sort((a, b) => a - b).map((k) => parts[k]);
+  }
+
+  /* The places of the runs that are shown, or null where every run is. */
+  function inView(data) {
+    const parts = inFocus(data);
+    return parts ? new Set(parts.flat()) : null;
+  }
 
   /* -- how the list is laid out: what is shown, and what is folded away in its place */
 
@@ -582,6 +633,8 @@ const Trips = (() => {
      edges between them, in one fold. An edge beside a fold is in it only where it is forced, for
      only then is there nothing to answer in it. Flattened, it is run, edge, run, ... as before. */
   function layout(data) {
+    const parts = inFocus(data);
+    if (parts) return focusLayout(data, parts);
     const items = [];
     let fold = null;
     data.runs.forEach((run, n) => {
@@ -613,14 +666,46 @@ const Trips = (() => {
     return items;
   }
 
-  const flat = (items) => items.flatMap((item) => (item.items ? flat(item.items) : [item]));
+  /* With a focus: each trip that is shown, whole, with nothing folded, and between two that are
+     not next to each other how many runs are not shown. */
+  function focusLayout(data, parts) {
+    const items = [];
+    let last = -1;
+    for (const part of parts) {
+      if (last >= 0 && part[0] === last + 1) items.push({ edge: last });
+      else if (part[0] > last + 1) items.push({ gap: part[0] - last - 1 });
+      items.push({ trip: true, items: part.flatMap((n, i) => (i ? [{ edge: n - 1 }] : [])
+        .concat([{ run: n }])) });
+      last = part[part.length - 1];
+    }
+    if (last < data.runs.length - 1) items.push({ gap: data.runs.length - 1 - last });
+    return items;
+  }
+
+  const flat = (items) => items.flatMap((item) => (item.items ? flat(item.items)
+    : "gap" in item ? [] : [item]));
+
+  function tripHead(data, trip) {
+    const runs = flat(trip.items).filter((i) => "run" in i).map((i) => data.runs[i.run]);
+    return "A trip: " + longSpan(runs[0].first, runs.map((r) => r.last).sort().pop()) + " · " +
+      plural(runs.length, "stretch", "stretches");
+  }
+
+  const hiddenText = (n) => plural(n, "stretch", "stretches") + " not shown here.";
+
+  const isNamed = (data, run) => Boolean(focusOf(data)) && focusOf(data).includes(run.region);
+  const NAMED = "You named this region";
 
   function foldText(data, fold) {
     const runs = fold.items.filter((i) => "run" in i).map((i) => data.runs[i.run]);
     const there = runs.filter((r) => r.status === "there").length;
+    const home = runs.filter((r) => r.status === "home").length;
     const parts = [];
     if (there) parts.push(there + " on your profile already");
-    if (runs.length - there) parts.push(runs.length - there + " that cannot go into a trip");
+    if (home) parts.push(home + " at home");
+    if (runs.length - there - home) {
+      parts.push(runs.length - there - home + " that cannot go into a trip");
+    }
     return "Folded here: " + plural(runs.length, "more stretch", "more stretches") + " (" +
       parts.join(", ") + "). ";
   }
@@ -716,6 +801,22 @@ const Trips = (() => {
   }
 
   function howMany(data) {
+    const parts = inFocus(data);
+    if (parts) {
+      const focus = focusOf(data);
+      const names = focus.map((id) => {
+        const run = data.runs.find((r) => r.region === id);
+        return run ? regionName(data, run) : "region " + id + ", with no stretch on this list";
+      });
+      const own = parts.filter((p) => p.some((n) => focus.includes(data.runs[n].region))).length;
+      const added = parts.length - own;
+      const rest = data.runs.length - parts.flat().length;
+      return "Showing the " + plural(own, "trip") + " with the regions you named (" +
+        names.join(", ") + ")" + (added ? ", and " + plural(added, "trip") + " just before " +
+        "them, which your words on a stay that may not be over would join to them" : "") + ". " +
+        plural(rest, "other stretch", "other stretches") + (rest === 1 ? " is" : " are") +
+        " not shown: what is not shown is not answered, and does not hold these trips.";
+    }
     const ask = data.runs.filter(answerable);
     const held = ask.filter((r) => r.status === "held").length;
     const rest = data.runs.length - ask.length;
@@ -723,7 +824,9 @@ const Trips = (() => {
       (held ? ", and " + held + " of them " + (held === 1 ? "needs" : "need") +
         " your own words as well" : "") + "." +
       (rest ? " " + plural(rest, "other stretch", "other stretches") + " are folded away in " +
-        "their place: they are on your profile already, or cannot go into a trip." : "");
+        "their place: they are on your profile already, " +
+        (data.runs.some((r) => r.status === "home") ? "at home, " : "") +
+        "or cannot go into a trip." : "");
   }
 
   /* Days that follow one another are written as one span. */
@@ -908,7 +1011,11 @@ const Trips = (() => {
   /* What the answers make, for the owner to read. */
   function preview(data, store) {
     const answers = given(data, store);
-    const { trips, notMade } = group(data, answers);
+    const view = inView(data);
+    const seen = (id) => !view || view.has(data.runs.findIndex((r) => idOf(r) === id));
+    const made = group(data, answers);
+    const trips = made.trips.filter((t) => seen(t.rows[0][0]));
+    const notMade = made.notMade.filter((n) => seen(n.runs[0]));
     const titles = new Map(data.runs.map((run) => [idOf(run), runTitle(data, run)]));
     const region = (id) => regionTitle(data, Number(id.split(":")[0]));
     return {
@@ -924,16 +1031,19 @@ const Trips = (() => {
         title: "Not made: " + n.runs.map((id) => titles.get(id)).join("; "),
         reasons: n.reasons.map((r) => cap(named(data, r)) + "."),
       })),
-      leftOut: data.runs.filter((run) => run.status === "there" ||
-        (answers.runs[idOf(run)] || {}).a === "no").map((run) => "In no trip: " +
+      leftOut: data.runs.filter((run, n) => (!view || view.has(n)) && (
+        run.status === "there" || run.status === "home" ||
+        (answers.runs[idOf(run)] || {}).a === "no")).map((run) => "In no trip: " +
           titles.get(idOf(run)) + (run.status === "there" ? ", which is on your profile already"
-          : ", which you left out")),
+          : run.status === "home" ? ", which you said was home" : ", which you left out")),
     };
   }
 
   function counts(data, store) {
-    const ask = data.runs.filter((run) => takes(data, run).length);
-    const cuts = data.boundaries.filter((e) => !e.forced && e.suggestions.length);
+    const view = inView(data);
+    const ask = data.runs.filter((run, n) => (!view || view.has(n)) && takes(data, run).length);
+    const cuts = data.boundaries.filter((e, n) => (!view || (view.has(n) && view.has(n + 1))) &&
+      !e.forced && e.suggestions.length);
     return {
       runs: ask.length, answered: ask.filter((run) => store.get("run:" + idOf(run))).length,
       cuts: cuts.length, cut: cuts.filter((e) => store.get("cut:" + cutOf(e))).length,
@@ -942,7 +1052,7 @@ const Trips = (() => {
 
   function countsText(data, store) {
     const n = counts(data, store);
-    const { trips, notMade } = group(data, given(data, store));
+    const { trips, notMade } = preview(data, store);
     const rows = trips.reduce((sum, t) => sum + t.rows.length, 0);
     return n.answered + " of " + plural(n.runs, "stretch", "stretches") + " and " + n.cut + " of " +
       plural(n.cuts, "question") + " between them answered. " + plural(trips.length, "trip") +
@@ -978,7 +1088,8 @@ const Trips = (() => {
     idOf, inOf, incomplete, joinable, jumpText, keptNote, leavable, leftOut, marksNothing, openStore,
     outOf, plainText, preview, problemOf, problems, refusal, runTitle, says, sources, takes,
     tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel, wordsProblem,
-    ASK_FIXED, ASK_RUN, STANDING, answerable, edgeQuestion, flat, foldText, foundText, howMany,
+    ASK_FIXED, ASK_RUN, NAMED, STANDING, answerable, hiddenText, inFocus, inView, isNamed,
+    stretchesOf, tripHead, edgeQuestion, flat, foldText, foundText, howMany,
     layout, legend, longDay, longSpan, matches, meanings, openIn, openText, regionName, whenText,
   };
 })();
@@ -1083,6 +1194,7 @@ const Trips = (() => {
     const when = el("p", "when", Trips.whenText(run));
     when.setAttribute("id", "when-" + n);
     box.append(name, when);
+    if (Trips.isNamed(data, run)) box.append(el("p", "tag", Trips.NAMED));
 
     /* Why it is held, or cannot go into a trip, before anything is asked. */
     if (Trips.WHY_NOT[run.status] || run.reasons.length) {
@@ -1201,6 +1313,13 @@ const Trips = (() => {
     if ("run" in item) return drawRun(data.runs[item.run], item.run);
     if ("edge" in item) {
       return drawEdge(data.boundaries[item.edge], data.runs[item.edge], data.runs[item.edge + 1]);
+    }
+    if ("gap" in item) return el("p", "hidden-runs soft", Trips.hiddenText(item.gap));
+    if (item.trip) {
+      const group = el("section", "trip-group");
+      const head = el("p", "trip-head", Trips.tripHead(data, item));
+      group.append(head, ...item.items.map(drawItem));
+      return group;
     }
     const box = el("details", "fold");
     const head = el("summary");

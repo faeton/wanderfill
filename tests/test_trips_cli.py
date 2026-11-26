@@ -140,6 +140,7 @@ class Site:
         self.catalogue = {str(r): {"id": r, "name": n} for r, n in NAMES.items()}
         self.writable = False
         self.next = 5000
+        self.settings = {}  # no homebase, unless a test says so
 
     def visit(self, region, first, last, quality=3, trip_id=None):
         self.next += 1
@@ -164,6 +165,8 @@ class Site:
         self.sent.append((action, fields))
         if action == "user/status-quick":
             return {"uid": self.account}
+        if action == "user/get-settings":
+            return dict(self.settings)
         if action == "regions/get-regions-list-2":
             return {"data": self.catalogue}
         if action == "maps/get-visited-regions-ids-simple":
@@ -1743,3 +1746,62 @@ def test_what_is_never_planned(site):
     plan = planned(site)
     assert {op.kind for op in plan.ops} == {"create_trip"}
     assert all(not op.region and not op.visit_id for op in plan.ops)
+
+
+# -- review: --focus and --home, which only the owner gives ---------------------------------
+
+
+def test_focus_and_home_ranges_are_in_the_params_and_home_folds_its_stay(site, capsys):
+    m, _ = listed("--focus", "3,1", "--focus", "3", "--home", f"{HOME}:{day(15)}",
+                  "--home", f"{HOME}::{day(-20)}")
+    assert m.params["focus"] == [1, 3]
+    assert m.params["home"] == [{"region": HOME, "from": None, "to": str(day(-20))},
+                                {"region": HOME, "from": str(day(15)), "to": None}]
+    assert status(m)[HOME] == ("home", ["home"]) and by_region(m)[HOME].includable == ()
+    assert m.boundaries[-1].forced and "home" in {kind_of(s) for s in m.boundaries[-1].suggestions}
+    out = capsys.readouterr().out
+    assert f"home {HOME} (Grayport), from {day(15)} to any day: 1 run folded" in out
+    assert f"home {HOME} (Grayport), from any day to {day(-20)}: 0 runs folded" in out
+    assert ("focus on 1 (Aldmoor), 3 (Cray Islands): 1 trip with 5 runs shown, 1 run not "
+            "shown") in out
+    assert "your profile says" not in out
+    assert do_plan() == 0  # a focused list plans as any other
+    assert rows(Plan.load("plan-trips.json")) == [[(1, 3), (2, 3), (3, 2), (4, 3), (5, 4)]]
+    assert "is not answered" not in capsys.readouterr().out  # home holds nothing
+
+
+def test_a_stay_partly_inside_a_home_range_is_asked_about_and_named(site, capsys):
+    m, _ = listed("--home", f"{HOME}:{day(10)}:{day(16)}")
+    assert status(m)[HOME] == ("held", ["open"]) and "home part" in by_region(m)[HOME].flags
+    out = capsys.readouterr().out
+    assert f"{HOME} (Grayport), {day(16)} to {day(17)}: partly inside a home range" in out
+    assert "0 runs folded" in out
+
+
+def test_without_home_the_profile_is_only_named_and_nothing_is_folded(site, capsys):
+    site.settings = {"homebase": HOME, "homebase2": 0}
+    m, _ = listed()
+    assert "home" not in m.params and status(m)[HOME] == ("held", ["open"])
+    out = capsys.readouterr().out
+    assert f"your profile says home is {HOME} (Grayport); pass --home" in out
+    assert "Nothing was folded" in out
+    listed("--home", f"{HOME}:{day(1)}", out="b")
+    assert "your profile says" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv, says", [
+    (("--focus", "999"), "--focus: region 999 is not in the list of regions"),
+    (("--home", "999"), "--home: region 999 is not in the list of regions"),
+    (("--focus", "1", "--home", "1,777:2031-01-01"), "--home: region 777 is not in the list"),
+])
+def test_a_region_that_is_not_in_the_catalogue_is_refused(site, capsys, argv, says):
+    assert do_review(*argv) == 2 and not Path("out").exists()
+    assert says in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", [
+    f"{HOME}:2031-05-05:2031-05-04", f"{HOME}:5", f"{HOME}:2031-5-4", "x", f"{HOME}:a:b:c",
+    "", f"{HOME}:2031-05-01:2031-05-04:2031-05-09"])
+def test_a_home_range_that_makes_no_sense_is_exit_two(site, capsys, value):
+    assert do_review("--home", value) == 2
+    assert not Path("out").exists() and site.sent == []

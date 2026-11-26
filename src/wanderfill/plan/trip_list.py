@@ -37,12 +37,16 @@ from .manifest import whole as _whole
 from .model import _CONTROLS, _r, parse_when
 from .review import _SPEEDS, _at
 from .trips import (
+    HOME,
+    HOME_CUT,
+    HOME_PART,
     NEVER_RELEASED,
     RELEASED_BY_WORDS,
     SAYS_NOTHING,
     Answers,
     AnyRun,
     Boundary,
+    Home,
     Obs,
     Run,
     RunAnswer,
@@ -51,6 +55,7 @@ from .trips import (
     _cuts_itself_off,
     _ends,
     _in_order,
+    _on_profile,
     _says,
     _some_of,
     evidence_grade,
@@ -63,12 +68,14 @@ ANSWERS_FORMAT = 1
 MAX_ANSWERS_BYTES = 5_000_000
 MAX_WORDS = 500
 
-_REASONS = (RELEASED_BY_WORDS | NEVER_RELEASED | {"there"}) - {"not judged"}
-_FLAGS = frozenset({"conflict", "evidence thin", "fast near", "track"})
-_SUGGESTIONS = frozenset({"fast", "gap", "profile"})
+_REASONS = (RELEASED_BY_WORDS | NEVER_RELEASED | {"there", "home"}) - {"not judged"}
+_FLAGS = frozenset({"conflict", "evidence thin", "fast near", "track", HOME_PART})
+_SUGGESTIONS = frozenset({"fast", "gap", "profile", "home"})
 _KINDS = _REASONS | _FLAGS | _SUGGESTIONS
 
 _PARAMS = ("since", "until", "gap_days", "speeds", "spans", "flight_days")
+# Only where the owner gave them, so that a list made without them keeps its hash.
+_OPTIONAL_PARAMS = ("focus", "home")
 _SOURCES = ("photos", "track", "spans")
 _COVERAGE = ("tiles_read", "tiles_unread", "unread_photos")
 _LEFT_OUT = ("other_origin", "no_place", "no_utc", "span_none", "conflict", "fast",
@@ -194,6 +201,7 @@ class TripList:
             _check_sources(clean)
             _check_sweep(clean["sweep"])
             _check_runs(runs, clean["params"])
+            _check_home(runs, homes_of(clean["params"]))
             _check_boundaries(runs, clean["boundaries"], clean["params"]["gap_days"])
         except ValueError as exc:
             raise PlanInvalid(str(exc)) from None
@@ -401,6 +409,8 @@ def _run_of(raw: object, what: str) -> ListedRun:
         raise ValueError(f"{what}.includable: a run that takes no quality includes no day")
     if wanted == "there" and {kind_of(r) for r in run.reasons} != {"there"}:
         raise ValueError(f"{what}.reasons: a run that is there has no other reason")
+    if wanted == "home" and run.reasons != (HOME,):
+        raise ValueError(f"{what}.reasons: a run that is home has no other reason")
     if ("evidence thin" in run.flags) is not (grade in ("thin", "none")):
         raise ValueError(f"{what}.evidence: {grade} and the flag 'evidence thin' do not agree")
     return run
@@ -437,9 +447,17 @@ def _sweep_of(raw: object, what: str) -> SweepRow:
 
 
 def _params_of(raw: object) -> dict:
-    _fields(raw, _PARAMS, "params")
+    _fields(raw, _PARAMS, "params", _OPTIONAL_PARAMS)
     speeds = raw["speeds"]
     _fields(speeds, _SPEEDS, "params.speeds")
+    extra: dict[str, Any] = {}
+    if "focus" in raw:
+        focus = [_whole(r, "params.focus") for r in _listed(raw["focus"], "params.focus")]
+        if not focus or focus != sorted(set(focus)):
+            raise ValueError("params.focus must be region ids, in order and each of them once")
+        extra["focus"] = focus
+    if "home" in raw:
+        extra["home"] = _homes(raw["home"])
     return {
         "since": date(raw["since"], "params.since"),
         "until": None if raw["until"] is None else date(raw["until"], "params.until"),
@@ -447,7 +465,55 @@ def _params_of(raw: object) -> dict:
         "speeds": {k: _number(speeds[k], f"params.speeds.{k}") for k in _SPEEDS},
         "spans": _flag(raw["spans"], "params.spans"),
         "flight_days": _flag(raw["flight_days"], "params.flight_days"),
+        **extra,
     }
+
+
+def _homes(value: object) -> list[dict]:
+    out = []
+    for i, row in enumerate(_listed(value, "params.home")):
+        what = f"params.home[{i}]"
+        _fields(row, ("region", "from", "to"), what)
+        ends = [None if row[k] is None else date(row[k], f"{what}.{k}") for k in ("from", "to")]
+        if None not in ends and ends[0] > ends[1]:
+            raise ValueError(f"{what}: from {ends[0]} is after to {ends[1]}")
+        out.append({"region": _whole(row["region"], f"{what}.region"),
+                    "from": ends[0], "to": ends[1]})
+    if not out or out != sorted(out, key=_home_key) or len(set(map(canonical, out))) < len(out):
+        raise ValueError("params.home must be ranges, in order and each of them once")
+    return out
+
+
+def _home_key(row: Mapping) -> tuple:
+    """By region, then by the first day, an open start first, then by the last day."""
+    return row["region"], row["from"] or "", row["to"] or "9999"
+
+
+def home_ranges(homes: Iterable[Home]) -> list[dict]:
+    """``homes`` as the params of a list have them."""
+    rows = {canonical(row): row for row in (
+        {"region": h.region, "from": h.first and h.first.isoformat(),
+         "to": h.last and h.last.isoformat()} for h in homes)}
+    return sorted(rows.values(), key=_home_key)
+
+
+def homes_of(params: Mapping) -> list[Home]:
+    """The home ranges of the params of a list, as :func:`~wanderfill.plan.trips.judge`
+    takes them."""
+    return [Home(row["region"], *(None if row[k] is None else dt.date.fromisoformat(row[k])
+                                  for k in ("from", "to")))
+            for row in params.get("home", ())]
+
+
+def _check_home(runs: Sequence[ListedRun], homes: Sequence[Home]) -> None:
+    for run in runs:
+        inside = any(h.holds(run) for h in homes)
+        part = not inside and any(h.touches(run) for h in homes)
+        if (run.status == "home") is not inside:
+            raise ValueError(f"runs: {run.id} is home exactly where a home range has all its days")
+        if (HOME_PART in run.flags) is not part:
+            raise ValueError(f"runs: {run.id} is flagged {HOME_PART!r} exactly where a home range "
+                             "has some of its days and not all")
 
 
 def _sources_of(rows: Sequence) -> list[dict]:
@@ -531,9 +597,12 @@ def _check_boundaries(
     for (a, b), edge in zip(pairwise(runs), bounds, strict=True):
         kinds = {kind_of(s) for s in edge.suggestions}
         forced = _cuts_itself_off(a) or _cuts_itself_off(b)
-        if edge.forced is not forced or ("profile" in kinds) is not forced:
-            raise ValueError(f"boundaries: {edge.id} is forced, and says so, exactly where a run "
-                             "beside it is on the profile")
+        profile = _on_profile(a) or _on_profile(b)
+        home = "home" in (a.status, b.status)
+        if (edge.forced is not forced or ("profile" in kinds) is not profile
+                or (HOME_CUT in edge.suggestions) is not home or ("home" in kinds) is not home):
+            raise ValueError(f"boundaries: {edge.id} is forced, and says why, exactly where a "
+                             "run beside it is on the profile or home")
         if ("gap" in kinds) is not ((b.first - a.last).days > gap_days):
             raise ValueError(f"boundaries: {edge.id} and its gap do not agree with gap_days")
 
@@ -798,6 +867,7 @@ _TAKES: dict[str, frozenset[str]] = {
     "held": frozenset({"1", "2", "3", "4", "5", "6", "no", "?"}),
     "fixed": frozenset({"no"}),
     "there": frozenset(),
+    "home": frozenset(),
 }
 
 
@@ -850,7 +920,8 @@ def _run_answer(run: ListedRun, row: object, what: str) -> RunAnswer:
     if not row:
         raise ValueError(f"{what} says nothing; an answer that was not given is not there")
     if not takes:
-        raise ValueError(f"{what} takes no answer, for it is on the profile already")
+        why = "home" if run.status == "home" else "on the profile already"
+        raise ValueError(f"{what} takes no answer, for it is {why}")
     if "a" in row and (not isinstance(row["a"], str) or row["a"] not in takes):
         raise ValueError(f"{what} must be one of {', '.join(sorted(takes))}, not {_r(row['a'])}")
     if "words" in row:
@@ -884,6 +955,8 @@ __all__ = [
     "PhotoTime",
     "TripList",
     "build_list",
+    "home_ranges",
+    "homes_of",
     "left_out",
     "load_answers",
     "read_answers",

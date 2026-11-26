@@ -1421,7 +1421,7 @@ def _trips_review(args) -> int:
     from ..geo.resolve import RegionResolver
     from ..geo.tiles import TileReader
     from ..plan.review import default_speeds, grade_by_origin, load_spans
-    from ..plan.trip_list import build_list, left_out, render_page
+    from ..plan.trip_list import build_list, home_ranges, left_out, render_page
     from ..plan.trip_plan import trips_listed, visits_in
     from ..plan.trips import (
         SWEEP_GAPS,
@@ -1454,6 +1454,13 @@ def _trips_review(args) -> int:
     nowhere = [p.date for p in unplaced if p.origin == "own-camera"]
 
     catalogue = _catalogue(c)
+    homes = list(args.home or ())
+    for flag, ids in (("--focus", args.focus or ()), ("--home", [h.region for h in homes])):
+        if unknown := sorted({r for r in ids if r not in catalogue}):
+            raise WanderfillError(f"{flag}: region {', '.join(map(str, unknown))} is not in the "
+                                  "list of regions; give the id as NomadMania has it")
+    if not homes:
+        _home_hint(c, catalogue)
     print("placing the photos on the map; the first run reads many map tiles, and later runs "
           "find them on the disk...", file=sys.stderr)
     show = _progress_printer()
@@ -1473,7 +1480,9 @@ def _trips_review(args) -> int:
     snapshot = c.snapshot(regions)
     visits = visits_in(snapshot)
     runs = judge(find_runs(obs, gap_days=args.gap_days, track=track, **how), obs, visits,
-                 assets=mine, **when)
+                 assets=mine, home=homes, **when)
+    chosen = ({"focus": sorted(set(args.focus))} if args.focus else {}) | (
+        {"home": home_ranges(homes)} if homes else {})
     fast = speeds["fast_kmh"]
     trip_list = build_list(
         runs, boundaries(runs, gap_days=args.gap_days, obs=obs, fast_kmh=fast),
@@ -1481,7 +1490,7 @@ def _trips_review(args) -> int:
         names={r: _region_name(row, r) for r, row in catalogue.items()},
         visits=visits, trips=trips_listed(c, runs),
         params={"since": args.since, "until": args.until, "gap_days": args.gap_days,
-                "speeds": speeds, "spans": bool(args.spans), **flights},
+                "speeds": speeds, "spans": bool(args.spans), **flights, **chosen},
         sources=_trip_sources(args, library, mine.values(), tracks, spans),
         no_track=args.no_track,
         coverage={"tiles_read": len(tiles.asked - tiles.unread),
@@ -1489,7 +1498,8 @@ def _trips_review(args) -> int:
                   "unread_photos": sum(o.place.state == "unread" for o in obs)},
         left_out=left_out(obs, since=args.since, until=args.until, other_origin=other,
                           no_place=sum(map(in_dates, nowhere))),
-        sweep=sweep(obs, visits, gaps=gaps, fast_kmh=fast, **when, **how), assets=mine)
+        sweep=sweep(obs, visits, gaps=gaps, fast_kmh=fast, home=homes, **when, **how),
+        assets=mine)
     paths = _write_pair(Path(args.out), "trips", trip_list, render_page(trip_list))
     _print_trips(trip_list)
     _print_paths(paths)
@@ -1500,6 +1510,40 @@ def _trips_review(args) -> int:
         print("run `trips plan` on the list and the answers. The command cannot be shown here, "
               "for the name of the list has characters in it that a terminal does not show.")
     return 3 if any(trip_list.not_read) else 0
+
+
+def _print_home_and_focus(m) -> None:
+    """What the owner's --home and --focus did, by region."""
+    from ..plan.model import one_line
+    from ..plan.trip_list import homes_of
+    from ..plan.trips import HOME_PART, in_focus
+
+    names = {r.region: one_line(r.name) for r in m.runs}
+    name = lambda region: f"{region} ({names.get(region, 'no run on this list')})"  # noqa: E731
+    for h in homes_of(m.params):
+        n = sum(h.holds(r) for r in m.runs)
+        print(f"  home {name(h.region)}, from {h.first or 'any day'} to {h.last or 'any day'}: "
+              f"{_n(n, 'run')} folded")
+    for r in (r for r in m.runs if HOME_PART in r.flags):
+        print(f"  {name(r.region)}, {r.first} to {r.last}: partly inside a home range you gave, "
+              "so it is asked about as any other")
+    if focus := m.params.get("focus"):
+        parts = in_focus(m.runs, m.boundaries, focus)
+        shown = sum(map(len, parts))
+        print(f"  focus on {', '.join(map(name, focus))}: {_n(len(parts), 'trip')} with "
+              f"{_n(shown, 'run')} shown, {_n(len(m.runs) - shown, 'run')} not shown")
+
+
+def _home_hint(c: NomadMania, catalogue: dict) -> None:
+    """One line, where the profile names a home and the owner gave none. Nothing is folded."""
+    try:
+        said = c.home_regions()
+    except (ApiError, KeyError, TypeError, ValueError):
+        return
+    if said:
+        names = ", ".join(f"{r} ({_region_name(catalogue.get(r, {}), r)})" for r in said)
+        print(f"your profile says home is {names}; pass --home ID[:FROM[:TO]] to fold it, with "
+              "the dates it was home. Nothing was folded.")
 
 
 def _catalogue(c: NomadMania) -> dict[int, dict]:
@@ -1603,12 +1647,17 @@ def _print_trips(m) -> None:
         for status, what in (
             ("offered", "offered"), ("held", "held, which your own words can release"),
             ("fixed", "that nothing releases"), ("there", "on the profile already"),
+            ("home", "at home, as you said: folded, and no answer is asked"),
         ):
             of = [r for r in m.runs if r.status == status]
+            if status == "home" and "home" not in p:
+                continue
             print(f"  {len(of):>5}  {what}")
-            kinds = [kind for r in of for kind in {kind_of(x) for x in r.reasons} - {"there"}]
+            kinds = [kind for r in of
+                     for kind in {kind_of(x) for x in r.reasons} - {"there", "home"}]
             for kind in sorted(set(kinds)):
                 print(f"         {kinds.count(kind):>5} {kind}")
+        _print_home_and_focus(m)
         print(f"  {_n(sum(bool(r.flight) for r in m.runs), 'run')} with a flight day at an end"
               if p["flight_days"] else "  flight days are not used, as you said")
         if p["flight_days"]:
@@ -2329,6 +2378,34 @@ def _km_arg(text: str) -> float:
         f"{text!r} is not a distance over 0 and up to {MAX_RADIUS_KM:g} km")
 
 
+def _ids_arg(text: str) -> list[int]:
+    """Region ids, one or more, with commas between."""
+    out = []
+    for part in text.split(","):
+        part = part.strip()
+        if not (part.lstrip("-").isascii() and part.lstrip("-").isdigit() and len(part) <= 9):
+            raise argparse.ArgumentTypeError(f"{part!r} is not a region id")
+        out.append(int(part))
+    return out
+
+
+def _homes_arg(text: str) -> list:
+    """``ID[:FROM[:TO]]``, one or more, with commas between. FROM and TO are inclusive."""
+    from ..plan.trips import Home
+
+    out = []
+    for part in text.split(","):
+        bits = part.strip().split(":")
+        if len(bits) > 3:
+            raise argparse.ArgumentTypeError(f"{part!r} is not ID[:FROM[:TO]]")
+        (region,) = _ids_arg(bits[0])
+        first, last = (_day_arg(b) if b else None for b in [*bits[1:], "", ""][:2])
+        if first and last and first > last:
+            raise argparse.ArgumentTypeError(f"{part!r}: {first} is after {last}")
+        out.append(Home(region, first, last))
+    return out
+
+
 def _gap_arg(text: str) -> int:
     if text.isascii() and text.isdigit() and len(text) <= 4 and (n := int(text)) >= 1:
         return n
@@ -2380,6 +2457,15 @@ def _trips_parser(sub) -> None:
     r.add_argument("--spans", metavar="FILE",
                    help="JSON list of your own: dates and boxes whose photos prove nothing "
                         "(use none) or only an airport (use airports)")
+    r.add_argument("--focus", type=_ids_arg, action="extend", metavar="ID[,ID...]",
+                   help="region ids you name: the page shows only the trips with a stay in one "
+                        "of them, whole, with their other stays. What is not shown holds none "
+                        "of them")
+    r.add_argument("--home", type=_homes_arg, action="extend", metavar="ID[:FROM[:TO]]",
+                   help="a region that was your home, from FROM to TO (YYYY-MM-DD, inclusive; "
+                        "either may be left out), and may be given again. A stay with all its "
+                        "days in it takes no answer, and ends a trip and starts the next. Only "
+                        "you say this: it is never read from your profile")
     t = r.add_mutually_exclusive_group(required=True)
     t.add_argument("--track", action="extend", nargs="+", metavar="FILE",
                    help="a day-by-day track (.csv, .gpx, .json, .geojson), and may be given "
