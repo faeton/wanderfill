@@ -653,7 +653,12 @@ The technical parts that are easy to get wrong:
   run, not a filter to apply blind: there it would drop the owner's own photos.
   `records_origin` is `False` when the library has neither column; a
   filtered reading that came back empty from one says nothing. An `unknown`
-  photo is not shown to be anybody's. An AirDrop is not the owner's either,
+  photo is not shown to be anybody's. The capture source says a camera of a
+  device on this iCloud account, not whose: a partner's or a child's phone
+  signed in to it reads the same. `trips review` and `series review` print the
+  models they took on it, year by year. Read them out; a model that was not the
+  owner's is theirs to see, and `--no-capture-source` turns all of them back
+  into `unknown`. Do not decide it for them. An AirDrop is not the owner's either,
   even when the owner says they mostly AirDrop between their own phones: on that
   library about two thirds of the AirDropped photos came from camera models
   the owner never used.

@@ -2526,7 +2526,7 @@ def test_a_photo_carries_the_zone_its_clock_was_in(tmp_path):
     con.close()
     got = {a.uuid: a.zone for a in PhotosAppSource(library=lib).assets()}
     assert got == {"u1": 0, "u2": 19800, "u3": -36000, "u4": None, "u5": None, "u6": None}
-    assert list(PhotoAsset.__dataclass_fields__)[-2:] == ["zone", "captured"]
+    assert list(PhotoAsset.__dataclass_fields__)[-3:] == ["zone", "captured", "camera"]
     assert PhotoAsset("u", noon, 1.0, 1.0, "", "").zone is None
 
 
@@ -2713,6 +2713,49 @@ def test_a_library_with_a_capture_source_and_no_bundle_id_column_is_read(tmp_pat
     args = type("A", (), {"library": str(lib)})()
     _library, assets, _others = _photo_library(args)
     assert len(assets) == 2
+
+
+def test_the_reviews_name_the_models_they_take_by_capture_source(tmp_path, capsys):
+    """The capture source says a camera of this iCloud account, not whose hand held it.
+
+    A partner's iPad signed in to the same account reads as the owner's camera. So
+    the reviews print, year by year, the models they counted on the capture source
+    alone, and ``--no-capture-source`` turns all of them back into ``unknown``,
+    those with no location included.
+    """
+    import sqlite3
+
+    from wanderfill.cli.main import _photo_library
+
+    noon = dt.datetime(2022, 5, 13, 12)
+    lib = _photos_library(tmp_path, [(noon, 0, 1.0, 1.0), (noon, 0, 2.0, 2.0),
+                                     (noon, 0, -180.0, -180.0)], [None, "com.apple.camera", None])
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.executescript("""
+        ALTER TABLE ZADDITIONALASSETATTRIBUTES ADD COLUMN ZIMPORTEDBY;
+        UPDATE ZADDITIONALASSETATTRIBUTES SET ZIMPORTEDBY = 1;
+        CREATE TABLE ZEXTENDEDATTRIBUTES (ZASSET, ZCAMERAMODEL);
+        INSERT INTO ZEXTENDEDATTRIBUTES VALUES (1, 'iPad Pro'), (2, 'iPhone 18 Pro');
+    """)
+    con.commit()
+    con.close()
+
+    def read(off):
+        args = type("A", (), {"library": str(lib), "no_capture_source": off})()
+        _lib, assets, others = _photo_library(args, unplaced=True)
+        return ({a.uuid: (a.origin, a.camera) for a in assets},
+                {p.uuid: p.origin for p in others}, capsys.readouterr().err)
+
+    assets, others, err = read(False)
+    assert assets == {"u1": ("own-camera", "iPad Pro"), "u2": ("own-camera", "iPhone 18 Pro")}
+    assert others == {"u3": "own-camera"}
+    assert "by capture source only" in err and "2022: iPad Pro 1" in err
+    assert "iPhone 18 Pro" not in err  # an app was recorded for it: not this list
+
+    assets, others, err = read(True)
+    assert assets == {"u1": ("unknown", "iPad Pro"), "u2": ("own-camera", "iPhone 18 Pro")}
+    assert others == {"u3": "unknown"}
+    assert "capture source off" in err
 
 
 def test_points_and_assets_apply_the_same_origin_filter(tmp_path):

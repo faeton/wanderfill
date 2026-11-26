@@ -580,7 +580,9 @@ held. Some reasons are released by your own words (`open`, `brief`, `layover?`,
 to show that you left in between, a map tile that did not arrive, a region that is not in
 the catalogue, a run over `--since` or `--until`, two clocks that cannot both be right.
 One with a visit of exactly its days, or of those and a day beside a jump, is greyed and
-left out. Between two runs the page
+left out. The page opens with what to do in four steps, and shows only the runs that can
+go into a trip. The others are folded away in their place in the order, and a search box
+finds a region by its name. Between two runs the page
 asks whether a new trip starts wherever something suggests it: a flight, days with nothing,
 a run that is on the profile.
 
@@ -691,7 +693,7 @@ cost a wrong write or a wrong number the first time.
 | A phone can stamp one stale coordinate on every photo for hours in flight: 12 of them graded `ok` as ground speed, and two on two dates as two distinct days | `grade` counts consecutive photos with exactly one unrounded coordinate once and reports `Verdict.repeated`; held, not rejected, because a phone lying still looks the same; `test_grade_holds_a_frozen_fix` |
 | Photos taken standing still are legs of 0 km/h, and eleven of them outvoted the 6,600 km in the next twenty minutes | `looks_airborne` takes a leg only where the coordinate changes, rounded or not, timed from the last photo in one place; `test_standing_still_at_a_rounded_coordinate_does_not_outvote_a_flight` |
 | An AirDropped photo or a glasses import carries somebody else's coordinate or a stale one, and read like the owner's camera | `PhotoAsset.origin` from the importer Photos recorded, and `PhotosAppSource(origins=…)` for both readings; no importer and no camera capture source is `unknown`, never `own-camera`, and `records_origin` says when a library has neither; `test_unknown_is_never_own_camera` |
-| Photos recorded no bundle id for years, so `trips review` (own camera only) saw nothing of 2019–2024: 43,774 of the owner's own iPhone photos read as `unknown` | with no bundle id, a capture source `ZIMPORTEDBY` of 1 or 2 (this library's back or front camera) and no mark of sharing is `own-camera`; AirDrop, apps, shared photos and a missing value stay `unknown`; `test_no_bundle_id_but_this_librarys_camera_is_own_camera` |
+| Photos recorded no bundle id for years, so `trips review` (own camera only) saw nothing of 2019–2024: 43,774 of the owner's own iPhone photos read as `unknown` | with no bundle id, a capture source `ZIMPORTEDBY` of 1 or 2 (this library's back or front camera) and no mark of sharing is `own-camera`; AirDrop, apps, shared photos and a missing value stay `unknown`; the reviews print the camera models taken this way, year by year, because another person's device on the same iCloud account reads the same, and `--no-capture-source` turns it off; `test_no_bundle_id_but_this_librarys_camera_is_own_camera`, `test_the_reviews_name_the_models_they_take_by_capture_source` |
 | A photo's local clock runs backwards across the date line, so sorting by it puts the arrival before the departure | `PhotoAsset.taken_utc` is the absolute time; `taken` still dates the photo; `test_taken_utc_orders_photos_across_a_date_line_flight` |
 | Photos stores absolute time and the offset apart, so a date window cut at the Mac's midnight trims or pads the edge days when the Mac and the camera are in different zones | `WINDOW` cuts on the photo's own wall clock; `test_since_is_the_photos_date_not_the_macs` |
 

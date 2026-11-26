@@ -11,6 +11,10 @@ history has the rest.
   shared. Before this, `trips review` (which reads your own camera only) could see
   almost nothing from 2019 to 2024. AirDrop, other apps and shared photos are
   unchanged and stay out of it.
+  The library knows only that a device on your iCloud account took the photo, not
+  whose device it was. So `trips review` and `series review` now print the camera
+  models they counted this way, year by year. If a model was not yours,
+  `--no-capture-source` turns the rule off.
 
 NomadMania changed three things under the package. Each is written down here
 and checked against the live API on 2026-11-25.

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -991,6 +992,12 @@ def _photo_library(args, *, unplaced: bool = False) -> tuple[Path, list, list]:
         others = list(src.without_location()) if unplaced else []
     except (OSError, sqlite3.Error, ValueError, OverflowError) as exc:
         raise WanderfillError(f"{_shown(library)} cannot be read: {_shown(exc)}") from None
+    off = getattr(args, "no_capture_source", False)
+    _print_capture_source(assets, off=off)
+    if off:
+        assets = [dataclasses.replace(a, captured=False) for a in assets]
+        others = [dataclasses.replace(p, origin="unknown", by_capture=False)
+                  if p.by_capture else p for p in others]
     if not src.records_origin:
         raise WanderfillError(
             f"{_shown(library)} records neither which app imported a photo nor which camera "
@@ -998,6 +1005,31 @@ def _photo_library(args, *, unplaced: bool = False) -> tuple[Path, list, list]:
             "which are from your own camera. Nothing was written."
         )
     return library, assets, others
+
+
+def _print_capture_source(assets, *, off: bool) -> None:
+    """Which camera models count as yours only because the library says a camera of this account.
+
+    Read it: a model that was not yours in that year is another person's device on the
+    same iCloud account, and ``--no-capture-source`` takes all of them out.
+    """
+    from ..sources.photos_app import by_capture_source
+
+    table = by_capture_source(assets)
+    if not table:
+        return
+    total = sum(sum(m.values()) for m in table.values())
+    if off:
+        print(f"capture source off: {total} photo(s) with no app recorded are not counted as "
+              "your camera", file=sys.stderr)
+        return
+    print(f"your camera by capture source only (no app recorded): {total} photo(s). "
+          "Check that every model was yours that year; if one was not, run again with "
+          "--no-capture-source", file=sys.stderr)
+    for year in sorted(table):
+        models = ", ".join(f"{name} {n}" for name, n in
+                           sorted(table[year].items(), key=lambda kv: -kv[1]))
+        print(f"  {year}: {models}", file=sys.stderr)
 
 
 def _shown(value: object) -> str:
@@ -2357,6 +2389,10 @@ def _trips_parser(sub) -> None:
                    help="say that there is no track that covers these dates")
     r.add_argument("--library", metavar="PATH",
                    help="path to a .photoslibrary (default: the standard one)")
+    r.add_argument("--no-capture-source", action="store_true",
+                   help="a photo with no app recorded is not your camera's even where the "
+                        "library says a camera of this iCloud account took it: for an account "
+                        "that somebody else's phone or iPad was signed in to")
     r.add_argument("--out", default="review/trips", metavar="DIR",
                    help="directory for the two files. They hold where you were and when")
     r.set_defaults(func=cmd_trips_review)
@@ -2410,6 +2446,10 @@ def _series_parser(sub) -> None:
                    help="only this series, and may be given again (default: all on the map near)")
     r.add_argument("--library", metavar="PATH",
                    help="path to a .photoslibrary (default: the standard one)")
+    r.add_argument("--no-capture-source", action="store_true",
+                   help="a photo with no app recorded is not your camera's even where the "
+                        "library says a camera of this iCloud account took it: for an account "
+                        "that somebody else's phone or iPad was signed in to")
     r.add_argument("--out", default="review", metavar="DIR",
                    help="directory for the two files. They hold coordinates and dates")
     r.set_defaults(func=cmd_series_review)

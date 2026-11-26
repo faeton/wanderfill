@@ -217,11 +217,12 @@ SELECT a.ZUUID                                    AS uuid,
        {{importer}}                               AS importer,
        {{captured}}                               AS captured,
        a.ZDATECREATED + :epoch                    AS utc,
-       aa.ZTIMEZONEOFFSET                         AS zone
+       aa.ZTIMEZONEOFFSET                         AS zone,
+       {{camera}}                                 AS camera
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
-WHERE {MINE}
+{{camera_join}}WHERE {MINE}
 {WINDOW}{{origin}}ORDER BY ts
 """
 
@@ -247,6 +248,8 @@ class DatedPhoto:
     uuid: str
     date: dt.date
     origin: Origin
+    by_capture: bool = False
+    """``own-camera`` only because of the capture source, with no app recorded."""
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,7 @@ class PhotoAsset:
     taken_utc: dt.datetime | None = None
     zone: int | None = None
     captured: bool = False
+    camera: str | None = None
 
     @property
     def origin(self) -> Origin:
@@ -414,7 +418,14 @@ class PhotosAppSource:
                     con.create_function("origin_of", 2, origin_of)
                     keep = ", ".join(f"'{n}'" for n in names)  # four known names, checked above
                     origin = f"  AND origin_of({importer}, {captured}) IN ({keep})\n"
-                sql = sql.format(importer=importer, captured=captured, origin=origin)
+                tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
+                has_model = "ZEXTENDEDATTRIBUTES" in tables and any(
+                    c[1] == "ZCAMERAMODEL"
+                    for c in con.execute("PRAGMA table_info(ZEXTENDEDATTRIBUTES)"))
+                join = "LEFT JOIN ZEXTENDEDATTRIBUTES e ON e.ZASSET = a.Z_PK\n"
+                camera, camera_join = ("e.ZCAMERAMODEL", join) if has_model else ("NULL", "")
+                sql = sql.format(importer=importer, captured=captured, origin=origin,
+                                 camera=camera, camera_join=camera_join)
                 return con.execute(sql, params).fetchall()
             finally:
                 con.close()
@@ -441,6 +452,7 @@ class PhotosAppSource:
         for (
             uuid, ts, lat, lon, directory, filename,
             original_name, capture_device, favorite, kind, place, importer, captured, utc, zone,
+            camera,
         ) in rows:
             yield PhotoAsset(
                 uuid=str(uuid),
@@ -465,12 +477,15 @@ class PhotosAppSource:
                 captured=captured == 1,
                 taken_utc=dt.datetime.fromtimestamp(float(utc), dt.timezone.utc),
                 zone=int(zone) if isinstance(zone, (int, float)) else None,
+                camera=str(camera) if camera not in (None, "") else None,
             )
 
     def without_location(self) -> Iterator[DatedPhoto]:
         """The dated photos that have no coordinate, which the other two readings leave out."""
         for uuid, day, importer, captured in self._read(DATED_QUERY, self._bounds()):
-            yield DatedPhoto(str(uuid), dt.date.fromisoformat(day), origin_of(importer, captured))
+            origin = origin_of(importer, captured)
+            yield DatedPhoto(str(uuid), dt.date.fromisoformat(day), origin,
+                             by_capture=origin == "own-camera" and importer in (None, ""))
 
     def points(self) -> Iterator[DayPoint]:
         rows = self._read(QUERY, {**self._bounds(), "precision": self.precision})
@@ -482,6 +497,23 @@ class PhotosAppSource:
                 source=self.name,
                 weight=int(assets),
             )
+
+
+def by_capture_source(assets) -> dict[int, dict[str, int]]:
+    """The photos that are ``own-camera`` by capture source only: year -> camera model -> count.
+
+    The capture source says a camera of a device on this iCloud library, not whose
+    hand held it. A partner's or a child's phone signed in to the same account
+    looks the same. So the reviews print this, and a model that is not the owner's
+    in a year is theirs to see and to turn off with ``--no-capture-source``.
+    """
+    out: dict[int, dict[str, int]] = {}
+    for a in assets:
+        if a.captured and a.importer is None:
+            models = out.setdefault(a.date.year, {})
+            name = a.camera or "(no model recorded)"
+            models[name] = models.get(name, 0) + 1
+    return out
 
 
 CAMERA_SOURCES = (1, 2)
