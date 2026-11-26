@@ -14,7 +14,7 @@ The command set encodes the safety model rather than merely documenting it:
                answers
     show       print a plan for a human to read
     apply      execute a plan file, and only a plan file
-    share      draw your UN / UN+ / NM numbers as an image. Reads only.
+    share      draw your UN / ATLAS / NM numbers as an image. Reads only.
     history    where was I, and when: visa forms, ESTA, tax days, absences. Reads only.
     delete     undo ONE thing you have named by id: a visit, a trip, a region's
                visits, a DARE mark or a KYE tick
@@ -1756,7 +1756,7 @@ def cmd_share(args) -> int:
         avatar=avatar, fonts=fonts, handle=args.handle,
         show_rank=not args.no_rank, show_extras=not args.no_extras,
     )
-    print(f"UN {stats.un} / {sh.UN_MEMBERS}   UN+ {stats.un_plus} / {stats.un_plus_total}"
+    print(f"UN {stats.un} / {sh.UN_MEMBERS}   ATLAS {stats.atlas} / {stats.atlas_total}"
           f"   NM {stats.nm} / {stats.nm_total}")
     if stats.rank:
         print(f"rank #{stats.rank} worldwide"
@@ -2618,7 +2618,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     shr = sub.add_parser(
         "share",
-        help="render your UN / UN+ / NM numbers as an image for stories and posts",
+        help="render your UN / ATLAS / NM numbers as an image for stories and posts",
         description=(
             "Draw a card with your three headline counts, your rank and a map of "
             "every region you have marked. Reads the profile, writes PNG files. "

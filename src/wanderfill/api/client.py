@@ -89,6 +89,10 @@ A region whose only visit is a transit is absent from
 ``maps/get-visited-regions-ids-simple`` and from the region total, although the
 visit itself is stored and returned. Measured in October 2026: two ``add-visit``
 writes, at quality 2 and quality 1, moved the region count by one.
+
+The website stopped asking for a quality with its December 2025 trip entry
+("transit is not a visit"); the API did not stop storing one, and every visit
+read on 2026-11-25 still carried it. The scale is the API's, not the page's.
 :func:`wanderfill.plan.apply.verify` reports such a visit as ``not_counted``
 rather than letting a plan summary promise a region the profile will not show.
 """
@@ -470,14 +474,17 @@ class NomadMania:
         """A profile page's data, as ``nomadmania.com/profile/<id>`` draws it.
 
         ``scores`` here are **the numbers on the profile**: ``score_un``,
-        ``score_unp`` (UN+), ``score_nm``, ``score_mqp`` (DARE), ``score_kye``,
+        ``score_atlas`` (ATLAS, out of ``atlas_count`` beside the scores),
+        ``score_unp`` (UN+, a list the site dropped on 2026-11-11 and the API
+        still answers: do not quote it), ``score_nm``, ``score_mqp`` (DARE), ``score_kye``,
         ``score_tcc``, ``score_yes``, ``score_slow*``, ``rank_nm`` and
         ``rank_country``. Quote these rather than recomputing them.
 
-        UN+ in particular cannot be recomputed from ``countries()``: that list
-        is the 196 SLOW/YES countries, while UN+ is NomadMania's 265 "UN
+        UN+ in particular could not be recomputed from ``countries()``: that
+        list is the 196 SLOW/YES countries, while UN+ was NomadMania's 265 "UN
         countries and territories". Counting visited rows of the 196 gave 104
-        on a profile whose page said 121, and that number went on a card.
+        on a profile whose page said 121, and that number went on a card. ATLAS
+        cannot be recomputed from it either.
         """
         return self.t.webapi("profile/get-profile-data", profile_id=int(profile_id))["data"]
 
@@ -518,7 +525,7 @@ class NomadMania:
     def countries(self) -> list[dict]:
         """196 countries with visited flag, region counts, SLOW tiers and per-country YES.
 
-        Country, UN, UN+ and SLOW are *derived* from marked regions. There is
+        Country, UN, ATLAS and SLOW are *derived* from marked regions. There is
         nothing here to write — only to read back and check.
 
         The ``yes`` field is renamed to ``yes_stored`` on the way out, because it

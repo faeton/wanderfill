@@ -54,7 +54,7 @@ So status codes tell you almost nothing. Parse the body.
 
 | Endpoint | Notes |
 |---|---|
-| `regions/get-regions-list-2` | The live catalogue, 1381 regions. The authority on which ids exist. |
+| `regions/get-regions-list-2` | The live catalogue: 1381 regions on 2026-11-25, after the 2026 additions to the 1,301 of 2022. The authority on which ids exist; read its size, never assume it. |
 | `regions/get-megaregions` | 28 mega-regions the map is organised by. |
 | `quickEnter/get-regions` `{megaregion}` | Regions within one mega-region. |
 
@@ -88,8 +88,8 @@ bulk reads four at a time.
 | `quickEnter/get-visits-to-region` `{region}` | every visit record for one region |
 | `trips/get-trips-for-year-app` `{year}` | trip index by year. The order of the trips varies between reads, and so does `statistics`; the entries were otherwise identical over 15 reads on 2026-11-24. A row has `id`, `date_from`, `date_to` (`YYYY-MM-DD`, or null; both are null on many older trips), `year`, `description`, `dates_missing` and `regions` (measured 2026-11) |
 | `trips/get-trip` `{trip_id}` | `trip`: one trip with its regions; its header `date_from` and `date_to` are `YYYY-MM-DD` strings (read on one live trip, 2026-11-24) |
-| `slow/get-slow-app` | 196 SLOW/YES countries: visited flag, `visited_regions`, `slow11/31/101`, per-country `yes`. **Not** the UN+ list. |
-| `profile/get-profile-data` `{profile_id}` | what the profile page draws: `scores.score_un`, `score_unp` (UN+), `score_nm`, `score_mqp` (DARE), `score_kye`, `score_tcc`, `score_yes`, `score_slow*`, `score_deep`, `score_whs`, `rank_nm`, `rank_country`; plus `user_data`, `friends`, `series`. Missing `profile_id` answers `Missing params: profile_id.` |
+| `slow/get-slow-app` | 196 SLOW/YES countries: visited flag, `visited_regions`, `slow11/31/101`, per-country `yes`. **Not** the ATLAS (formerly UN+) list. |
+| `profile/get-profile-data` `{profile_id}` | what the profile page draws: `scores.score_un`, `score_atlas` (ATLAS), `score_unp` (UN+, still answered after the site dropped the list on 2026-11-11), `score_nm`, `score_mqp` (DARE), `score_kye`, `score_tcc`, `score_yes`, `score_slow*`, `score_deep`, `score_whs`, `rank_nm`, `rank_country`; plus `atlas_count` (the size of the ATLAS list, 137 on 2026-11-25), `user_data`, `friends`, `series`. Missing `profile_id` answers `Missing params: profile_id.` |
 | `user/status` | `{result, status, admin}` — **no account id** |
 | `user/status-quick` | the same plus `uid`, `messages`. Use this for identity. |
 | `user/get-settings` | `user_id`, `homebase`, `homebase2`, and the rest of the profile |
@@ -488,13 +488,20 @@ has enumerated them. If you are relying on the recomputation, do that first.
 
 ## Derived scores
 
-Countries, UN, UN+, SLOW and YES are all computed from marked regions. There is
+Countries, UN, ATLAS, SLOW and YES are all computed from marked regions. There is
 nothing to write. To *read* them, use `profile/get-profile-data` — they are its
 `scores` — rather than recomputing.
 
-- **UN+** is NomadMania's "UN countries and territories", 265 of them (the
-  figure is in the profile page's tooltip; the API returns no denominator).
-  It is not the 196-row `slow/get-slow-app` list. On one profile: 102 UN,
+- **ATLAS** replaced UN+ on 11 November 2026 (nomadmania.com/launching-atlas-list/):
+  137 "Additional Territories, Lands and States", with the 193 UN members and
+  England taken out, reviewed every year, scored from marked regions (Juan
+  Fernandez from DARE). `score_atlas` is the score and `atlas_count` beside
+  the scores is the size. `score_unp` is still in the answer, read 2026-11-25,
+  and the profile page no longer offers UN+: do not quote it. UN itself is now
+  the 193 members; Kosovo and the Vatican left it in June 2026.
+- **UN+**, until then, was NomadMania's "UN countries and territories", 265 of
+  them (the figure was in the profile page's tooltip; the API returned no
+  denominator). It is not the 196-row `slow/get-slow-app` list. On one profile: 102 UN,
   104 visited rows of the 196, 108 ids from `get-visited-countries-ids-simple`,
   114 distinct region flags — and 121 UN+ on the page. None of the first four
   reproduces the fifth, so quote `score_unp`.

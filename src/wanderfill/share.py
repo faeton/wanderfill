@@ -13,8 +13,10 @@ The card shows the three figures people compare on NomadMania, read from the
 same endpoints the site's own pages use:
 
 - **UN** — countries visited among the 193 UN member states.
-- **UN+** — NomadMania's "UN countries and territories", 265 of them: Hong
-  Kong, Gibraltar, Greenland, Abkhazia and the like count on their own.
+- **ATLAS** — NomadMania's "Additional Territories, Lands and States",
+  137 of them on launch: Hong Kong, Gibraltar, Greenland, Abkhazia and the like.
+  It replaced UN+ on 11 November 2026 and holds no UN member at all. The
+  denominator is the profile's own ``atlas_count``, read, not hardcoded.
 - **NM** — regions visited out of the live catalogue (1381 at the time of
   writing; read, not hardcoded).
 
@@ -22,7 +24,9 @@ All of them, with rank, DARE, KYE, SLOW and YES, come from
 ``profile/get-profile-data`` — the request the profile page itself makes — so
 the card says exactly what the profile says. Nothing here recomputes a score.
 That is not caution for its own sake: an earlier version counted UN+ from the
-196-row SLOW/YES country list and printed 104 for a profile showing 121.
+196-row SLOW/YES country list and printed 104 for a profile showing 121. And
+the API still answers ``score_unp`` after UN+ left the site, so a field being
+there says nothing about the site still showing it.
 
 The name and avatar come from ``user/get-settings``; the KYE denominator from
 ``kye/get-kye``. The map paints every region the profile has
@@ -62,10 +66,6 @@ if TYPE_CHECKING:
     from PIL import ImageFont
 
 UN_MEMBERS = 193
-# The size of NomadMania's UN+ list ("UN countries and territories"). The API
-# returns the score but not the denominator; this is the figure the profile
-# page prints in its UN+ tooltip (wp_pages/profile), read 2026-10-14.
-UN_PLUS_TOTAL = 265
 
 AVATAR_URL = "https://nomadmania.com/img/avatars/{avatar}"
 PROFILE_URL = "nomadmania.com/profile/{uid}"
@@ -98,8 +98,8 @@ class Stats:
     uid: int
     name: str
     un: int
-    un_plus: int
-    un_plus_total: int
+    atlas: int
+    atlas_total: int
     nm: int
     nm_total: int
     rank: int | None = None
@@ -130,7 +130,8 @@ def collect(c: NomadMania, *, name: str | None = None) -> Stats:
     """
     settings = c.settings()
     uid = int(settings.get("user_id") or c.account_id())
-    scores = c.profile(uid).get("scores") or {}
+    profile = c.profile(uid)
+    scores = profile.get("scores") or {}
 
     def score(key: str) -> int | None:
         # Some arrive as strings ("54"), and a rank of -1 means "unranked".
@@ -141,9 +142,18 @@ def collect(c: NomadMania, *, name: str | None = None) -> Stats:
             return None
         return None if n is not None and n < 0 else n
 
-    for key in ("score_un", "score_unp", "score_nm"):
+    for key in ("score_un", "score_atlas", "score_nm"):
         if score(key) is None:
             raise ApiError("profile/get-profile-data", f"no {key} in scores", scores)
+    # The size of the ATLAS list sits beside the scores, not in them. It is
+    # reviewed every year, so a missing one is an error, not a 137 from memory.
+    try:
+        atlas_total = int(profile.get("atlas_count"))
+    except (TypeError, ValueError):
+        atlas_total = 0
+    if atlas_total <= 0:
+        raise ApiError("profile/get-profile-data", "no atlas_count beside the scores",
+                       {k: v for k, v in profile.items() if k != "user_data"})
 
     catalogue = c.regions()
     visited = sorted(c.visited_region_ids())
@@ -163,8 +173,8 @@ def collect(c: NomadMania, *, name: str | None = None) -> Stats:
         uid=uid,
         name=name or "",
         un=score("score_un"),
-        un_plus=score("score_unp"),
-        un_plus_total=UN_PLUS_TOTAL,
+        atlas=score("score_atlas"),
+        atlas_total=atlas_total,
         nm=score("score_nm"),
         nm_total=len(catalogue),
         rank=score("rank_nm"),
@@ -563,7 +573,7 @@ def render(
     visited = set(stats.visited_regions)
     cols = [
         ("UN", _fmt(stats.un), f"of {UN_MEMBERS}"),
-        ("UN+", _fmt(stats.un_plus), f"of {stats.un_plus_total}"),
+        ("ATLAS", _fmt(stats.atlas), f"of {stats.atlas_total}"),
         ("NM", _fmt(stats.nm), f"of {_fmt(stats.nm_total)}"),
     ]
     sep = "  \u00b7  "

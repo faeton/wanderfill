@@ -24,15 +24,15 @@ def test_collect_reads_and_never_writes():
     t = FakeTransport({
         "user/get-settings": {"user_id": 7, "first_name": "A", "last_name": "B",
                               "country": "X", "avatar": "7.webp"},
-        "profile/get-profile-data": {"data": {"scores": {
-            "score_un": 1, "score_unp": 3, "score_nm": 2, "score_mqp": 1, "score_kye": 2,
+        "profile/get-profile-data": {"data": {"atlas_count": 137, "scores": {
+            "score_un": 1, "score_atlas": 3, "score_nm": 2, "score_mqp": 1, "score_kye": 2,
             "score_slow11": "4", "score_yes": 40, "rank_nm": 12, "rank_country": -1}}},
         "regions/get-regions-list-2": {"data": {"1": {"id": 1}, "2": {"id": 2}, "3": {"id": 3}}},
         "maps/get-visited-regions-ids-simple": {"ids": [1, 3]},
         "kye/get-kye": {"visited": [5, 6], "max": 434},
     })
     st = share.collect(NomadMania(token="fake", transport=t))
-    assert (st.un, st.un_plus, st.un_plus_total, st.nm, st.nm_total) == (1, 3, 265, 2, 3)
+    assert (st.un, st.atlas, st.atlas_total, st.nm, st.nm_total) == (1, 3, 137, 2, 3)
     assert st.name == "A B" and st.rank == 12 and st.country_rank is None
     assert st.kye == 2 and st.kye_total == 434 and st.dare == 1 and st.slow11 == 4
     assert st.visited_regions == [1, 3]
@@ -46,19 +46,45 @@ def test_collect_reads_and_never_writes():
 def test_un_plus_is_the_profiles_number_not_a_count_of_the_196():
     """The incident: 104 on the card, 121 on the profile.
 
-    ``slow/get-slow-app`` lists 196 SLOW/YES countries; UN+ is 265 countries
-    and territories. The card must never go back to counting the former.
+    ``slow/get-slow-app`` lists 196 SLOW/YES countries. A card must never go
+    back to counting it, for UN+ then and for ATLAS now.
     """
     t = FakeTransport({
         "user/get-settings": {"user_id": 7},
-        "profile/get-profile-data": {"data": {"scores": {
-            "score_un": 102, "score_unp": 121, "score_nm": 393}}},
+        "profile/get-profile-data": {"data": {"atlas_count": 137, "scores": {
+            "score_un": 102, "score_atlas": 36, "score_nm": 393}}},
         "regions/get-regions-list-2": {"data": {}},
         "maps/get-visited-regions-ids-simple": {"ids": []},
     })
     st = share.collect(NomadMania(token="fake", transport=t))
-    assert (st.un, st.un_plus, st.un_plus_total) == (102, 121, 265)
+    assert (st.un, st.atlas, st.atlas_total) == (102, 36, 137)
     assert "slow/get-slow-app" not in {a for a, _ in t.sent}
+
+
+def test_atlas_replaced_un_plus_and_the_old_field_is_not_quoted():
+    """11 November 2026: UN+ left the site for ATLAS, and ``score_unp`` did not leave the API.
+
+    A profile answering both must put ATLAS on the card, out of ``atlas_count``
+    and not a remembered 137, and the stale UN+ nowhere: not drawn, not in
+    ``stats.json``. One with only ``score_unp`` is refused, not drawn as UN+.
+    """
+    def client(data):
+        return NomadMania(token="fake", transport=FakeTransport({
+            "user/get-settings": {"user_id": 7},
+            "profile/get-profile-data": {"data": data},
+            "regions/get-regions-list-2": {"data": {}},
+            "maps/get-visited-regions-ids-simple": {"ids": []},
+        }))
+
+    st = share.collect(client({"atlas_count": 140, "scores": {
+        "score_un": 105, "score_unp": 125, "score_atlas": 36, "score_nm": 398}}))
+    assert (st.atlas, st.atlas_total) == (36, 140)
+    assert not any("un_plus" in k or "unp" in k for k in vars(st))
+
+    with pytest.raises(ApiError):
+        share.collect(client({"scores": {"score_un": 105, "score_unp": 125, "score_nm": 398}}))
+    with pytest.raises(ApiError):  # the score without the list it is out of
+        share.collect(client({"scores": {"score_un": 105, "score_atlas": 36, "score_nm": 398}}))
 
 
 def test_collect_refuses_a_profile_without_its_scores():
@@ -74,7 +100,7 @@ def square(lon, lat, size=10.0):
 
 @pytest.fixture
 def stats():
-    return share.Stats(uid=7, name="A B", un=101, un_plus=121, un_plus_total=265,
+    return share.Stats(uid=7, name="A B", un=101, atlas=36, atlas_total=137,
                        nm=391, nm_total=1381, rank=1418, country_rank=26, country="X",
                        dare=30, kye=100, kye_total=434, generated="2026-09-08",
                        visited_regions=[1])
@@ -113,7 +139,8 @@ def test_write_cards_records_the_claim_without_the_region_list(stats, tmp_path):
                                 polygons=None, avatar=None)
     assert (tmp_path / "nomadmania-7-square-paper.png").exists()
     claim = json.loads((tmp_path / "stats.json").read_text())
-    assert claim["un"] == 101 and claim["un_plus"] == 121 and claim["nm"] == 391
+    assert claim["un"] == 101 and claim["atlas"] == 36 and claim["nm"] == 391
+    assert "un_plus" not in claim
     assert claim["visited_regions"] == 1  # the count; the ids are not the claim
     assert written[-1].name == "stats.json"
 

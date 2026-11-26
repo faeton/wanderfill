@@ -119,8 +119,8 @@ maps/get-visited-dare-ids-simple         -> same for DARE (trust this one)
 regions/get-regions-list-2               -> the live 1381-region catalogue
 quickEnter/get-visits-to-region {region} -> EVERY visit record for one region
 trips/get-trips-for-year-app {year}      -> what trips already exist
-slow/get-slow-app                        -> 196 SLOW/YES countries, visited flags (not UN+)
-profile/get-profile-data {profile_id}    -> the numbers the profile page shows: UN, UN+, NM, ranks
+slow/get-slow-app                        -> 196 SLOW/YES countries, visited flags (not ATLAS)
+profile/get-profile-data {profile_id}    -> the numbers the profile page shows: UN, ATLAS, NM, ranks
 user/get-settings                        -> incl. `homebase` / `homebase2`
 ```
 
@@ -215,6 +215,14 @@ two adds, at quality 2 and quality 1, moved one profile's count by one. Say
 that at plan time, before the user picks a quality, not after the count comes
 back one short. `verify()` reports it as `not_counted`, for a standalone visit
 and for a region inside a trip alike.
+
+**The site no longer asks for a quality; the API still stores one.** Since the
+trip entry of December 2025 the website shows no Visit Quality section for 2025
+trips ("Visited or Not Visited", and transit is not a visit), while
+`get-visits-to-region` still returns `quality` on every record and `add-visit`
+still takes it. So the scale above is still the API's, and a profile edited on
+the website may carry whatever the site sends in its place. Read it; do not
+assume it was chosen.
 
 ### The five traps, in the order you will hit them
 
@@ -541,7 +549,7 @@ landing at 64°W is inside all three. Which ones the person ticks is their call;
 say where the photos are, not which flags to plant.
 
 **Countries are derived, not stored.** Marking regions updates the country
-counts, UN, UN+, SLOW and YES automatically. There is nothing to write.
+counts, UN, ATLAS, SLOW and YES automatically. There is nothing to write.
 
 **YES = "Years Elapsed Since"**, summed over 196 countries, lower better. Read
 `docs/nomadmania-api.md` before quoting a number, because two things about it are
@@ -603,6 +611,14 @@ is a region they may be asked to prove.** So:
 - Exemptions get **measured, not inferred**. "This region is too small to walk
   a kilometre across" must come from the polygon; deducing it from clustered
   photos hands the same exemption to two days in one hotel.
+- **Some ticks were placed by the server.** When NomadMania split a region in
+  2022, a tick on the old region moved to the *first-named* new one
+  (`static/changes_2022.pdf`), and regions moved to M@P arrived there marked.
+  How visits moved in the 2026 revision is not published. So a marked region
+  can carry a tick the owner never set, sometimes with the old visit's date or
+  none. Before a verification, list the marked "first" regions of each split
+  and their visits, and give them to `evidence`. It is a report: whether one
+  was theirs is the owner's to say, and removing it is rule 2's.
 - A region with no photographic evidence is **not** a region to remove. Say what
   is missing and let the user decide; deleting is theirs, and rule 2 stands.
 
@@ -645,7 +661,7 @@ The technical parts that are easy to get wrong:
 
 ## 6b. Sharing — the one output aimed at a feed, not the server
 
-`wanderfill share` draws the UN / UN+ / NM numbers, rank, DARE, KYE and a map
+`wanderfill share` draws the UN / ATLAS / NM numbers, rank, DARE, KYE and a map
 of marked regions as PNG cards. It is **read-only on the server side** and
 needs no plan: the numbers are the server's own counts, read from the same
 endpoints the site uses, and the map is the visited id list painted onto the
@@ -660,11 +676,15 @@ Two things to hold to:
   server behind it.
 - **Quote the profile's own numbers; never recompute one.** Every figure on
   the card is `score_*` from `profile/get-profile-data {profile_id}`, the
-  request the profile page makes. UN+ is NomadMania's 265 "UN countries and
-  territories" — not the 196 rows of `slow/get-slow-app`, which is the
-  SLOW/YES list. Counting visited rows of the 196 printed 104 for a profile
-  whose page said 121. The API returns no UN+ denominator; `UN_PLUS_TOTAL`
-  is the 265 the page's tooltip prints.
+  request the profile page makes. UN is the 193 member states. ATLAS
+  ("Additional Territories, Lands and States", 137 on launch) replaced UN+ on
+  11 November 2026 and holds no UN member; its score is `score_atlas` and its
+  size the profile's own `atlas_count`, both read, never remembered. Neither
+  is the 196 rows of `slow/get-slow-app`, which is the SLOW/YES list:
+  counting visited rows of the 196 printed 104 for a profile whose page said
+  121 UN+. The API still answers `score_unp` after the site dropped UN+; a
+  field that is still there is not a list that is still shown, so it is not
+  on the card.
 
 ## 6c. Travel history — answering a form somebody else wrote
 

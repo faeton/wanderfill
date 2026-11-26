@@ -176,15 +176,17 @@ wanderfill share --size all            # plus a square and a 1200×630 link card
 wanderfill share --theme paper --anonymous --handle @you
 ```
 
-It draws UN, UN+ and NM regions, your rank, DARE and KYE, and a map of
+It draws UN, ATLAS and NM regions, your rank, DARE and KYE, and a map of
 every region the profile has marked — the numbers the site shows, read from
 the endpoints the site reads them from, never derived here. Files land in
 `share/` with a `stats.json` saying exactly what the picture claims. Nothing
 is posted anywhere; the command has no way to.
 
-UN is the 193 member states. UN+ is NomadMania's "UN countries and
-territories", 265 of them — Hong Kong, Gibraltar, Greenland and Abkhazia each
-count on their own. Every number on the card is `score_*` from
+UN is the 193 member states. ATLAS — "Additional Territories, Lands and
+States" — is the list that replaced UN+ on 11 November 2026: 137 places on
+launch such as Hong Kong, Gibraltar, Greenland and Abkhazia, and no UN
+member. Its size is the profile's own `atlas_count`, not a constant, because
+NomadMania reviews it every year. Every number on the card is `score_*` from
 `profile/get-profile-data`, the request the profile page itself makes. An
 earlier version counted UN+ from the 196-row SLOW/YES country list and put
 104 on the card of a profile showing 121; nothing here recomputes a score now.
@@ -404,7 +406,7 @@ wanderfill export --full --out profile.json
 # read-only: which of your claimed regions could you actually prove?
 wanderfill evidence --check-dates --out evidence
 
-# read-only: your UN / UN+ / NM numbers as a story, a square and a link card
+# read-only: your UN / ATLAS / NM numbers as a story, a square and a link card
 wanderfill share --size all --out share
 
 # read-only: travel history for a visa form, ESTA, a tax year or plain recall
@@ -682,7 +684,8 @@ cost a wrong write or a wrong number the first time.
 | A tile that timed out read as an empty tile, so a point in it was given to a polygon in the next tile over, and that answer was cached for good | `TileReader.failed` holds every tile that did not arrive, and a point with one in its neighbourhood and no polygon around it is `tile_error`: no region, never cached, counted by `history` and `evidence` in the terminal and in their files, and asked again by the next run. A body that does not decode is not kept, and one already on disk is fetched again. Wrong `tile_nearest` answers cached by earlier versions cannot be told from right ones: `--refresh` asks again only about points with **no** region, so delete the coordinate cache (`~/.local/share/wanderfill/coords.json` by default) to re-ask them all; `test_a_failed_home_tile_is_not_answered_by_its_neighbour`, `test_tile_errors_are_not_saved_to_the_coordinate_cache`, `test_history_and_evidence_say_how_many_points_could_not_be_read` |
 | A day that could not be read counted as a day with no data, so `days` printed "under 183 even if every day with no data was here" and `absences` closed a run across it | `history` keeps "not read" apart from "no data", also on a day that has a placed point: it widens the `days` ceiling and removes the verdict, leaves an absence and the 365-day maximum "not settled", reopens an exact trip edge, and is listed in every rendering; `test_days_never_reassures_while_a_day_is_unread`, `test_an_unread_day_inside_an_absence_leaves_it_unsettled`, `test_a_trip_edge_beside_an_unread_day_is_not_exact`, `test_a_fully_read_run_prints_what_it_always_printed` |
 | `location/get-region` doubles as a live-location beacon | `share=0` is hardcoded, not a parameter |
-| UN+ is **not** a count over the 196-row `slow/get-slow-app` list; it is 265 countries and territories | `share` quotes `score_unp` from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
+| UN+ is **not** a count over the 196-row `slow/get-slow-app` list | `share` quotes the profile's own score from `profile/get-profile-data`; `test_un_plus_is_the_profiles_number_not_a_count_of_the_196` |
+| UN+ left the site for ATLAS (137) on 2026-11-11, and the API still answers `score_unp`, so a card drew a list nobody is shown, out of a remembered 265 | `share` draws `score_atlas` out of the profile's `atlas_count` and refuses a profile without either; `test_atlas_replaced_un_plus_and_the_old_field_is_not_quoted` |
 | A quality-1 transit is stored but absent from the visited list, so reading visits only for visited regions drops transits from a visa answer | `history` reads every region with `no_of_visits`, not only the visited list |
 | urllib asks for no compression, and the catalogue is 173 KB plain | Every request sends `Accept-Encoding: gzip`; `_inflate` also sniffs the magic bytes |
 | A phone can stamp one stale coordinate on every photo for hours in flight: 12 of them graded `ok` as ground speed, and two on two dates as two distinct days | `grade` counts consecutive photos with exactly one unrounded coordinate once and reports `Verdict.repeated`; held, not rejected, because a phone lying still looks the same; `test_grade_holds_a_frozen_fix` |
