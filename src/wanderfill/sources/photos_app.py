@@ -52,15 +52,20 @@ macOS DETAILS
   even the column, and a missing importer is ``unknown``: not evidence that it
   was somebody else's, and not the owner's camera on its own.
 - ``ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBY`` is the capture source Photos keeps
-  beside it: 1 the back camera and 2 the front one of a device signed in to this
-  library, 8 and 13 AirDrop, 3 another app. Until about 2024 Photos filled this
+  beside it: 1 the back camera and 2 the front one of the system Camera on a
+  device signed in to this iCloud library; 3 and 6 another app; the AirDropped
+  rows of one library carried 8 and 13. Until about 2024 Photos filled this
   in and left the bundle id empty: on one library 43,774 photos from 2019 to 2024
   had no bundle id and a 1 or a 2, and their camera models were one iPhone a
   year (XS Max, 11 Pro, 12 Pro, 13 Pro, 14 Pro, 15 Pro Max), the same
   succession that went on under ``com.apple.camera`` afterwards. So a photo
   with no bundle id, a 1 or a 2, and no mark of sharing (no shared-library
-  state, no contributor, no shared-album owner) is ``own-camera``. One that is
-  shared, or has any other value, stays ``unknown``.
+  state or scope, no contributor, no shared-album owner, collection share or
+  saved type 4) is ``own-camera``. One that is shared, or has any other value,
+  stays ``unknown``. What this cannot see: a photo of another participant that
+  Apple copied into the personal library when a shared library ended, if the
+  copy kept the 1 or 2 and lost every mark, would read as the owner's. It was
+  1 or 2 on another person's account, under the same iCloud library.
 - ``ZADDITIONALASSETATTRIBUTES.ZCAMERACAPTUREDEVICE = 1`` means the front
   camera. That is as close as a database can get to "selfie", and NomadMania
   counts a selfie as stronger proof than an ordinary photo.
@@ -330,13 +335,15 @@ class PhotosAppSource:
     origins:
         Read only photos of these origins (``own-camera``, ``airdrop``, ``other``,
         ``unknown``), in ``points()`` and ``assets()`` alike. ``None`` reads them
-        all; an empty set is refused. Not a filter to apply blind: where no importer
-        was recorded every photo is ``unknown``, so ``{"own-camera"}`` drops the
-        owner's own photos too.
+        all; an empty set is refused. Not a filter to apply blind: where neither a
+        bundle id nor a camera capture source was recorded the photo is ``unknown``,
+        so ``{"own-camera"}`` drops such photos of the owner's too.
 
-    ``importer_column`` says whether the library has an importer column, and is
-    ``None`` until something has been read. Print it beside an empty filtered
-    reading: ``False`` means the library cannot say, not that it holds nothing.
+    ``importer_column`` says whether the library has a bundle-id column, and
+    ``capture_column`` whether it has the capture source (``ZIMPORTEDBY``); both are
+    ``None`` until something has been read. ``records_origin`` is either of them.
+    Print it beside an empty filtered reading: ``False`` means the library cannot
+    say, not that it holds nothing.
     """
 
     library: Path = DEFAULT_LIBRARY
@@ -346,6 +353,14 @@ class PhotosAppSource:
     name: str = "photos.app"
     origins: frozenset[str] | None = None
     importer_column: bool | None = field(default=None, init=False, repr=False, compare=False)
+    capture_column: bool | None = field(default=None, init=False, repr=False, compare=False)
+
+    @property
+    def records_origin(self) -> bool | None:
+        """Whether the library can say of any photo whose it is: a bundle id or a capture source."""
+        if self.importer_column is None and self.capture_column is None:
+            return None
+        return bool(self.importer_column or self.capture_column)
 
     def __post_init__(self) -> None:
         self._origin_names()
@@ -393,6 +408,7 @@ class PhotosAppSource:
                 )
                 importer = "aa.ZIMPORTEDBYBUNDLEIDENTIFIER" if self.importer_column else "NULL"
                 captured = _captured(con)
+                self.capture_column = captured != "0"
                 origin = ""
                 if names is not None:
                     con.create_function("origin_of", 2, origin_of)
@@ -488,10 +504,19 @@ def _captured(con: sqlite3.Connection) -> str:
     parts = [f"COALESCE(aa.ZIMPORTEDBY, 0) IN {CAMERA_SOURCES}"]
     if "ZSHARECONTRIBUTORUSERIDENTIFIER" in aa:
         parts.append("aa.ZSHARECONTRIBUTORUSERIDENTIFIER IS NULL")
+    # Every mark of sharing the schema has, each read where the column exists. Any
+    # one of them keeps the photo `unknown`: a false `unknown` costs a photo of the
+    # owner's, a false `own-camera` claims somebody else's place.
     if "ZLIBRARYSCOPESHARESTATE" in a:
         parts.append("COALESCE(a.ZLIBRARYSCOPESHARESTATE, 0) = 0")
+    if "ZLIBRARYSCOPE" in a:
+        parts.append("a.ZLIBRARYSCOPE IS NULL")
     if "ZCLOUDOWNERHASHEDPERSONID" in a:
         parts.append("a.ZCLOUDOWNERHASHEDPERSONID IS NULL")
+    if "ZCOLLECTIONSHARE" in a:
+        parts.append("a.ZCOLLECTIONSHARE IS NULL")
+    if "ZSAVEDASSETTYPE" in a:
+        parts.append("COALESCE(a.ZSAVEDASSETTYPE, 0) <> 4")  # a shared album's copy
     return "(CASE WHEN " + " AND ".join(parts) + " THEN 1 ELSE 0 END)"
 
 

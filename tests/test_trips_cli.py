@@ -118,10 +118,12 @@ class Library:
 
     def __init__(self, library=None, since=None, until=None, origins=None):
         self.importer_column = None
+        self.records_origin = None
         Library.opened.append((library, since, until, origins))
 
     def assets(self):
         self.importer_column = Library.column
+        self.records_origin = Library.column
         yield from Library.photos
 
     def without_location(self):

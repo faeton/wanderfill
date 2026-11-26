@@ -2673,6 +2673,46 @@ def test_no_bundle_id_but_this_librarys_camera_is_own_camera(tmp_path):
     con.commit()
     con.close()
     assert [a.uuid for a in own.assets()] == ["u2"]  # a shared album's photo is not theirs
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.executescript("""
+        ALTER TABLE ZASSET ADD COLUMN ZCOLLECTIONSHARE;
+        ALTER TABLE ZASSET ADD COLUMN ZLIBRARYSCOPE;
+        UPDATE ZASSET SET ZCLOUDOWNERHASHEDPERSONID = NULL WHERE Z_PK = 1;
+    """)
+    for column, value in (("ZCOLLECTIONSHARE", 3), ("ZLIBRARYSCOPE", 1), ("ZSAVEDASSETTYPE", 4)):
+        con.execute(f"UPDATE ZASSET SET {column} = ? WHERE Z_PK = 1", (value,))
+        con.commit()
+        assert [a.uuid for a in own.assets()] == ["u2"], column
+        con.execute(f"UPDATE ZASSET SET {column} = ? WHERE Z_PK = 1",
+                    (0 if column == "ZSAVEDASSETTYPE" else None,))
+        con.commit()
+    assert [a.uuid for a in own.assets()] == ["u1", "u2"]
+    con.close()
+
+
+def test_a_library_with_a_capture_source_and_no_bundle_id_column_is_read(tmp_path):
+    """Codex's case: ``ZIMPORTEDBY`` without the bundle-id column must not be refused as mute."""
+    import sqlite3
+
+    from wanderfill.cli.main import _photo_library
+    from wanderfill.sources import PhotosAppSource
+
+    noon = dt.datetime(2022, 5, 13, 12)
+    lib = _photos_library(tmp_path, [(noon, 0, 1.0, 1.0), (noon, 0, 2.0, 2.0)])
+    src = PhotosAppSource(library=lib)
+    list(src.assets())
+    assert (src.importer_column, src.capture_column, src.records_origin) == (False, False, False)
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.execute("ALTER TABLE ZADDITIONALASSETATTRIBUTES ADD COLUMN ZIMPORTEDBY")
+    con.execute("UPDATE ZADDITIONALASSETATTRIBUTES SET ZIMPORTEDBY = 1 WHERE ZASSET = 1")
+    con.commit()
+    con.close()
+    src = PhotosAppSource(library=lib)
+    assert [a.origin for a in src.assets()] == ["own-camera", "unknown"]
+    assert (src.importer_column, src.capture_column, src.records_origin) == (False, True, True)
+    args = type("A", (), {"library": str(lib)})()
+    _library, assets, _others = _photo_library(args)
+    assert len(assets) == 2
 
 
 def test_points_and_assets_apply_the_same_origin_filter(tmp_path):

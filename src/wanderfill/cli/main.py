@@ -991,9 +991,10 @@ def _photo_library(args, *, unplaced: bool = False) -> tuple[Path, list, list]:
         others = list(src.without_location()) if unplaced else []
     except (OSError, sqlite3.Error, ValueError, OverflowError) as exc:
         raise WanderfillError(f"{_shown(library)} cannot be read: {_shown(exc)}") from None
-    if not src.importer_column:
+    if not src.records_origin:
         raise WanderfillError(
-            f"{_shown(library)} does not record which app imported a photo, so it cannot say "
+            f"{_shown(library)} records neither which app imported a photo nor which camera "
+            "took it, so it cannot say "
             "which are from your own camera. Nothing was written."
         )
     return library, assets, others

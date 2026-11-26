@@ -651,7 +651,7 @@ The technical parts that are easy to get wrong:
   and 13, an app's 3, or a shared-library, contributor's or shared-album photo.
   A library with neither column is all `unknown`, so this is still a check to
   run, not a filter to apply blind: there it would drop the owner's own photos.
-  `importer_column` is `False` when the library has no bundle-id column; a
+  `records_origin` is `False` when the library has neither column; a
   filtered reading that came back empty from one says nothing. An `unknown`
   photo is not shown to be anybody's. An AirDrop is not the owner's either,
   even when the owner says they mostly AirDrop between their own phones: on that
