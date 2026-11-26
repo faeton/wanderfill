@@ -643,12 +643,20 @@ The technical parts that are easy to get wrong:
   somewhere else the same day, the other photo is not evidence.
   `PhotosAppSource(origins=frozenset({"own-camera"}))` reads one origin only, in
   `points()` and `assets()` alike. Nothing uses it by default: `evidence` and
-  `history` read every origin. Older libraries have no importer recorded at
-  all, and those photos are `unknown`, never `own-camera`, so this is a check to
-  run, not a filter to apply blind: it would drop the owner's own photos from
-  those years. `importer_column` is `False` when the library has no such column;
-  a filtered reading that came back empty from one says nothing. An `unknown`
-  photo is not shown to be anybody's.
+  `history` read every origin. Until about 2024 Photos recorded no bundle id
+  but did record the capture source, `ZIMPORTEDBY`: a photo with no bundle id, a
+  1 (back camera) or 2 (front) and no mark of sharing is `own-camera`, and on one
+  library that was 43,774 photos of 2019–2024, one iPhone model a year. What is
+  left is `unknown`, which is never `own-camera`: no capture source, AirDrop's 8
+  and 13, an app's 3, or a shared-library, contributor's or shared-album photo.
+  A library with neither column is all `unknown`, so this is still a check to
+  run, not a filter to apply blind: there it would drop the owner's own photos.
+  `importer_column` is `False` when the library has no bundle-id column; a
+  filtered reading that came back empty from one says nothing. An `unknown`
+  photo is not shown to be anybody's. An AirDrop is not the owner's either,
+  even when the owner says they mostly AirDrop between their own phones: on that
+  library about two thirds of the AirDropped photos came from camera models
+  the owner never used.
 - Attribute exhibits against the **live tiles**, and carry the
   nearest-polygon flag through to the output. Offering a photo taken across a
   border as proof of the region on this side of it is precisely the accusation

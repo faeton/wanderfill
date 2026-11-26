@@ -2526,7 +2526,7 @@ def test_a_photo_carries_the_zone_its_clock_was_in(tmp_path):
     con.close()
     got = {a.uuid: a.zone for a in PhotosAppSource(library=lib).assets()}
     assert got == {"u1": 0, "u2": 19800, "u3": -36000, "u4": None, "u5": None, "u6": None}
-    assert list(PhotoAsset.__dataclass_fields__)[-1] == "zone"
+    assert list(PhotoAsset.__dataclass_fields__)[-2:] == ["zone", "captured"]
     assert PhotoAsset("u", noon, 1.0, 1.0, "", "").zone is None
 
 
@@ -2621,6 +2621,58 @@ def test_unknown_is_never_own_camera(tmp_path):
     own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
     assert [a.uuid for a in own.assets()] == ["u6"]
     assert [p.date for p in own.points()] == [dt.date(2024, 5, 6)]
+
+
+def test_no_bundle_id_but_this_librarys_camera_is_own_camera(tmp_path):
+    """The 2019-2024 incident: 43,774 of the owner's own iPhone photos had no bundle id.
+
+    Photos recorded the capture source (``ZIMPORTEDBY`` 1 back, 2 front) years before
+    it recorded the app, so ``trips review``, which reads the owner's camera only, saw
+    nothing of those years. A capture source of 1 or 2 with nothing marking it shared
+    is the owner's camera; AirDrop (8, 13), an app (3), no value, a shared-library
+    photo, a contributor's or a shared album's stays ``unknown``. A bundle id wins
+    over all of it, and a library without the column cannot say.
+    """
+    import sqlite3
+
+    from wanderfill.sources import PhotosAppSource
+
+    noon = dt.datetime(2022, 5, 13, 12)
+    lib = _photos_library(tmp_path, [(noon, 0, float(i), 1.0) for i in range(1, 10)],
+                          [None] * 8 + ["com.apple.sharingd"])
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.executescript("""
+        ALTER TABLE ZADDITIONALASSETATTRIBUTES ADD COLUMN ZIMPORTEDBY;
+        ALTER TABLE ZADDITIONALASSETATTRIBUTES ADD COLUMN ZSHARECONTRIBUTORUSERIDENTIFIER;
+        ALTER TABLE ZASSET ADD COLUMN ZLIBRARYSCOPESHARESTATE;
+        ALTER TABLE ZASSET ADD COLUMN ZCLOUDOWNERHASHEDPERSONID;
+    """)
+    for pk, by in enumerate([1, 2, 8, 13, 3, None, 1, 1, 1], 1):
+        con.execute("UPDATE ZADDITIONALASSETATTRIBUTES SET ZIMPORTEDBY = ? WHERE ZASSET = ?",
+                    (by, pk))
+    con.execute("UPDATE ZADDITIONALASSETATTRIBUTES"
+                " SET ZSHARECONTRIBUTORUSERIDENTIFIER = 'x' WHERE ZASSET = 7")
+    con.execute("UPDATE ZASSET SET ZLIBRARYSCOPESHARESTATE = 1 WHERE Z_PK = 8")
+    con.commit()
+    con.close()
+
+    src = PhotosAppSource(library=lib)
+    got = {a.uuid: (a.importer, a.origin) for a in src.assets()}
+    assert got == {
+        "u1": (None, "own-camera"), "u2": (None, "own-camera"),
+        "u3": (None, "unknown"), "u4": (None, "unknown"), "u5": (None, "unknown"),
+        "u6": (None, "unknown"), "u7": (None, "unknown"), "u8": (None, "unknown"),
+        "u9": ("com.apple.sharingd", "airdrop"),  # the bundle id wins over the 1
+    }
+    own = PhotosAppSource(library=lib, origins=frozenset({"own-camera"}))
+    assert [a.uuid for a in own.assets()] == ["u1", "u2"]
+    assert sum(p.weight for p in own.points()) == 2
+
+    con = sqlite3.connect(lib / "database" / "Photos.sqlite")
+    con.execute("UPDATE ZASSET SET ZCLOUDOWNERHASHEDPERSONID = 'y' WHERE Z_PK = 1")
+    con.commit()
+    con.close()
+    assert [a.uuid for a in own.assets()] == ["u2"]  # a shared album's photo is not theirs
 
 
 def test_points_and_assets_apply_the_same_origin_filter(tmp_path):

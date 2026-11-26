@@ -5,6 +5,13 @@ history has the rest.
 
 ## 2026-11-25
 
+- **Older photos from your own camera count again.** Until about 2024 Photos did not
+  record which app saved a photo, but it did record that a camera of one of your
+  devices took it. Such a photo is now `own-camera`, unless something marks it as
+  shared. Before this, `trips review` (which reads your own camera only) could see
+  almost nothing from 2019 to 2024. AirDrop, other apps and shared photos are
+  unchanged and stay out of it.
+
 NomadMania changed three things under the package. Each is written down here
 and checked against the live API on 2026-11-25.
 

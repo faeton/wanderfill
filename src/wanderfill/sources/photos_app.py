@@ -49,8 +49,18 @@ macOS DETAILS
   messenger or a glasses importer, and those carry somebody else's coordinate or
   a stale one. ``PhotoAsset.origin`` says which it is and ``origins=`` filters on
   it; by default nothing is filtered. Older libraries have no importer, or not
-  even the column, and a missing importer is ``unknown``: never the owner's
-  camera, and not evidence that it was somebody else's.
+  even the column, and a missing importer is ``unknown``: not evidence that it
+  was somebody else's, and not the owner's camera on its own.
+- ``ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBY`` is the capture source Photos keeps
+  beside it: 1 the back camera and 2 the front one of a device signed in to this
+  library, 8 and 13 AirDrop, 3 another app. Until about 2024 Photos filled this
+  in and left the bundle id empty: on one library 43,774 photos from 2019 to 2024
+  had no bundle id and a 1 or a 2, and their camera models were one iPhone a
+  year (XS Max, 11 Pro, 12 Pro, 13 Pro, 14 Pro, 15 Pro Max), the same
+  succession that went on under ``com.apple.camera`` afterwards. So a photo
+  with no bundle id, a 1 or a 2, and no mark of sharing (no shared-library
+  state, no contributor, no shared-album owner) is ``own-camera``. One that is
+  shared, or has any other value, stays ``unknown``.
 - ``ZADDITIONALASSETATTRIBUTES.ZCAMERACAPTUREDEVICE = 1`` means the front
   camera. That is as close as a database can get to "selfie", and NomadMania
   counts a selfie as stronger proof than an ordinary photo.
@@ -85,14 +95,19 @@ Origin = Literal["own-camera", "airdrop", "other", "unknown"]
 ORIGINS: frozenset[str] = frozenset(get_args(Origin))
 
 
-def origin_of(importer: str | None) -> Origin:
+def origin_of(importer: str | None, captured: object = False) -> Origin:
     """Where a photo came from, by the bundle id that put it in the library.
+
+    ``captured`` is whether, with no bundle id recorded, the library says a camera
+    of this library's own devices took it and nothing marks it as shared (see the
+    module docstring). It is read only when the bundle id is missing: a bundle id
+    always wins.
 
     ``assets()``, ``points()`` and ``PhotoAsset.origin`` all ask this one function,
     the queries included, so the two readings cannot come to differ about a photo.
     """
     if importer is None or importer == "":
-        return "unknown"
+        return "own-camera" if captured is True or captured == 1 else "unknown"
     if importer == "com.apple.camera":
         return "own-camera"
     if importer == "com.apple.sharingd":
@@ -180,7 +195,7 @@ WHERE {MINE}
 ORDER BY day, lat, lon
 """
 """``{origin}`` is empty unless ``origins`` is set. ``_read`` fills it in, and the
-``{importer}`` below, once it has seen which columns the library has."""
+``{importer}`` and ``{captured}`` below, once it has seen which columns the library has."""
 
 ASSET_QUERY = f"""
 SELECT a.ZUUID                                    AS uuid,
@@ -195,6 +210,7 @@ SELECT a.ZUUID                                    AS uuid,
        a.ZKIND                                    AS kind,
        m.ZTITLE                                   AS place,
        {{importer}}                               AS importer,
+       {{captured}}                               AS captured,
        a.ZDATECREATED + :epoch                    AS utc,
        aa.ZTIMEZONEOFFSET                         AS zone
 FROM ZASSET a
@@ -206,7 +222,7 @@ WHERE {MINE}
 
 
 DATED_QUERY = f"""
-SELECT a.ZUUID, date({LOCAL}, 'unixepoch'), {{importer}}
+SELECT a.ZUUID, date({LOCAL}, 'unixepoch'), {{importer}}, {{captured}}
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK
 WHERE COALESCE(({PLACED}), 0) = 0
@@ -259,11 +275,17 @@ class PhotoAsset:
     importer: str | None = None
     taken_utc: dt.datetime | None = None
     zone: int | None = None
+    captured: bool = False
 
     @property
     def origin(self) -> Origin:
-        """``unknown`` when no importer was recorded, which is not ``own-camera``."""
-        return origin_of(self.importer)
+        """``unknown`` when no importer was recorded and no camera of this library took it.
+
+        ``captured`` is that second statement: the capture source says this library's
+        own camera, and nothing says shared. ``importer`` stays ``None`` for it, so the
+        two can still be told apart.
+        """
+        return origin_of(self.importer, self.captured)
 
     @property
     def date(self) -> dt.date:
@@ -370,12 +392,13 @@ class PhotosAppSource:
                     c[1] == "ZIMPORTEDBYBUNDLEIDENTIFIER" for c in columns
                 )
                 importer = "aa.ZIMPORTEDBYBUNDLEIDENTIFIER" if self.importer_column else "NULL"
+                captured = _captured(con)
                 origin = ""
                 if names is not None:
-                    con.create_function("origin_of", 1, origin_of)
+                    con.create_function("origin_of", 2, origin_of)
                     keep = ", ".join(f"'{n}'" for n in names)  # four known names, checked above
-                    origin = f"  AND origin_of({importer}) IN ({keep})\n"
-                sql = sql.format(importer=importer, origin=origin)
+                    origin = f"  AND origin_of({importer}, {captured}) IN ({keep})\n"
+                sql = sql.format(importer=importer, captured=captured, origin=origin)
                 return con.execute(sql, params).fetchall()
             finally:
                 con.close()
@@ -401,7 +424,7 @@ class PhotosAppSource:
         rows = self._read(ASSET_QUERY, self._bounds())
         for (
             uuid, ts, lat, lon, directory, filename,
-            original_name, capture_device, favorite, kind, place, importer, utc, zone,
+            original_name, capture_device, favorite, kind, place, importer, captured, utc, zone,
         ) in rows:
             yield PhotoAsset(
                 uuid=str(uuid),
@@ -423,14 +446,15 @@ class PhotosAppSource:
                 favorite=bool(favorite),
                 video=int(kind or 0) == 1,
                 importer=None if importer in (None, "") else str(importer),
+                captured=captured == 1,
                 taken_utc=dt.datetime.fromtimestamp(float(utc), dt.timezone.utc),
                 zone=int(zone) if isinstance(zone, (int, float)) else None,
             )
 
     def without_location(self) -> Iterator[DatedPhoto]:
         """The dated photos that have no coordinate, which the other two readings leave out."""
-        for uuid, day, importer in self._read(DATED_QUERY, self._bounds()):
-            yield DatedPhoto(str(uuid), dt.date.fromisoformat(day), origin_of(importer))
+        for uuid, day, importer, captured in self._read(DATED_QUERY, self._bounds()):
+            yield DatedPhoto(str(uuid), dt.date.fromisoformat(day), origin_of(importer, captured))
 
     def points(self) -> Iterator[DayPoint]:
         rows = self._read(QUERY, {**self._bounds(), "precision": self.precision})
@@ -442,6 +466,33 @@ class PhotosAppSource:
                 source=self.name,
                 weight=int(assets),
             )
+
+
+CAMERA_SOURCES = (1, 2)
+"""``ZIMPORTEDBY`` values that are this library's own camera: back, front."""
+
+
+def _captured(con: sqlite3.Connection) -> str:
+    """SQL that is 1 where the capture source says this library's camera and nothing says shared.
+
+    Only for a photo with no bundle id (``origin_of`` reads it there and nowhere
+    else). A library with no ``ZIMPORTEDBY`` column cannot say, and gets ``0``. A
+    sharing column that is absent is a kind of sharing that library does not have.
+    """
+    def columns(table: str) -> set[str]:
+        return {c[1] for c in con.execute(f"PRAGMA table_info({table})")}
+
+    aa, a = columns("ZADDITIONALASSETATTRIBUTES"), columns("ZASSET")
+    if "ZIMPORTEDBY" not in aa:
+        return "0"
+    parts = [f"COALESCE(aa.ZIMPORTEDBY, 0) IN {CAMERA_SOURCES}"]
+    if "ZSHARECONTRIBUTORUSERIDENTIFIER" in aa:
+        parts.append("aa.ZSHARECONTRIBUTORUSERIDENTIFIER IS NULL")
+    if "ZLIBRARYSCOPESHARESTATE" in a:
+        parts.append("COALESCE(a.ZLIBRARYSCOPESHARESTATE, 0) = 0")
+    if "ZCLOUDOWNERHASHEDPERSONID" in a:
+        parts.append("a.ZCLOUDOWNERHASHEDPERSONID IS NULL")
+    return "(CASE WHEN " + " AND ".join(parts) + " THEN 1 ELSE 0 END)"
 
 
 def _wall_clock(day: dt.date) -> float:
