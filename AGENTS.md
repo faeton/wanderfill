@@ -614,7 +614,7 @@ is a region they may be asked to prove.** So:
 - **Some ticks were placed by the server.** When NomadMania split a region in
   2022, a tick on the old region moved to the *first-named* new one
   (`static/changes_2022.pdf`), and regions moved to M@P arrived there marked.
-  How visits moved in the 2026 revision is not published. So a marked region
+  We found no published account of how visits moved in the 2026 revision. So a marked region
   can carry a tick the owner never set, sometimes with the old visit's date or
   none. Before a verification, list the marked "first" regions of each split
   and their visits, and give them to `evidence`. It is a report: whether one

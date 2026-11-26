@@ -85,6 +85,12 @@ def test_atlas_replaced_un_plus_and_the_old_field_is_not_quoted():
         share.collect(client({"scores": {"score_un": 105, "score_unp": 125, "score_nm": 398}}))
     with pytest.raises(ApiError):  # the score without the list it is out of
         share.collect(client({"scores": {"score_un": 105, "score_atlas": 36, "score_nm": 398}}))
+    for bad in (True, 137.9, float("inf"), "-1", 0, "137 "):  # never a "36 / 1"
+        with pytest.raises(ApiError):
+            share.collect(client({"atlas_count": bad, "scores": {
+                "score_un": 105, "score_atlas": 36, "score_nm": 398}}))
+    assert share.collect(client({"atlas_count": "137", "scores": {
+        "score_un": 105, "score_atlas": 36, "score_nm": 398}})).atlas_total == 137
 
 
 def test_collect_refuses_a_profile_without_its_scores():

@@ -59,7 +59,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .api.client import NomadMania
+from .api.client import NomadMania, _whole
 from .api.errors import ApiError
 
 if TYPE_CHECKING:
@@ -147,10 +147,8 @@ def collect(c: NomadMania, *, name: str | None = None) -> Stats:
             raise ApiError("profile/get-profile-data", f"no {key} in scores", scores)
     # The size of the ATLAS list sits beside the scores, not in them. It is
     # reviewed every year, so a missing one is an error, not a 137 from memory.
-    try:
-        atlas_total = int(profile.get("atlas_count"))
-    except (TypeError, ValueError):
-        atlas_total = 0
+    # Whole and positive only: int() would read True as 1 and 137.9 as 137.
+    atlas_total = _whole(profile.get("atlas_count")) or 0
     if atlas_total <= 0:
         raise ApiError("profile/get-profile-data", "no atlas_count beside the scores",
                        {k: v for k, v in profile.items() if k != "user_data"})

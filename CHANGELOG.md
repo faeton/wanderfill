@@ -25,7 +25,7 @@ and checked against the live API on 2026-11-25.
 - **The server placed some ticks itself.** When regions were split in 2022, a
   tick on the old region moved to the first-named new region. AGENTS.md §6a
   now tells you to list those regions before a verification and hand them to
-  `evidence`, as a report. Nobody has published how visits moved in the 2026
-  revision.
+  `evidence`, as a report. We found no published account of how visits moved in the
+  2026 revision.
 - The catalogue holds 1381 regions. Nothing in the code hardcodes that number:
   `share` and the rest read it live. The docs now give the date it was read.

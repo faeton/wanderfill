@@ -504,7 +504,8 @@ nothing to write. To *read* them, use `profile/get-profile-data` — they are it
   denominator). It is not the 196-row `slow/get-slow-app` list. On one profile: 102 UN,
   104 visited rows of the 196, 108 ids from `get-visited-countries-ids-simple`,
   114 distinct region flags — and 121 UN+ on the page. None of the first four
-  reproduces the fifth, so quote `score_unp`.
+  reproduces the fifth, which is why the card quoted `score_unp` until
+  ATLAS replaced it. The lesson carries over: quote the profile's own score.
 
 - **YES** — "Years Elapsed Since". Per country: 0 if visited this calendar year,
   0 if visited last calendar year (an explicit "gift"), otherwise the years
