@@ -4046,3 +4046,66 @@ def test_match_series_says_what_its_recall_was():
     text = " ".join(match_series.__doc__.split())
     for words in ("25%", "day-level", "photo", "recall", "not precision"):
         assert words in text, words
+
+
+# -- answers in a conversation: `series ask` and `series answer`
+
+
+def test_series_ask_shows_the_items_with_their_facts_and_no_answer(site, capsys):
+    m = listed()
+    m.save("m.json")
+    capsys.readouterr()
+    assert run_cli("series", "ask", "m.json", "--json") == 0
+    q = json.loads(capsys.readouterr().out)
+    (group,) = q["series"]
+    assert [i["id"] for i in group["items"]] == [f"22:{c.item}" for c in sorted(
+        m.candidates, key=lambda c: (c.conflict or c.one_spot, c.km))]
+    assert all("answer" not in i and "default" not in i for i in group["items"])
+    assert q["answers"] == {"y": "I was there", "n": "I was not there", "q": "I don't remember"}
+    assert run_cli("series", "ask", "m.json") == 0
+    out = capsys.readouterr().out
+    assert "4 items" in out and "A photo near is not a yes" in out
+    assert site.asked == []  # no client at all
+
+
+def test_series_answer_records_the_reply_and_the_plan_keeps_it(site, capsys):
+    m = listed()
+    m.save("m.json")
+    said = "в Glass Hall был, во втором нет"
+    assert run_cli("series", "answer", "m.json", "a.json", "--said", said,
+                   "--item", "22:1=y", "--item", "22:2=n") == 0
+    raw = json.loads(Path("a.json").read_text("utf-8"))
+    assert raw["answers"] == {"22:1": "y", "22:2": "n"}
+    assert raw["said"] == [{"text": said, "items": ["22:1", "22:2"]}]
+    capsys.readouterr()
+    assert run_cli("series", "ask", "m.json", "--answers", "a.json", "--json") == 0
+    q = json.loads(capsys.readouterr().out)
+    assert q["answered"] == 2 and len(q["series"][0]["items"]) == 2
+    assert run_cli("series", "plan", "m.json", "a.json", "--series", 22) == 0
+    (op,) = Plan.load("plan-series-22.json").ops
+    assert op.item == 1
+    assert {"kind": "memory", "detail": f"the owner's reply: {said}"} in op.proof
+
+
+def test_series_answer_refuses_and_leaves_the_file_as_it_was(site, capsys):
+    listed().save("m.json")
+    assert run_cli("series", "answer", "m.json", "a.json", "--said", "да",
+                   "--item", "22:1=y") == 0
+    before = Path("a.json").read_bytes()
+    for bad in (("--item", "22:1=n"), ("--item", "22:9=y"), ("--item", "22:2=yes"), ()):
+        assert run_cli("series", "answer", "m.json", "a.json", "--said", "x", *bad) == 1, bad
+        assert Path("a.json").read_bytes() == before and not Path("a.json.draft").exists()
+    assert run_cli("series", "answer", "m.json", "a.json", "--said", "нет, не был",
+                   "--item", "22:1=n", "--replace") == 0
+    raw = json.loads(Path("a.json").read_text("utf-8"))
+    assert raw["answers"] == {"22:1": "n"}
+    assert raw["said"] == [{"text": "да", "items": ["22:1"]},
+                           {"text": "нет, не был", "items": ["22:1"]}]  # every reply, in order
+    capsys.readouterr()
+
+
+def test_series_answer_refuses_an_item_given_twice(site, capsys):
+    listed().save("m.json")
+    assert run_cli("series", "answer", "m.json", "a.json", "--said", "x",
+                   "--item", "22:1=n", "--item", "22:1=y") == 1
+    assert "twice" in capsys.readouterr().err and not Path("a.json").exists()

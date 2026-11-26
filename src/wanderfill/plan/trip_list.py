@@ -68,6 +68,8 @@ FORMAT = 1
 ANSWERS_FORMAT = 1
 MAX_ANSWERS_BYTES = 5_000_000
 MAX_WORDS = 500
+MAX_SAID = 2000
+VIA = ("page", "chat")
 
 _REASONS = (RELEASED_BY_WORDS | NEVER_RELEASED | {"there", "home"}) - {"not judged"}
 _FLAGS = frozenset({"conflict", "evidence thin", "fast near", "track", HOME_PART})
@@ -887,7 +889,8 @@ def read_answers(path: str | Path, trip_list: TripList) -> tuple[Answers, str]:
     data = read_bytes(path, "answers file", limit=MAX_ANSWERS_BYTES)
     raw = json_of(data, path, "answers file")
     try:
-        _fields(raw, ("format", "account", "manifest", "runs", "cuts"), "the answers file")
+        _fields(raw, ("format", "account", "manifest", "runs", "cuts"), "the answers file",
+                ("via", "said"))
         if type(raw["format"]) is not int or raw["format"] != ANSWERS_FORMAT:
             raise ValueError(f"format {_r(raw['format'])} is not {ANSWERS_FORMAT}, "
                              "the one this reads")
@@ -902,9 +905,61 @@ def read_answers(path: str | Path, trip_list: TripList) -> tuple[Answers, str]:
                           hidden={r.id for r in trip_list.runs})
         cuts = _read_each(raw["cuts"], "cuts", {b.id: b for b in cuts_in}, _cut,
                           hidden={b.id for b in trip_list.boundaries})
+        if "via" in raw and raw["via"] not in VIA:
+            raise ValueError(f"via must be one of {', '.join(VIA)}, not {_r(raw['via'])}")
+        said = _said_of(raw.get("said", []), runs, cuts)
     except ValueError as exc:
         raise PlanInvalid(f"{path}: {exc}") from None
-    return {"runs": runs, "cuts": cuts}, hashlib.sha256(data).hexdigest()
+    out: Answers = {"runs": runs, "cuts": cuts}
+    if said:
+        out["said"] = said
+    return out, hashlib.sha256(data).hexdigest()
+
+
+def said_problem(text: object) -> str | None:
+    """Why this reply of the owner cannot be kept, or ``None``. Nothing is mended.
+
+    A reply is kept as it was written, line breaks and all: it is the record of what the
+    owner said in a conversation, beside the answers that were taken from it.
+    """
+    if not isinstance(text, str):
+        return "it is not text"
+    if len(text) > MAX_SAID:
+        return f"too long: {len(text)} of {MAX_SAID} characters"
+    if any(low <= ord(ch) <= high for ch in text if ch != "\n" for low, high in _NOT_IN_WORDS):
+        return "it has a control character in it"
+    if not _says(text):
+        return "there is nothing that can be read in it"
+    return None
+
+
+def _said_of(raw: object, runs: Mapping[str, Any], cuts: Mapping[str, Any]) -> dict:
+    """The owner's replies by the run or cut id each one answered, in the order given.
+
+    Every reply names at least one answer that is in the file, and every id it names is one.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"said must be a list, not {_r(raw)}")
+    out: dict[str, list[str]] = {}
+    for n, row in enumerate(raw):
+        what = f"said[{n}]"
+        _fields(row, ("text",), what, ("runs", "cuts"))
+        if problem := said_problem(row["text"]):
+            raise ValueError(f"{what}: the reply cannot be kept: {problem}")
+        named = []
+        for kind, known in (("runs", runs), ("cuts", cuts)):
+            ids = row.get(kind, [])
+            if not isinstance(ids, list) or len(set(map(str, ids))) != len(ids):
+                raise ValueError(f"{what}.{kind} must be a list of ids, each once")
+            for key in ids:
+                if not isinstance(key, str) or key not in known:
+                    raise ValueError(f"{what}.{kind}: {_r(key)} has no answer in this file")
+            named += ids
+        if not named:
+            raise ValueError(f"{what} answers nothing in this file")
+        for key in named:
+            out.setdefault(key, []).append(row["text"])
+    return out
 
 
 def in_view(trip_list: TripList) -> tuple[list[ListedRun], list[Boundary]]:
@@ -984,6 +1039,7 @@ __all__ = [
     "load_answers",
     "read_answers",
     "render_page",
+    "said_problem",
     "trips_rows",
     "visits_rows",
     "words_problem",

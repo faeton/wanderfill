@@ -335,10 +335,13 @@ ends a trip and starts the next. The region and the dates are their words, never
 the photos or from `homebase` (the command prints that one as a hint and applies nothing).
 A stay partly inside a range is asked about as any other, and named.
 
-### Trips from photos go through a page the owner answers
+### Trips from photos are answered by the owner, in the conversation
 
-As for series. Neither command writes to the profile, and the plan has `create_trip` ops
-and no others.
+As for series. No command here writes to the profile, and the plan has `create_trip` ops
+and no others. The project is driven from the conversation: ask there. The page that
+`review` also writes is for an owner who asks for it, or for a list too long to ask
+(below). Both make an answers file of one form, but the page saves a whole file of its
+own and does not read one: do not save the page over a file `trips answer` wrote.
 
 1. `wanderfill trips review --since DATE` with `--track FILE` for every day-by-day
    track that covers those dates (rule 6), or `--no-track`, which is the owner saying
@@ -350,10 +353,16 @@ and no others.
    that something was not read (a tile, a photo's place, a row of a track) and the list is
    incomplete: say so, and run it again. `plan` says it once more. A
    plan from an incomplete list is allowed only if the owner, told that it is, wants it.
-2. **Hand the page to the owner and stop.** They open it, answer and save the file. Never
-   fill in an answer, a word, a cut or a date, never edit the list or the answers, press
-   nothing for them and suggest nothing: rule 7. Blank is not "no" and not a quality: it
-   holds the whole trip it is in. "I don't remember" is final: do not ask about it.
+2. **Ask the owner, in the conversation.** `wanderfill trips ask LIST [--answers FILE]`
+   prints what still takes an answer, by group, with the facts the page shows; `--json`
+   is the same for you. Put those questions to the owner as "Asking in the conversation"
+   (below) says, and write each reply with
+   `wanderfill trips answer LIST ANSWERS --said "<their reply, verbatim>" --run ID=Q
+   [--words ID="<their words>"] [--out ID=DAY] [--in ID=DAY] [--cut ID=cut|same]`.
+   Never fill in an answer, a word, a cut or a date that they did not give, never edit
+   the list, and never write the answers file by any other way than `trips answer`:
+   rule 7. Blank is not "no" and not a quality: it holds the whole trip it is in. "I
+   don't remember" is final: do not ask about it again.
 3. `wanderfill trips plan LIST ANSWERS` reads the profile again and makes one plan. Show
    it with `show -v`, then `check`, then the owner's yes to this plan, then `apply`.
    One kind, trips, and one approval (rule 5). It prints how many regions will be marked
@@ -394,23 +403,51 @@ What holds a run, and what releases it:
 
 The words are the owner's own and unprompted. Do not write them, improve them or offer
 any. Do not ask leading questions about a held run: not "so you had left by then?", not
-"that was another visit, was it not?". "The page has a field for it" is all there is to
-say. What nothing releases goes on by hand, or waits.
+"that was another visit, was it not?". "Is there anything you want to say about it?"
+and the reason it is held are all there is to say. What nothing releases goes on by hand,
+or waits.
 
 **Finished stays only.** An `open` run goes into a plan on their own words that it is
 over, and not because the trip would look better with it: a stay that is extended later
 leaves its trip's header behind (above). A layover is theirs to judge: some count one,
 most do not. Do not cut or join anything for them either: where a new trip starts is
-asked on the page. A boundary they leave blank is the same trip, suggestion or not: the
+theirs to answer. A boundary they leave blank is the same trip, suggestion or not: the
 owner said so on 2026-11-26. Their answer 1 (transit) releases a run held only for
 `brief` or `layover?` without words, also their rule of that day; any other reason with
 it, `undated` or `open`, still needs words, and so does any other quality.
 
 **A region is in a trip once.** Two stays in one region with other regions between them are
 two visits. A journey through one hub (A, B, A) is not made until the
-owner presses "A new trip starts here" somewhere between the two stays in A, also where
-nothing suggests a cut. The owner picks where; do not pick it for them, and do not
-propose a place.
+owner cuts somewhere between the two stays in A, also where nothing suggests a cut. The
+owner picks where; do not pick it for them, and do not propose a place.
+
+### Asking in the conversation
+
+What the page does, a conversation can do, on the same terms. These hold for trips and
+for series alike.
+
+- **The facts `ask` printed, and no others.** Not the gap and the days either side, not
+  where the camera was next, not what is likely: rule 7.
+- **Every option equal.** Qualities 1–6 with the site's words (below 2 the visit is stored
+  and the region is not marked), `no`, `?`; for series y / n / q. Nothing marked
+  "(Recommended)", nothing preselected, no order but that one. A question tool with
+  options may be used on those terms; its free-text field is where words go.
+- **Group them.** One group (or one series) at a time, with a few stays in one question,
+  so that one reply such as "Aldmoor 3, Berrow 2, the airport no" answers them all. If a reply does not say
+  plainly which answer goes with which stay, ask again; do not match it yourself.
+- **Their words, verbatim.** `--said` is the whole reply as they wrote it, and
+  `--words` the part of it that says why a held stay is released: their text, not a
+  summary of it, and not a sentence of yours that they agreed to.
+- **Until nothing is missing.** `ask --answers FILE` keeps a stay on the list while its
+  answer lacks something (`missing`: the answer, or words for a held quality), and keeps
+  every cut not yet answered. Ask the place before a stay that may not be over
+  (`between_groups`) too: blank there is a new trip until the owner's words on that stay
+  join it. `ask` exits 3, in `--json` too (`complete: false`), when the list is incomplete.
+- **A change of mind** is `--replace`, and changes only the fields given. Every reply is kept
+  in order; do not remove one.
+- **A long list.** More than about twenty questions: say how many, and let the owner
+  choose between a narrower `--since`/`--until`/`--focus`, several sittings, or the page.
+  Do not choose for them.
 
 `--gap-days`, `--fast-kmh`, `--spans`, `--until`, `--home` and `--focus` are theirs to
 choose, as for series. With a larger gap more days without a photo are inside a stay, and
@@ -460,11 +497,11 @@ city; being within a few kilometres of a monument is evidence of being in the
 area, not of having seen the thing. Grade candidates by distance, show the user
 the counts at several radii, validate recall against what they have already
 ticked by hand, and let them choose the threshold. Do not pick it for them. That is about a shortlist
-from a track. For series from photos, next, a radius only filters the page: it is never
+from a track. For series from photos, next, a radius only filters the list: it is never
 a yes to the items inside it, whoever chose it, and each item has its own answer.
 
-**Series from photos go through a page the owner answers.** Three commands, none of
-which writes to the profile:
+**Series from photos are answered by the owner, in the conversation**, as trips are
+("Asking in the conversation", §5). No command here writes to the profile:
 
 1. `wanderfill series review --since DATE` reads the photos, the tiles and the live
    series, and writes a page and its list into `review/`. Read out the counts it
@@ -472,12 +509,15 @@ which writes to the profile:
    means the list is incomplete: say so, and run it again before planning. A plan from
    an incomplete list is allowed only if the owner, told that it is incomplete, wants
    it, for the answers are to what was shown.
-2. **Hand the page to the owner and stop.** They open it, answer and save the file.
-   Never fill an answer in, edit the list or the answers, press a button for them, or
-   suggest one: rule 7. An item with no answer is not a "no" and not a "yes", and "I
-   don't remember" is final: do not ask about it. A later page may show such an item
-   again. Hand that page over as it is: do not remove the item, do not turn the old
-   answer into "no", and do not carry any answer over to it.
+2. **Ask the owner, in the conversation.** `wanderfill series ask LIST [--series ID]
+   [--answers FILE]` prints the items that take an answer with what the page shows of
+   each; write each reply with `wanderfill series answer LIST ANSWERS --said "<their
+   reply, verbatim>" --item SERIES:ITEM=y|n|q`. Never fill an answer in, edit the list,
+   write the answers file any other way, or suggest an answer: rule 7. An item with no
+   answer is not a "no" and not a "yes", and "I don't remember" is final: do not ask
+   about it again. A later list may show such an item again. Ask about it as it is: do
+   not leave it out, do not turn the old answer into "no", and do not carry any answer
+   over to it. The page `review` writes is there if the owner asks for it.
 3. `wanderfill series plan LIST ANSWERS --series ID` makes the plan for one series.
    Only "I was there" becomes a tick. One series per plan and one approval per series,
    rule 5: show it with `show -v`, then `check`, then a yes to that series. An
@@ -1036,6 +1076,7 @@ Left to right, and the invariant is structural rather than a convention:
 | `plan/manifest.py` | the one form in which a list is hashed, saved and loaded; an answer names that hash |
 | `plan/trips.py` | runs, reasons, boundaries and the trips the answers make. Pure; never answered for the owner |
 | `plan/trip_list.py`, `plan/trips_page.html` | what the owner was shown, the page, the answers; the page and `group` have one rule |
+| `plan/trip_ask.py`, `plan/series_ask.py` | the same questions for a conversation, and the one way an agent writes an answers file, the owner's reply kept beside each answer |
 | `plan/trip_plan.py` | the profile read again, and the plan of `create_trip` ops |
 | `geo/resolve.py` | the three-stage repair for the geocoder's ~14% dead ids |
 | `geo/tiles.py` | gzip sniffing, polygons, the series harvest, and which tiles `failed` |

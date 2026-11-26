@@ -1805,3 +1805,227 @@ def test_a_region_that_is_not_in_the_catalogue_is_refused(site, capsys, argv, sa
 def test_a_home_range_that_makes_no_sense_is_exit_two(site, capsys, value):
     assert do_review("--home", value) == 2
     assert not Path("out").exists() and site.sent == []
+
+
+# -- answers in a conversation: `trips ask` and `trips answer` -------------------------------
+
+
+def ask_json(path, *extra, capsys):
+    capsys.readouterr()
+    assert run_cli("trips", "ask", path, "--json", *extra) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_ask_shows_what_takes_an_answer_and_suggests_nothing(site, capsys):
+    m, path = listed()
+    site.sent.clear()
+    q = ask_json(path, capsys=capsys)
+    asked = [r["id"] for t in q["groups"] for r in t["runs"]]
+    assert asked == [r.id for r in m.runs]  # five offered and the open stay at home
+    home = next(r for t in q["groups"] for r in t["runs"] if r["region"] == HOME)
+    assert home["needs_words"] and not home["one_needs_no_words"]
+    assert not any(r["needs_words"] for t in q["groups"] for r in t["runs"]
+                   if r["region"] != HOME)
+    for r in (r for t in q["groups"] for r in t["runs"]):
+        assert set(r) >= {"takes", "evidence", "reasons", "visits"}
+        assert not {"suggested", "default", "recommended"} & set(r)
+    assert run_cli("trips", "ask", path) == 0
+    out = capsys.readouterr().out
+    assert "6 stays" in out and "Recommended" not in out and "Blank is no answer" in out
+    assert site.sent == [] and site.writes() == []  # reads two files, nothing else
+
+
+def test_answer_records_the_reply_and_plans_like_the_page(site, capsys):
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    said = "1 и 2 по тройке, 3 двойка, 4 тройка, 5 четвёрка"
+    args = [a for region, quality in QUALITY_OF_ALL.items()
+            for a in ("--run", f"{ids[region]}={quality}")]
+    assert run_cli("trips", "answer", path, "a.json", "--said", said, *args) == 0
+    raw = json.loads(Path("a.json").read_text("utf-8"))
+    assert raw["said"] == [{"text": said, "runs": [ids[r] for r in QUALITY_OF_ALL]}]
+    assert raw["runs"] == {ids[r]: {"a": q} for r, q in QUALITY_OF_ALL.items()}
+    q = ask_json(path, "--answers", "a.json", capsys=capsys)
+    assert [r["id"] for t in q["groups"] for r in t["runs"]] == [ids[HOME]]
+    assert run_cli("trips", "plan", path, "a.json") == 0
+    plan = Plan.load("plan-trips.json")
+    assert rows(plan) == [[(1, 3), (2, 3), (3, 2), (4, 3), (5, 4)]]
+    assert {"kind": "memory", "detail": f"the owner's reply: {said}"} in plan.ops[0].proof
+    # the same answers from the page make the same trips
+    assert do_plan(None, "--plan", "page.json") == 0
+    assert rows(Plan.load("page.json")) == rows(plan)
+
+
+def test_answer_takes_the_owners_words_for_an_open_stay_and_keeps_them(site):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3))
+    m, path = listed()
+    (run,) = m.runs
+    assert run.status == "held"
+    reply = "уехал 3-го вечером = всё, поездка закончена"
+    assert run_cli("trips", "answer", path, "a.json", "--said", reply,
+                   "--run", f"{run.id}=3", "--words", f"{run.id}={reply}") == 0
+    answers = load_answers("a.json", m)
+    assert answers["runs"][run.id] == {"a": "3", "words": reply}  # "=" in the words is kept
+    assert answers["said"] == {run.id: [reply]}
+
+
+def test_answer_refuses_what_the_page_could_not_write_and_leaves_the_file(site, capsys):
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    assert run_cli("trips", "answer", path, "a.json", "--said", "три",
+                   "--run", f"{ids[1]}=3") == 0
+    before = Path("a.json").read_bytes()
+    for bad in (
+        ("--said", "x", "--run", f"{ids[2]}=7"),  # no such quality
+        ("--said", "x", "--run", f"{ids[2]}=3", "--words", f"{ids[2]}=offered takes none"),
+        ("--said", "x", "--run", "1:2031-01-01:2031-01-02=3"),  # not on the list
+        ("--said", "x", "--run", f"{ids[1]}=2"),  # answered already
+        ("--said", "   ", "--run", f"{ids[2]}=3"),  # says nothing
+        ("--said", "x"),  # answers nothing
+    ):
+        assert run_cli("trips", "answer", path, "a.json", *bad) == 1, bad
+        assert Path("a.json").read_bytes() == before
+        assert not Path("a.json.draft").exists()
+    assert run_cli("trips", "answer", path, "a.json", "--said", "-x") == 2  # no --said value
+    assert run_cli("trips", "answer", path, "a.json") == 2  # --said is required
+    capsys.readouterr()
+
+
+def test_replace_is_a_change_of_mind_and_every_reply_is_kept_in_order(site):
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    assert run_cli("trips", "answer", path, "a.json", "--said", "оба тройка",
+                   "--run", f"{ids[1]}=3", "--run", f"{ids[2]}=3") == 0
+    assert run_cli("trips", "answer", path, "a.json", "--said", "второй нет, не был",
+                   "--run", f"{ids[2]}=no", "--replace") == 0
+    raw = json.loads(Path("a.json").read_text("utf-8"))
+    assert raw["runs"][ids[2]] == {"a": "no"}
+    assert raw["said"] == [{"text": "оба тройка", "runs": [ids[1], ids[2]]},
+                           {"text": "второй нет, не был", "runs": [ids[2]]}]
+
+
+def test_cuts_are_answered_in_a_conversation_too(site):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3), *days(2, 4, 5), *days(3, 14, 16),
+           *days(HOME, 19, 20))
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    cut = next(b.id for b in m.boundaries if b.before == ids[2] and b.after == ids[3])
+    assert run_cli("trips", "answer", path, "a.json", "--said", "1,2 одна поездка, 3 отдельно",
+                   "--run", f"{ids[1]}=3", "--run", f"{ids[2]}=3", "--run", f"{ids[3]}=3",
+                   "--cut", f"{cut}=cut") == 0
+    assert run_cli("trips", "plan", path, "a.json") == 0
+    assert rows(Plan.load("plan-trips.json")) == [[(1, 3), (2, 3)], [(3, 3)]]
+
+
+def test_a_reply_is_refused_where_it_names_no_answer_in_the_file(site):
+    m, _ = listed()
+    ids = [r.id for r in m.runs]
+    raw = {"format": 1, "account": m.account, "manifest": m.sha256,
+           "runs": {ids[0]: {"a": "3"}}, "cuts": {},
+           "said": [{"text": "x", "runs": [ids[1]]}]}
+    Path("a.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(PlanInvalid, match="has no answer"):
+        load_answers("a.json", m)
+    raw["said"] = [{"text": "x", "runs": [ids[0]], "who": "me"}]
+    Path("a.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(PlanInvalid, match="who"):
+        load_answers("a.json", m)
+
+
+def test_ask_asks_the_place_before_an_open_stay_which_words_would_join(site, capsys):
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    q = ask_json(path, capsys=capsys)
+    cuts = [c for g in q["groups"] for c in g["cuts"]]
+    assert len(cuts) == 5  # every place between two stays, blank being the same trip
+    (cut,) = [c for c in cuts if c["between_groups"]]
+    assert (cut["before"], cut["after"]) == (ids[5], ids[HOME])
+    assert run_cli("trips", "answer", path, "a.json", "--said", "это та же поездка",
+                   "--cut", f"{cut['id']}=same") == 0
+    q = ask_json(path, "--answers", "a.json", capsys=capsys)
+    assert cut["id"] not in [c["id"] for g in q["groups"] for c in g["cuts"]]
+
+
+def test_a_held_quality_without_its_words_is_asked_again_and_so_is_words_alone(site, capsys):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3))
+    m, path = listed()
+    (run,) = m.runs
+    assert run_cli("trips", "answer", path, "a.json", "--said", "тройка",
+                   "--run", f"{run.id}=3") == 0
+    (got,) = [r for g in ask_json(path, "--answers", "a.json", capsys=capsys)["groups"]
+              for r in g["runs"]]
+    assert got["missing"] == ["words"] and got["answer"] == {"a": "3"}
+    assert run_cli("trips", "answer", path, "b.json", "--said", "уехал",
+                   "--words", f"{run.id}=уехал") == 0
+    (got,) = [r for g in ask_json(path, "--answers", "b.json", capsys=capsys)["groups"]
+              for r in g["runs"]]
+    assert got["missing"] == ["answer"]
+    assert run_cli("trips", "answer", path, "a.json", "--said", "уехал вечером",
+                   "--words", f"{run.id}=уехал вечером") == 0  # adds, changes nothing
+    q = ask_json(path, "--answers", "a.json", capsys=capsys)
+    assert q["groups"] == []
+
+
+def test_replace_changes_only_what_is_given(site, capsys):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3))
+    m, path = listed()
+    (run,) = m.runs
+    assert run_cli("trips", "answer", path, "a.json", "--said", "три, уехал",
+                   "--run", f"{run.id}=3", "--words", f"{run.id}=уехал") == 0
+    assert run_cli("trips", "answer", path, "a.json", "--said", "четыре",
+                   "--run", f"{run.id}=4") == 1  # another value needs --replace
+    assert run_cli("trips", "answer", path, "a.json", "--said", "четыре",
+                   "--run", f"{run.id}=4", "--replace") == 0
+    assert load_answers("a.json", m)["runs"][run.id] == {"a": "4", "words": "уехал"}
+    capsys.readouterr()
+
+
+def test_a_reply_that_only_cut_is_in_the_proof_of_the_trips_it_made(site):
+    photos(*days(HOME, -9, -4), *days(1, 1, 3), *days(2, 4, 5), *days(3, 14, 16),
+           *days(HOME, 19, 20))
+    m, path = listed()
+    ids = {r.region: r.id for r in m.runs}
+    cut = next(b.id for b in m.boundaries if b.before == ids[2] and b.after == ids[3])
+    assert run_cli("trips", "answer", path, "a.json", "--said", "все тройки",
+                   "--run", f"{ids[1]}=3", "--run", f"{ids[2]}=3", "--run", f"{ids[3]}=3") == 0
+    assert run_cli("trips", "answer", path, "a.json", "--said", "третий отдельно",
+                   "--cut", f"{cut}=cut") == 0
+    assert run_cli("trips", "plan", path, "a.json") == 0
+    for op in Plan.load("plan-trips.json").ops:
+        assert {"kind": "memory", "detail": "the owner's reply: третий отдельно"} in op.proof
+        assert {"kind": "memory", "detail": "the owner's reply: все тройки"} in op.proof
+
+
+def test_an_id_given_twice_is_refused(site, capsys):
+    m, path = listed()
+    rid = m.runs[0].id
+    assert run_cli("trips", "answer", path, "a.json", "--said", "x",
+                   "--run", f"{rid}=no", "--run", f"{rid}=3") == 1
+    assert "twice" in capsys.readouterr().err and not Path("a.json").exists()
+
+
+def test_answer_leaves_no_draft_and_one_writer_at_a_time(site, capsys):
+    import fcntl
+
+    m, path = listed()
+    rid = m.runs[0].id
+    with open("a.json.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert run_cli("trips", "answer", path, "a.json", "--said", "x",
+                       "--run", f"{rid}=3") == 1
+    assert "another run" in capsys.readouterr().err and not Path("a.json").exists()
+    assert run_cli("trips", "answer", path, "a.json", "--said", "x", "--run", f"{rid}=3") == 0
+    assert run_cli("trips", "answer", path, "a.json", "--said", "x", "--run", f"{rid}=9",
+                   "--replace") == 1
+    err = capsys.readouterr().err
+    assert "a.json" in err and ".draft" not in err
+    assert not list(Path().glob("*.draft")) and not list(Path().glob(".*.draft"))
+
+
+def test_ask_says_an_incomplete_list_in_json_too(site, capsys):
+    m, path = listed()
+    dataclasses.replace(m, coverage=m.coverage | {"tiles_unread": 2}).save(path)
+    capsys.readouterr()
+    assert run_cli("trips", "ask", path, "--json") == 3
+    q = json.loads(capsys.readouterr().out)
+    assert q["complete"] is False and q["not_read"]["tiles"] == 2

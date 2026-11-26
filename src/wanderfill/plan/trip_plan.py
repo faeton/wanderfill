@@ -168,7 +168,8 @@ def _op(draft: TripDraft, trip_list: TripList, answers: Answers) -> Op:
         date_to=draft.date_to.isoformat(), regions=[_region(row) for row in draft.rows],
         label=f"{draft.date_from} to {draft.date_to}: {names}", confidence=0.0,
         method="trips review: ground photos, owner's answers", evidence=evidence,
-        proof=[entry for row in draft.rows for entry in _proof(row, trip_list)])
+        proof=[*(entry for row in draft.rows for entry in _proof(row, trip_list)),
+               *_replies(draft, trip_list, answers)])
 
 
 def _region(row: TripRow) -> dict:
@@ -252,6 +253,24 @@ def _proof(row: TripRow, trip_list: TripList) -> list[dict]:
     if row.words:
         out.append({"kind": "memory", "detail": row.words})
     return out
+
+
+def _replies(draft: TripDraft, trip_list: TripList, answers: Answers) -> list[dict]:
+    """The owner's replies in a conversation that this trip rests on, each once, verbatim.
+
+    Those of its runs, of the runs between them, which were left out, and of every place
+    between two runs from the one before its first run to the one after its last: where the
+    trip starts and ends was answered there too.
+    """
+    said = answers.get("said", {})
+    if not said:
+        return []
+    ids = [r.id for r in trip_list.runs]
+    first, last = ids.index(draft.rows[0].run.id), ids.index(draft.rows[-1].run.id)
+    keys = [*ids[first:last + 1],
+            *(b.id for b in trip_list.boundaries[max(first - 1, 0):last + 1])]
+    texts = dict.fromkeys(text for key in keys for text in said.get(key, []))
+    return [{"kind": "memory", "detail": f"the owner's reply: {text}"} for text in texts]
 
 
 __all__ = [

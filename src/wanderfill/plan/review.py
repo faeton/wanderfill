@@ -974,7 +974,8 @@ def read_answers(
     raw = _json_of(data, path, "answers file")
     known = {_key(c): (c.series, c.item) for c in manifest.candidates}
     try:
-        _fields(raw, ("format", "account", "manifest", "answers"), "the answers file")
+        _fields(raw, ("format", "account", "manifest", "answers"), "the answers file",
+                ("via", "said"))
         if type(raw["format"]) is not int or raw["format"] != ANSWERS_FORMAT:
             raise ValueError(f"format {_r(raw['format'])} is not {ANSWERS_FORMAT}, "
                              "the one this reads")
@@ -995,9 +996,47 @@ def read_answers(
                 raise ValueError(f"answers: {key} must be one of {', '.join(get_args(Answer))}, "
                                  f"not {_r(value)}")
             out[known[key]] = value
+        if "via" in raw and raw["via"] not in ("page", "chat"):
+            raise ValueError(f"via must be page or chat, not {_r(raw['via'])}")
+        _said_rows(raw.get("said", []), answers)
     except ValueError as exc:
         raise PlanInvalid(f"{path}: {exc}") from None
     return out, hashlib.sha256(data).hexdigest()
+
+
+def read_said(path: str | Path, manifest: Manifest) -> dict[tuple[int, int], list[str]]:
+    """The owner's replies in a conversation, verbatim, by the item each one answered.
+
+    A record of where an answer came from: it decides nothing. The file is read and checked
+    as :func:`read_answers` reads it.
+    """
+    read_answers(path, manifest)
+    raw = _json_of(_read_bytes(path, "answers file", limit=MAX_ANSWERS_BYTES), path,
+                   "answers file")
+    known = {_key(c): (c.series, c.item) for c in manifest.candidates}
+    out: dict[tuple[int, int], list[str]] = {}
+    for row in raw.get("said", []):
+        for key in row["items"]:
+            out.setdefault(known[key], []).append(row["text"])
+    return out
+
+
+def _said_rows(raw: object, answers: Mapping[str, Any]) -> None:
+    from .trip_list import said_problem
+
+    if not isinstance(raw, list):
+        raise ValueError(f"said must be a list, not {_r(raw)}")
+    for n, row in enumerate(raw):
+        what = f"said[{n}]"
+        _fields(row, ("text", "items"), what)
+        if problem := said_problem(row["text"]):
+            raise ValueError(f"{what}: the reply cannot be kept: {problem}")
+        items = row["items"]
+        if not isinstance(items, list) or not items or len(set(map(str, items))) != len(items):
+            raise ValueError(f"{what}.items must be a list of the items it answered, each once")
+        for key in items:
+            if not isinstance(key, str) or key not in answers:
+                raise ValueError(f"{what}.items: {_r(key)} has no answer in this file")
 
 
 # -- the series as it is now, read live -----------------------------------------
@@ -1090,8 +1129,12 @@ def plan_for_series(
     client: NomadMania,
     *,
     answers_sha256: str | None = None,
+    said: Mapping[tuple[int, int], list[str]] | None = None,
 ) -> Plan:
     """The plan that ticks what the owner said yes to in one series of ``manifest``.
+
+    ``said`` is what :func:`read_said` returns: the owner's replies go into the proof of the
+    ticks they answered, verbatim.
 
     The account and the series are read live. An item that is ticked by now is left out,
     and a plan may come back with no ops. A yes to an item that is gone, or whose id has
@@ -1117,7 +1160,9 @@ def plan_for_series(
     list_name = manifest.sha256[:12]
     ops = [_tick(c.series, c.item, c.name, method="series review: ground photos, owner's answer",
                  evidence=[f"The owner answered \"I was there\" on list {list_name}."],
-                 proof=[_photo_proof(c)])
+                 proof=[_photo_proof(c),
+                        *({"kind": "memory", "detail": f"the owner's reply: {text}"}
+                          for text in (said or {}).get((c.series, c.item), []))])
            for c in yes if c.item not in ticked]
     sources: list[dict] = [{"kind": "manifest", "sha256": manifest.sha256}]
     if answers_sha256:
@@ -1181,6 +1226,7 @@ __all__ = [
     "plan_for_named",
     "plan_for_series",
     "read_answers",
+    "read_said",
     "read_series",
     "recall",
     "render_page",

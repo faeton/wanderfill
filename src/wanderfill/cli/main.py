@@ -8,10 +8,11 @@ The command set encodes the safety model rather than merely documenting it:
     evidence   index the photo library against what you claim — for verification
     sweep      show what each trip-segmentation setting produces
     plan       write a plan file. Never touches the server's state.
-    series     a page of series items near your photos, to answer; a plan from the
-               answers, one series each; or a plan for one item you name yourself
-    trips      a page of stays your photos show, to answer; a plan of trips from the
-               answers
+    series     series items near your photos, to answer in a conversation (ask,
+               answer) or on a page; a plan from the answers, one series each; or a
+               plan for one item you name yourself
+    trips      stays your photos show, to answer in a conversation (ask, answer) or
+               on a page; a plan of trips from the answers
     show       print a plan for a human to read
     apply      execute a plan file, and only a plan file
     share      draw your UN / ATLAS / NM numbers as an image. Reads only.
@@ -1156,11 +1157,13 @@ def _series_review(args) -> int:
     paths = _write_pair(Path(args.out), "review", manifest, render_page(manifest))
     _print_review(manifest, sum(s.kind == "ground" and s.use != "none" for s in shots))
     _print_paths(paths)
+    print("\nNothing was sent. Answer it yourself: in a conversation, where `series ask` prints "
+          "the questions and `series answer` keeps your replies, or on the page.")
     return 3 if unread else 0
 
 
 def _print_paths(paths: tuple[Path, Path]) -> None:
-    print("\nthe page, to open and answer, and the list it was made from:")
+    print("\nthe page, if you would rather answer in a browser, and the list it was made from:")
     for path in paths:
         print(f"  {_shown(path)}")
 
@@ -1311,13 +1314,21 @@ def _print_review(m, ground: int) -> None:
 
 def cmd_series_plan(args) -> int:
     """The plan for one series, from a list and its answers. Writes one file, or none."""
-    from ..plan.review import Manifest, plan_for_series, read_answers, shown, yes_items
+    from ..plan.review import (
+        Manifest,
+        plan_for_series,
+        read_answers,
+        read_said,
+        shown,
+        yes_items,
+    )
 
     path = _new_plan_path(args, f"plan-series-{args.series}.json")
     manifest = Manifest.load(args.manifest)
     answers, sha256 = read_answers(args.answers, manifest)
     c = _client(args)
-    plan = plan_for_series(manifest, answers, args.series, c, answers_sha256=sha256)
+    plan = plan_for_series(manifest, answers, args.series, c, answers_sha256=sha256,
+                           said=read_said(args.answers, manifest))
     planned = {op.item for op in plan.ops}
     for item in yes_items(manifest, answers, args.series):
         if item.item not in planned:
@@ -1329,6 +1340,50 @@ def cmd_series_plan(args) -> int:
         print(f"Nothing in series {args.series} is left to tick. No plan was written.")
         return 0
     return _write_series_plan(path, plan, args.series)
+
+
+def cmd_series_ask(args) -> int:
+    """The items that still take an answer, for a conversation. Writes nothing."""
+    from ..plan.model import one_line
+    from ..plan.review import Manifest, read_answers
+    from ..plan.series_ask import questions
+
+    manifest = Manifest.load(args.manifest)
+    answers = read_answers(args.answers, manifest)[0] if args.answers else None
+    q = questions(manifest, answers, args.series)
+    if args.json:
+        print(json.dumps(q, ensure_ascii=False, indent=1))
+        return 3 if not q["complete"] else 0
+    n = sum(len(s["items"]) for s in q["series"])
+    print(f"list {manifest.sha256[:12]}, account {manifest.account}: {_n(n, 'item')} to "
+          f"answer, within {q['radius_km']:g} km of a photo of yours"
+          + (f"; {q['answered']} answered already" if q["answered"] else ""))
+    if manifest.coverage["tiles_unread"]:
+        print("This list is incomplete: map tiles could not be read when it was made. Run "
+              "`series review` again before asking.")
+    print("Each item takes y (I was there), n (I was not there) or q (I don't remember). "
+          "Blank is no answer. A photo near is not a yes.")
+    for s in q["series"]:
+        print(one_line(f"\nseries {s['series']}: {s['name']}"))
+        for i in s["items"]:
+            marks = f"; {', '.join(i['marks'])}" if i["marks"] else ""
+            fast = f"; {i['fast_near']} at speed near" if i["fast_near"] else ""
+            print(one_line(f"  [{i['id']}] {i['name']}: {i['km']:.2f} km, {i['at']}, "
+                           f"{_n(i['photos'], 'photo')} on {_n(i['days'], 'day')}{fast}{marks}"))
+    return 3 if not q["complete"] else 0
+
+
+def cmd_series_answer(args) -> int:
+    """Write the owner's answers from a conversation into a series answers file."""
+    from ..plan.review import Manifest
+    from ..plan.series_ask import record
+    from ..plan.trip_ask import pairs
+
+    manifest = Manifest.load(args.manifest)
+    items = pairs(args.item, "y, n or q")
+    got = record(args.answers, manifest, args.said, items, replace=args.replace)
+    print(f"{args.answers}: {_n(len(got), 'item')} answered; nothing was sent")
+    return 0
 
 
 def cmd_series_named(args) -> int:
@@ -1503,8 +1558,10 @@ def _trips_review(args) -> int:
     paths = _write_pair(Path(args.out), "trips", trip_list, render_page(trip_list))
     _print_trips(trip_list)
     _print_paths(paths)
-    print("\nNothing was sent. Open the page, answer it yourself, save the answers, and then")
+    print("\nNothing was sent. Answer it yourself: in a conversation, where `trips ask` prints "
+          "the questions and `trips answer` keeps your replies, or on the page. Then")
     if str(paths[1]).isprintable():
+        print(f"  wanderfill trips ask {shlex.quote(str(paths[1]))}")
         print(f"  wanderfill trips plan {shlex.quote(str(paths[1]))} trips-answers.json")
     else:
         print("run `trips plan` on the list and the answers. The command cannot be shown here, "
@@ -1711,6 +1768,103 @@ def cmd_trips_plan(args) -> int:
         print(f"{_n(stored, 'visit')} will be stored and mark nothing: {low} at quality 1, "
               f"{stored - low} in a region that is marked already.")
     print("one kind, trips; read it with `show -v`, then `check`")
+    return 0
+
+
+def cmd_trips_ask(args) -> int:
+    """What still takes an answer, for a conversation. Reads two files, writes nothing."""
+    from ..plan.trip_ask import questions
+    from ..plan.trip_list import TripList, read_answers
+
+    m = TripList.load(args.list)
+    answers = read_answers(args.answers, m)[0] if args.answers else None
+    q = questions(m, answers)
+    if args.json:
+        print(json.dumps(q, ensure_ascii=False, indent=1))
+    else:
+        _print_questions(m, q)
+    return 3 if not q["complete"] else 0
+
+
+def _print_questions(m, q) -> None:
+    from ..plan.model import one_line
+
+    done = len(q["answered"]["runs"]) + len(q["answered"]["cuts"])
+    runs = sum(len(t["runs"]) for t in q["groups"])
+    cuts = sum(bool(c["suggestions"] or c["between_groups"])
+               for t in q["groups"] for c in t["cuts"])
+    print(f"list {m.sha256[:12]}, account {m.account}: {_n(runs, 'stay')} and "
+          f"{_n(cuts, 'cut')} to answer, in {_n(len(q['groups']), 'group')}"
+          + (f"; {done} answered already" if done else ""))
+    if any(m.not_read):
+        print("This list is incomplete: something could not be read when it was made. Run "
+              "`trips review` again before asking.")
+    words = ", ".join(f"{k} {v}" for k, v in q["quality"].items())
+    print(f"A stay takes one of: {words}; no (it was not a visit); ? (not sure). Below "
+          f"{q['marks_from']} the visit is stored and the region is not marked. Blank is no "
+          "answer, and holds its whole trip. Between two stays blank is the same trip. A stay "
+          "that may not be over (open) starts a group of its own: the owner's words that it "
+          "is over join it to the group before.")
+    for t in q["groups"]:
+        print(f"\ngroup {t['first']} to {t['last']}")
+        for r in t["runs"]:
+            print(one_line(f"  [{r['id']}] {r['name']} ({r['region']}), {r['first']} to "
+                           f"{r['last']}: {r['status']}"))
+            silent = f", none on {', '.join(r['silent'])}" if r["silent"] else ""
+            print(f"      photos on {_n(r['days'], 'day')}{silent}; {_n(r['photos'], 'photo')}, "
+                  f"{r['first_photo']} to {r['last_photo']}; evidence {r['evidence']}")
+            for line in (*r["flags"], *r["reasons"]):
+                print(one_line(f"      {line}"))
+            if r["flight_days"]:
+                print(f"      flight day, in unless left out: {', '.join(r['flight_days'])}")
+            if r["includable_days"]:
+                print(f"      day beside a jump, out unless included: "
+                      f"{', '.join(r['includable_days'])}")
+            for v in r["visits"]:
+                print(f"      on the profile: visit {v['id']}, {v['date_from'] or 'no date'} to "
+                      f"{v['date_to'] or 'no date'}, quality {v['quality']}")
+            if r["answer"]:
+                so_far = json.dumps(r["answer"], ensure_ascii=False)
+                print(one_line(f"      answered so far: {so_far}; still missing: "
+                               f"{', '.join(r['missing'])}"))
+            takes = ", ".join(r["takes"])
+            need = (" A quality needs the owner's own words." if r["needs_words"] else
+                    " A quality needs the owner's own words, except 1."
+                    if r["one_needs_no_words"] else "")
+            print(f"      takes: {takes}.{need}")
+        plain = [c for c in t["cuts"] if not c["suggestions"] and not c["between_groups"]]
+        if plain:
+            print(f"  {_n(len(plain), 'other place')} between two stays of this group, where "
+                  "nothing suggests a new trip: blank is the same trip; ids in --json")
+        for c in t["cuts"]:
+            if c in plain:
+                continue
+            why = f" ({', '.join(c['suggestions'])})" if c["suggestions"] else ""
+            note = (": blank is a new trip while the stay after it has no words, and the same "
+                    "trip once it has them" if c["between_groups"] else "")
+            print(f"  between [{c['before']}] and [{c['after']}]: cut or same{why}{note}")
+        for a in t["also"]:
+            print(one_line(f"  also in it, no answer: [{a['id']}] {a['name']}, {a['status']}"))
+
+
+def cmd_trips_answer(args) -> int:
+    """Write the owner's answers from a conversation into the answers file."""
+    from ..plan.trip_ask import days_of, pairs, record
+    from ..plan.trip_list import TripList
+
+    m = TripList.load(args.list)
+    runs: dict[str, dict] = {key: {"a": a} for key, a in pairs(args.run, "ANSWER").items()}
+    for key, words in pairs(args.words, "TEXT").items():
+        runs.setdefault(key, {})["words"] = words
+    for field, specs in (("out", args.out), ("in", args.include)):
+        for key, given in days_of(specs).items():
+            runs.setdefault(key, {})[field] = given
+    cuts = pairs(args.cut, "cut or ID=same")
+    got = record(args.answers, m, args.said, runs, cuts, replace=args.replace)
+    print(f"{args.answers}: {_n(len(got['runs']), 'stay')} and "
+          f"{_n(len(got['cuts']), 'cut')} answered; nothing was sent")
+    print(f"then: wanderfill trips plan {shlex.quote(str(args.list))} "
+          f"{shlex.quote(str(args.answers))}")
     return 0
 
 
@@ -2426,7 +2580,8 @@ def _kmh_arg(text: str) -> float:
 def _trips_parser(sub) -> None:
     tr = sub.add_parser(
         "trips",
-        help="a page of stays your photos show, to answer, and a plan of trips from your answers",
+        help="stays your photos show, to answer in a conversation or on a page, and a plan of "
+             "trips from your answers",
         description="Reads the profile and your photos, writes local files, and sends nothing.",
     )
     tsub = tr.add_subparsers(dest="trips_command", required=True)
@@ -2493,13 +2648,55 @@ def _trips_parser(sub) -> None:
         ),
     )
     pl.add_argument("list", metavar="LIST", help="the .json that `review` wrote")
-    pl.add_argument("answers", metavar="ANSWERS", help="the file the page saved")
+    pl.add_argument("answers", metavar="ANSWERS",
+                    help="the answers file: the one the page saved, or `trips answer` wrote")
     pl.add_argument("--plan", metavar="FILE",
                     help="where to write it (default: plan-trips.json); an existing file is "
                          "never replaced")
     pl.add_argument("--max-rows", type=_gap_arg, default=50, metavar="N",
                     help="refuse more region visits than this (default: 50)")
     pl.set_defaults(func=cmd_trips_plan)
+
+    ak = tsub.add_parser(
+        "ask", help="print what still takes an answer, to ask in a conversation",
+        description=(
+            "The page as text: the stays that take an answer, by the trip they would be in, "
+            "with what the page shows of each, and the cuts between them. Nothing is suggested "
+            "and nothing is written."
+        ),
+    )
+    ak.add_argument("list", metavar="LIST", help="the .json that `review` wrote")
+    ak.add_argument("--answers", metavar="FILE",
+                    help="an answers file: what it answers is left out, and counted")
+    ak.add_argument("--json", action="store_true", help="the same, as JSON")
+    ak.set_defaults(func=cmd_trips_ask)
+
+    an = tsub.add_parser(
+        "answer", help="write answers the owner gave in a conversation into the answers file",
+        description=(
+            "Records the owner's own answers, with their reply word for word beside them, in "
+            "the file that `trips plan` reads. It answers nothing itself: every answer and "
+            "every word is the owner's. The file is checked as `trips plan` checks it before "
+            "it is written."
+        ),
+    )
+    an.add_argument("list", metavar="LIST", help="the .json that `review` wrote")
+    an.add_argument("answers", metavar="ANSWERS", help="the answers file; made if not there")
+    an.add_argument("--said", required=True, metavar="TEXT",
+                    help="the owner's reply, exactly as they wrote it")
+    an.add_argument("--run", action="append", default=[], metavar="ID=ANSWER",
+                    help="a stay and its answer: a quality 1 to 6, no, or ?")
+    an.add_argument("--words", action="append", default=[], metavar="ID=TEXT",
+                    help="the owner's own words that release a held stay, as they wrote them")
+    an.add_argument("--out", action="append", default=[], metavar="ID=DAY",
+                    help="a flight day of that stay that the owner leaves out")
+    an.add_argument("--in", dest="include", action="append", default=[], metavar="ID=DAY",
+                    help="a day beside a jump that the owner includes")
+    an.add_argument("--cut", action="append", default=[], metavar="ID=cut|same",
+                    help="a place between two stays: a new trip starts here, or not")
+    an.add_argument("--replace", action="store_true",
+                    help="the owner changed an answer they gave before")
+    an.set_defaults(func=cmd_trips_answer)
 
 
 def _series_parser(sub) -> None:
@@ -2549,7 +2746,8 @@ def _series_parser(sub) -> None:
         ),
     )
     pl.add_argument("manifest", metavar="MANIFEST", help="the .json that `review` wrote")
-    pl.add_argument("answers", metavar="ANSWERS", help="the file the page saved")
+    pl.add_argument("answers", metavar="ANSWERS",
+                    help="the answers file: the one the page saved, or `series answer` wrote")
     nm = ssub.add_parser(
         "named", help="make the plan for one item you name yourself",
         description=(
@@ -2566,6 +2764,35 @@ def _series_parser(sub) -> None:
                        help="where to write it (default: plan-series-<ID>.json); an existing "
                             "file is never replaced")
         q.set_defaults(func=func)
+
+    ak = ssub.add_parser(
+        "ask", help="print the items that still take an answer, to ask in a conversation",
+        description=("The page as text: every item with a photo of yours near it that has no "
+                     "answer yet, with what the page shows of it. Nothing is suggested and "
+                     "nothing is written."),
+    )
+    ak.add_argument("manifest", metavar="MANIFEST", help="the .json that `review` wrote")
+    ak.add_argument("--answers", metavar="FILE",
+                    help="an answers file: what it answers is left out, and counted")
+    ak.add_argument("--series", type=int, metavar="ID", help="one series only")
+    ak.add_argument("--json", action="store_true", help="the same, as JSON")
+    ak.set_defaults(func=cmd_series_ask)
+
+    an = ssub.add_parser(
+        "answer", help="write answers the owner gave in a conversation into the answers file",
+        description=("Records the owner's own answers, with their reply word for word beside "
+                     "them, in the file that `series plan` reads. y is 'I was there', n 'I was "
+                     "not there', q 'I don't remember'. It answers nothing itself."),
+    )
+    an.add_argument("manifest", metavar="MANIFEST", help="the .json that `review` wrote")
+    an.add_argument("answers", metavar="ANSWERS", help="the answers file; made if not there")
+    an.add_argument("--said", required=True, metavar="TEXT",
+                    help="the owner's reply, exactly as they wrote it")
+    an.add_argument("--item", action="append", default=[], metavar="SERIES:ITEM=y|n|q",
+                    help="an item and the owner's answer to it")
+    an.add_argument("--replace", action="store_true",
+                    help="the owner changed an answer they gave before")
+    an.set_defaults(func=cmd_series_answer)
 
 
 class _Parser(argparse.ArgumentParser):

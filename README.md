@@ -415,13 +415,19 @@ wanderfill history trips --since 10y --exclude uk-form,uk --first
 # see what each trip-segmentation setting produces before choosing one
 wanderfill sweep track.csv regions.json
 
-# a page of unticked series items with one of your photos near; you answer it, and
-# the answers become a plan, one series each
+# unticked series items with one of your photos near; you answer them in a conversation
+# (ask, answer) or on the page, and the answers become a plan, one series each
 wanderfill series review --since 2024-01-01
+wanderfill series ask review/review-<hash>.json
+wanderfill series answer review/review-<hash>.json series-answers.json \
+    --said "the first yes, the second no" --item 22:101=y --item 22:102=n
 wanderfill series plan review/review-<hash>.json series-answers.json --series 22
 
-# a page of stays your photos show; you answer it, and the answers become a plan of trips
+# the stays your photos show; you answer them the same way, and the answers become trips
 wanderfill trips review --since 2024-01-01 --track track.csv   # or --no-track
+wanderfill trips ask review/trips/trips-<hash>.json
+wanderfill trips answer review/trips/trips-<hash>.json trips-answers.json \
+    --said "Aldmoor 3, Berrow 2" --run 1:2031-05-01:2031-05-03=3 --run 2:2031-05-03:2031-05-06=2
 wanderfill trips plan review/trips/trips-<hash>.json trips-answers.json
 
 # read a plan
@@ -524,16 +530,31 @@ you pass it.
 `segment` is for a day-level track. If you have photos, the next section asks no such
 question: it shows you the stays and you say what was a trip.
 
-## Trips: a page of stays to answer
+## Trips: stays to answer
 
 `wanderfill trips` turns your photos into questions, and your answers into one plan of
 trips. It sends nothing to the profile.
 
 ```bash
-wanderfill trips review --since 2024-01-01 --track track.csv   # writes a page and its list
+wanderfill trips review --since 2024-01-01 --track track.csv   # writes the list, and a page
+wanderfill trips ask review/trips/trips-<hash>.json            # the questions, as text
+wanderfill trips answer review/trips/trips-<hash>.json trips-answers.json \
+    --said "your reply, word for word" --run ID=3 [--words ID="your words"] [--cut ID=cut]
 wanderfill trips plan review/trips/trips-<hash>.json trips-answers.json
 wanderfill show -v plan-trips.json && wanderfill check plan-trips.json
 ```
+
+You answer in a conversation, with an agent asking (see `AGENTS.md`), or on the page in a
+browser. Both make an answers file of one form; the page saves a whole file and reads
+none, so keep the two apart. **`ask`** prints what still
+takes an answer, grouped by the trip it would be in, with what the page shows of each stay;
+`--answers FILE` leaves out what is answered, and `--json` is the same for a program. It
+suggests nothing. **`answer`** writes your answers into the file: `--said` is your reply
+as you wrote it, and is kept beside every answer taken from it and in the plan's proof;
+`--words` are the words that release a held stay. The file is checked as `plan` checks it
+before it is written. An answer already there is changed only with `--replace`, which
+changes only what is given, and every reply is kept in order. Nothing else ever writes the
+file for you.
 
 **`review`** reads the whole Photos library, places each photo of your own camera on the
 map, and finds **runs**: days with a photo on the ground and strictly inside one region,
@@ -746,13 +767,16 @@ anything; on the original run, that gate stopped the Airports rule at 25% recall
 on its own. That 25% was measured with one point per city per day; distance from each
 photo, below, can do better. Both are recall, not precision.
 
-### Answering a page instead
+### Answering, in a conversation or on a page
 
 `wanderfill series` turns photos into questions, and your answers into plans. It
 sends nothing to the profile.
 
 ```bash
-wanderfill series review --since 2024-01-01            # writes a page and its list
+wanderfill series review --since 2024-01-01            # writes the list, and a page
+wanderfill series ask review/review-<hash>.json [--series 22]
+wanderfill series answer review/review-<hash>.json series-answers.json \
+    --said "your reply, word for word" --item 22:101=y
 wanderfill series plan review/review-<hash>.json series-answers.json --series 22
 wanderfill series named --series 22 --name "Exact Catalogue Name" \
     --said "your own words"
@@ -798,9 +822,10 @@ airports with one photo, or none within a kilometre, are under their own heading
 the other items. After those are the ones with a conflict or one spot, and last the ones
 that are both.
 
-On the page you answer "I was there", "I was not there" or "I don't remember", or
-nothing. The page loads nothing and sends nothing; it saves a file of answers, which
-fits that list and no other.
+You answer "I was there" (`y`), "I was not there" (`n`) or "I don't remember" (`q`), or
+nothing: in a conversation through `ask` and `answer`, as for trips, with your reply kept
+word for word beside each answer, or on the page. The page loads nothing and sends
+nothing. Both write one file of answers, which fits that list and no other.
 
 **`plan`** takes the list, the answers and one series. Only "I was there" becomes a
 tick. It reads the account and the series again. An item that is gone from the series

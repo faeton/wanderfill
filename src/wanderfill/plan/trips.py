@@ -936,14 +936,20 @@ RunAnswer = TypedDict(
     "RunAnswer", {"a": str, "words": str, "out": list[str], "in": list[str]}, total=False)
 
 
-class Answers(TypedDict):
-    """The owner's answers by run id and by boundary id (``"cut"`` or ``"same"``).
-
-    What is not there was not answered, and is never taken for anything.
-    """
-
+class _Answers(TypedDict):
     runs: Mapping[str, RunAnswer]
     cuts: Mapping[str, str]
+
+
+class Answers(_Answers, total=False):
+    """The owner's answers by run id and by boundary id (``"cut"`` or ``"same"``).
+
+    What is not there was not answered, and is never taken for anything. ``said`` has the
+    owner's replies in a conversation, verbatim, by the run or cut id each one answered: a
+    record of where an answer came from, which decides nothing.
+    """
+
+    said: Mapping[str, list[str]]
 
 
 @dataclass(frozen=True)
