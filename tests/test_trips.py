@@ -2948,11 +2948,13 @@ def test_nothing_is_preselected_proposed_or_answered_in_bulk():
 
 def test_the_page_says_what_an_answer_means():
     rest = re.sub(r"\s+", " ", DATA.sub("", render_page(small())))
-    for copy in ("Leave it out", "I don't remember", "Clear this answer", "Same trip",
+    for copy in ("Not a visit – leave it out", "I don't remember", "Clear this answer", "Same trip",
                  "A new trip starts here", "stored, but does not mark the region",
                  "Leaving a question blank is fine", "a final answer",
                  "This page sends nothing anywhere", "days with no photo",
-                 "by the photo's own clock"):
+                 "by the photo's own clock", "What to do", "Download answers",
+                 "Nothing changes on your profile from this page", "trips-answers.json",
+                 "Search by region name"):
         assert copy in rest, copy
 
 
@@ -3043,7 +3045,7 @@ def test_the_page_reads_words_as_the_answers_file_does(tmp_path):
 
 @needs_node
 def test_the_page_opens_with_nothing_answered_and_every_run_in_place(tmp_path):
-    for m in (listed(visits=MIXED), listed(visits=KNOWN)):
+    for name, m in (("MIXED", listed(visits=MIXED)), ("KNOWN", listed(visits=KNOWN))):
         got = run(tmp_path, m, """
           const p = open();
           return [p.runs().map((r) => r.cls("name")[0].textContent), p.pressed(),
@@ -3052,17 +3054,158 @@ def test_the_page_opens_with_nothing_answered_and_every_run_in_place(tmp_path):
                   p.runs().map((r) => r.className.split(" ").includes("grey")),
                   p.runs().map((r) => { const f = p.field(r); return f && f.value; })];
         """)
-        assert got[0] == [f"{r.name} ({r.region}), {r.first} to {r.last}" for r in m.runs]
+        assert got[0] == [r.name for r in m.runs]  # the dates are on a line of their own
         # Only what stands at "same trip" is, and nothing is stored of it.
         standing = [b for b in m.boundaries if not b.suggestions]
         assert got[1] == ["Same trip"] * len(standing) and got[2] == 0
         assert got[3] is True and got[4] == len(m.boundaries)
-        assert got[5] == ["run", "between"] * 4 + ["run"]
+        # What takes no quality is folded, in its place; a forced edge beside it is in the fold.
+        assert got[5] == {
+            "MIXED": ["run", "between", "run", "between", "fold", "between", "run", "between",
+                      "run"],
+            "KNOWN": ["run", "between", "run", "fold", "run", "fold"]}[name]
         assert got[6] == [r.status in ("fixed", "there") for r in m.runs]
         assert got[7] == ["" if r.status == "held" else None for r in m.runs]
 
 
-QUALITIES = [f"{q} {word}" for q, word in QUALITY.items() if q]
+@needs_node
+def test_the_layout_keeps_the_order_and_folds_only_what_takes_no_quality(tmp_path):
+    rng = random.Random(20261125)
+    lists = [any_list(rng)[0] for _ in range(300)]
+    got = run(tmp_path, small(), """
+      return lists.map((d) => {
+        const items = logic.layout(d);
+        const where = (list, inFold) => list.flatMap((i) => (i.items
+          ? [["fold", i.items.length > 0, inFold], ...where(i.items, true)]
+          : [["run" in i ? "run:" + i.run : "edge:" + i.edge, inFold]]));
+        return [logic.flat(items).map((i) => ("run" in i ? "run:" + i.run : "edge:" + i.edge)),
+                where(items, false)];
+      });
+    """, lists=[page_data(m) for m in lists])
+    assert sum(len(m.runs) for m in lists) > 600
+    assert sum(kind == "fold" for _, where in got for kind, *_ in where) > 100
+    for m, (order, where) in zip(lists, got, strict=True):
+        want = [f"run:{n // 2}" if n % 2 == 0 else f"edge:{n // 2}"
+                for n in range(2 * len(m.runs) - 1)] if m.runs else []
+        assert order == want  # opened, every stretch is where it was
+        assert all(rest == [True, False] for kind, *rest in where if kind == "fold")
+        for kind, *rest in where:
+            if kind.startswith("run:"):
+                folded = m.runs[int(kind[4:])].status not in ("offered", "held")
+                assert rest == [folded], kind
+            elif kind.startswith("edge:"):
+                n = int(kind[5:])
+                beside = [m.runs[n].status, m.runs[n + 1].status]
+                both = all(s not in ("offered", "held") for s in beside)
+                none = all(s in ("offered", "held") for s in beside)
+                if both or none:
+                    assert rest == [both], kind
+                else:  # beside a fold, and in it only where there is nothing to answer
+                    assert rest == [m.boundaries[n].forced], kind
+
+
+FIND = """
+  const p = open();
+  const folds = () => p.byId.list.cls("fold");
+  const seen = () => [p.runs().filter((r) => !r.hidden).map((r) => r.cls("name")[0].textContent),
+                      folds().map((f) => [f.hidden, f.open]),
+                      p.betweens().filter((b) => !b.hidden).length,
+                      p.byId.found.textContent, p.byId["search-clear"].hidden];
+  const find = (text) => {
+    p.byId.search.value = text;
+    p.byId.search.fire("input");
+    return seen();
+  };
+"""
+
+
+@needs_node
+def test_only_what_can_be_answered_is_shown_and_the_rest_is_folded_closed(tmp_path):
+    m = listed(visits=KNOWN)
+    got = run(tmp_path, m, FIND + """
+      const fold = folds()[0];
+      const before = [fold.all((e) => e.tag === "summary")[0].textContent, seen(),
+                      fold.cls("fold-open")[0].hidden, p.byId.howmany.textContent,
+                      p.byId.unfold.hidden, p.byId.unfold.textContent];
+      p.press(p.run("Cray"), "Not a visit – leave it out");
+      const after = [fold.all((e) => e.tag === "summary")[0].textContent,
+                     fold.cls("fold-open")[0].hidden];
+      p.press(p.run("Cray"), "Clear this answer");
+      p.storage.log.length = 0;
+      p.byId.unfold.click();
+      const opened = [folds().map((f) => f.open), p.byId.unfold.textContent,
+                      p.storage.log.filter(([op]) => op !== "getItem")];
+      p.byId.unfold.click();
+      return [before, after, opened, folds().map((f) => f.open)];
+    """)
+    (summary, shown, quiet, howmany, unfold_hidden, unfold), after, opened, closed = got
+    assert summary == ("Folded here: 1 more stretch (1 that cannot go into a trip). "
+                       "1 question in here has no answer yet.")
+    assert shown[0] == ["Aldmoor", "Berrow", "Cray Islands", "Dunvale", "Fenmark"]
+    assert shown[1] == [[False, False], [False, False]] and shown[3:] == ["", True]
+    assert quiet is False and unfold_hidden is False and unfold == "Open the folded stretches"
+    assert howmany.startswith("3 stretches can go into a trip, and 1 of them needs your own")
+    assert "2 other stretches are folded away" in howmany
+    assert after == ["Folded here: 1 more stretch (1 that cannot go into a trip). ", True]
+    assert opened == [[True, True], "Close the folded stretches", []] and closed == [False, False]
+    got = run(tmp_path, listed([*stay(R, 1, 3), ob(40, Q)]),
+              "const p = open(); return [p.byId.unfold.hidden, p.byId.list.cls('fold').length];")
+    assert got == [True, 0]
+
+
+@needs_node
+def test_the_search_shows_the_stretches_of_a_name_and_gives_the_list_back(tmp_path):
+    m = listed(visits=KNOWN, names=NAMES | {4: "São Dunvale"})
+    got = run(tmp_path, m, FIND + """
+      const out = [find("  dun "), find("SAO"), find("cray"), find("isl"), find("zzz"), find("3")];
+      p.byId["search-clear"].click();
+      out.push(seen(), p.byId.search.value);
+      folds()[1].open = true; /* opened by hand, before a search */
+      find("ald");
+      out.push(find("").slice(1, 2));
+      return out;
+    """)
+    dun, sao, cray, isl, none, by_id, back, value, kept = got
+    assert dun[0] == sao[0] == ["São Dunvale"] and dun[3] == "1 stretch found." and not dun[4]
+    assert dun[1] == [[True, False]] * 2  # nothing found in them: hidden, and still closed
+    assert dun[2] == 0  # the edges beside it are forced, and ask nothing
+    assert cray[0] == isl[0] == ["Cray Islands"] and cray[1][0] == [False, True]
+    assert cray[1][1] == [True, False] and cray[2] == 0
+    assert none[0] == [] and "No stretch" in none[3] and none[1] == [[True, False]] * 2
+    assert by_id[0] == ["Cray Islands"]
+    assert back[0] == [r.name if r.region != 4 else "São Dunvale" for r in m.runs]
+    assert back[1] == [[False, False]] * 2 and back[2] == 4 and back[3:] == ["", True]
+    assert value == "" and kept == [[[False, False], [False, True]]]
+    got = run(tmp_path, listed(visits=MIXED), FIND + 'return find("berrow");')
+    assert got[0] == ["Berrow"] and got[2] == 2  # the questions on both sides of it are there
+
+
+@needs_node
+@pytest.mark.parametrize("which", ["MIXED", "KNOWN", "HOSTILE", "JUMP", "FLOWN"])
+def test_no_answer_is_pressed_typed_or_proposed_when_the_page_opens(tmp_path, which):
+    m = {"MIXED": lambda: listed(visits=MIXED), "KNOWN": lambda: listed(visits=KNOWN),
+         "HOSTILE": hostile, "JUMP": lambda: jump_list()[0],
+         "FLOWN": lambda: listed(FLOWN)}[which]()
+    got = run(tmp_path, m, FIND + """
+      const cards = p.runs();
+      return [cards.map((r) => p.pressed(r)), cards.map((r) => (p.field(r) || {value: ""}).value),
+              p.byId.search.value, folds().map((f) => f.open), p.storage.held.size,
+              cards.map((r) => r.cls("ask").map((a) => a.textContent)),
+              p.byId.meanings.textContent + p.byId.legend.textContent];
+    """)
+    pressed, typed, query, opened, stored_n, asks, meanings = got
+    assert all(p == [] for p in pressed) and all(t == "" for t in typed)
+    assert query == "" and not any(opened) and stored_n == 0
+    for r, ask in zip(m.runs, asks, strict=True):
+        assert ask == ({"offered": ["Was this a visit? Press one answer."],
+                        "held": ["Was this a visit? Press one answer."],
+                        "fixed": ["It takes one answer only:"], "there": []}[r.status])
+    for word in ("2 – minimal visit", "6 – travelguru", "1 – transit", "does not mark the region",
+                 "never removes anything", "a final answer", "blank is fine"):
+        assert word in meanings, word
+
+
+QUALITIES = [f"{q} – {word}" for q, word in QUALITY.items() if q]
 
 
 @needs_node
@@ -3071,8 +3214,8 @@ def test_each_run_has_the_controls_its_answers_take(tmp_path):
       const p = open();
       return p.runs().map((r) => [p.buttons(r), p.field(r) !== null]);
     """
-    full = [*QUALITIES, "Leave it out", "I don't remember", "Clear this answer"]
-    only_no = ["Leave it out", "Clear this answer"]
+    full = [*QUALITIES, "Not a visit – leave it out", "I don't remember", "Clear this answer"]
+    only_no = ["Not a visit – leave it out", "Clear this answer"]
     assert run(tmp_path, listed(visits=MIXED), read) == [
         [full, False], [full, True], [only_no, False], [full, False], [full, False]]
     assert run(tmp_path, listed(visits=KNOWN), read) == [
@@ -3086,7 +3229,7 @@ def test_quality_one_says_beside_it_that_it_marks_nothing(tmp_path):
       return p.runs().map((r) => r.cls("choice").map((c) => c.textContent));
     """)
     for texts in got:
-        assert texts[0] == "1 transit stored, but does not mark the region"
+        assert texts[0] == "1 – transit stored, but does not mark the region"
         assert texts[1:] == QUALITIES[1:]
 
 
@@ -3154,12 +3297,12 @@ def test_a_suggested_boundary_is_blank_until_it_is_answered(tmp_path):
 
 ANSWER_ALL = """
   const p = open();
-  p.press(p.run("Aldmoor"), "3 good visit");
-  p.press(p.run("Berrow"), "2 minimal visit");
+  p.press(p.run("Aldmoor"), "3 – good visit");
+  p.press(p.run("Berrow"), "2 – minimal visit");
   p.type(p.run("Berrow"), " the other one was as a child \U0001f5fc");
-  p.press(p.run("Cray"), "Leave it out");
+  p.press(p.run("Cray"), "Not a visit – leave it out");
   p.press(p.run("Dunvale"), "I don't remember");
-  p.press(p.run("Fenmark"), "1 transit");
+  p.press(p.run("Fenmark"), "1 – transit");
   p.press(p.betweens()[0], "A new trip starts here");
   p.press(p.betweens()[3], "A new trip starts here");
 """
@@ -3210,7 +3353,7 @@ def test_each_answer_is_stored_on_its_own_and_read_back(tmp_path):
       again.byId.download.click();
       const held = Object.fromEntries(p.storage.held);
       p.storage.log.length = 0;
-      p.press(p.run("Aldmoor"), "4 worked here");
+      p.press(p.run("Aldmoor"), "4 – worked here");
       const touched = [...new Set(p.storage.log.map(([, key]) => key))];
       p.storage.log.length = 0;
       p.type(p.run("Berrow"), "x");
@@ -3375,14 +3518,14 @@ def test_two_tabs_at_once_on_two_answers_both_count(tmp_path):
         for (let at = 0; at < 8; at += 1) {
           const storage = new Storage();
           const first = open({storage});
-          first.press(first.run("Aldmoor"), "3 good visit");
+          first.press(first.run("Aldmoor"), "3 – good visit");
           const b = open({storage});
           let n = -1, fired = false;
           const a = open({storage: new View(storage, () => {
             if (n >= 0 && n++ === at) { fired = true; act(b); }
           })});
           n = 0;
-          a.press(a.run("Dunvale"), "5 lived here");
+          a.press(a.run("Dunvale"), "5 – lived here");
           n = -1;
           if (!fired) break;
           const value = (p) => {
@@ -3406,7 +3549,7 @@ def test_two_tabs_at_once_on_two_answers_both_count(tmp_path):
 
 ANSWERS_OF = {
     "run": (f"run:{R_ID}", "no", "3", """
-      (p, v) => p.press(p.run("Aldmoor"), {no: "Leave it out", 3: "3 good visit",
+      (p, v) => p.press(p.run("Aldmoor"), {no: "Not a visit – leave it out", 3: "3 – good visit",
                                            "": "Clear this answer"}[v])"""),
     "words": (f"words:{Q_ID}", "as a child", "last year", '(p, v) => p.type(p.run("Berrow"), v)'),
     "cut": (f"cut:{CUT_49}", "same", "cut", """
@@ -3478,10 +3621,10 @@ def test_another_answer_in_a_storage_with_no_room_left_wins_too(tmp_path):
         Storage.prototype.setItem.call(this, k, "5"); /* and another tab, at once */
       };
       const p = open({storage});
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       return [p.pressed(p.run("Aldmoor")), p.byId.kept.textContent.includes("not being kept")];
     """, name=name)
-    assert got == [["5 lived here"], False]
+    assert got == [["5 – lived here"], False]
 
 
 @needs_node
@@ -3496,10 +3639,10 @@ def test_what_changes_while_the_storage_is_looked_at_is_seen(tmp_path):
         if (k !== name) this.held.set(name, "5");
       };
       const p = open({storage});
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       return [p.pressed(p.run("Aldmoor")), p.byId.kept.textContent.includes("not being kept")];
     """, name=name)
-    assert got == [["5 lived here"], False]
+    assert got == [["5 – lived here"], False]
 
 
 @needs_node
@@ -3533,7 +3676,7 @@ def test_a_tab_shows_the_words_and_answers_another_tab_has_stored(tmp_path):
       const storage = new Storage();
       const a = open({storage}), b = open({storage});
       b.type(b.run("Berrow"), "from B");
-      b.press(b.run("Aldmoor"), "6 travelguru");
+      b.press(b.run("Aldmoor"), "6 – travelguru");
       const before = a.field(a.run("Berrow")).value;
       a.tell("storage", {});
       const after = [a.field(a.run("Berrow")).value, a.pressed(a.run("Aldmoor"))];
@@ -3541,7 +3684,7 @@ def test_a_tab_shows_the_words_and_answers_another_tab_has_stored(tmp_path):
       b.tell("pageshow", {persisted: true});
       return [before, ...after, b.run("Berrow").cls("problem")[0].hidden];
     """)
-    assert got == ["", "from B", ["6 travelguru"], False]
+    assert got == ["", "from B", ["6 – travelguru"], False]
 
 
 @needs_node
@@ -3599,7 +3742,7 @@ def test_a_quota_that_fails_one_answer_holds_that_one_and_stores_the_rest(tmp_pa
         Storage.prototype.setItem.call(this, k, v);
       };
       const p = open({storage});
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       p.type(p.run("Berrow"), "as a child");
       storage.held.set(words, "another tab's");
       p.tell("storage", {});
@@ -3638,7 +3781,7 @@ def test_the_note_after_a_copy_is_about_what_was_copied(tmp_path, later):
       let text = null, done = null;
       const clipboard = {writeText: (t) => new Promise((ok) => { text = t; done = ok; })};
       const p = open({clipboard});
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       p.byId.copy.click();
       const early = p.byId.said.textContent;
       if (later) p.press(p.run("Aldmoor"), later);
@@ -3661,7 +3804,7 @@ def test_without_a_clipboard_the_text_is_there_to_select(tmp_path, clipboard):
       p.byId.copy.click();
       await null; await null; await null;
       const shown = [p.byId.text.hidden, p.byId.text.value];
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       return [before, ...shown, p.byId.text.value];
     """, clipboard=clipboard)
     assert got[:2] == [True, False]
@@ -3680,7 +3823,7 @@ def test_the_preview_is_the_trips_and_why_the_rest_is_not_made(tmp_path):
                           p.byId.preview.cls("not-made").map((t) => t.textContent),
                           p.byId.preview.cls("left-out").map((t) => t.textContent)];
       at.push(read());
-      p.press(p.run("Dunvale"), "1 transit");
+      p.press(p.run("Dunvale"), "1 – transit");
       p.press(p.betweens()[0], "Same trip");
       at.push(read(), p.byId.counts.textContent);
       return at;
@@ -3688,8 +3831,8 @@ def test_the_preview_is_the_trips_and_why_the_rest_is_not_made(tmp_path):
     assert "is not answered" in got[0]
     trips_, held, left = got[1]
     assert len(trips_) == 2 and "2026-05-01 to 2026-05-03" in trips_[0]
-    assert "Aldmoor (1), 2026-05-01 to 2026-05-03: 3 good visit" in trips_[0]
-    assert "Fenmark (9), 2026-05-13 to 2026-05-14: 1 transit" in trips_[1]
+    assert "Aldmoor (1), 2026-05-01 to 2026-05-03: 3 – good visit" in trips_[0]
+    assert "Fenmark (9), 2026-05-13 to 2026-05-14: 1 – transit" in trips_[1]
     assert "stored, but does not mark the region" in trips_[1]
     assert "stored" not in trips_[0]
     (held,) = held
@@ -3723,7 +3866,7 @@ def test_a_run_shows_its_facts(tmp_path):
     for fact in ("Days with photos: 2026-05-01, 2026-05-03, 2026-05-05 to 2026-05-06",
                  "Days with no photo: 2026-05-02, 2026-05-04", "4 photos",
                  "First: 2026-05-01 09:30, clock UTC-3:30", "Last: 2026-05-06 20:00, clock UTC",
-                 "2013 to no date, 4 worked here, in a trip",
+                 "2013 to no date, 4 – worked here, in a trip",
                  "2026-05-25 to 2026-05-26, no visit",
                  "2026-05-03 to 2026-05-04, hills", "no date to 2026-05-01"):
         assert fact in first, fact
@@ -3748,7 +3891,7 @@ def test_a_flight_day_is_said_and_can_be_left_out_and_taken_back(tmp_path):
       const state = () => [p.pressed(r), Object.fromEntries(p.storage.held),
                            p.byId.preview.cls("trip").map((t) => t.textContent)];
       p.press(p.betweens()[0], "A new trip starts here");
-      p.press(r, "3 good visit");
+      p.press(r, "3 – good visit");
       out.push(state());
       p.press(r, "Leave this day out");
       out.push(state());
@@ -3767,13 +3910,13 @@ def test_a_flight_day_is_said_and_can_be_left_out_and_taken_back(tmp_path):
     assert got[2] == 0 and got[3] == [["Leave this day out", "false"]] and got[4] == 0
     (key,) = stored(m, f"out:{RF}:2026-05-04")
     pressed, kept, (trip,) = got[5]
-    assert pressed == ["3 good visit"] and key not in kept
-    assert "2026-05-01 to 2026-05-04: 3 good visit" in trip
+    assert pressed == ["3 – good visit"] and key not in kept
+    assert "2026-05-01 to 2026-05-04: 3 – good visit" in trip
     pressed, kept, (trip,) = got[6]
-    assert pressed == ["Leave this day out", "3 good visit"] and kept[key] == "out"
-    assert "2026-05-01 to 2026-05-03: 3 good visit" in trip
+    assert pressed == ["Leave this day out", "3 – good visit"] and kept[key] == "out"
+    assert "2026-05-01 to 2026-05-03: 3 – good visit" in trip
     assert "Trip: 2026-05-01 to 2026-05-03" in trip
-    assert got[7] == ["Leave this day out", "3 good visit"]
+    assert got[7] == ["Leave this day out", "3 – good visit"]
     assert got[8] == got[5]
     for text, want in ((got[9], OUT_R | {"a": "3"}), (got[10], {"a": "3"})):
         assert load_answers(answers_file(tmp_path, text), m)["runs"] == {RF: want}
@@ -3793,8 +3936,8 @@ def test_a_day_beside_a_jump_is_said_and_can_be_included_and_taken_back(tmp_path
       for (const b of p.betweens()) {
         if (p.buttons(b).length) p.press(b, "A new trip starts here");
       }
-      p.press(r, "3 good visit");
-      p.press(q, "3 good visit");
+      p.press(r, "3 – good visit");
+      p.press(q, "3 – good visit");
       out.push(state());
       p.press(r, "Include this day");
       p.press(q, "Include this day");
@@ -3816,12 +3959,12 @@ def test_a_day_beside_a_jump_is_said_and_can_be_included_and_taken_back(tmp_path
     assert got[2] == [["Include this day", "false"]] and got[3] == 0
     key, other = stored(m, f"in:{RJ}:2026-05-04", f"in:{QJ}:2026-05-06")
     _, kept, trips_ = got[4]
-    assert key not in kept and "2026-05-01 to 2026-05-03: 3 good visit" in trips_[0]
+    assert key not in kept and "2026-05-01 to 2026-05-03: 3 – good visit" in trips_[0]
     pressed, kept, trips_ = got[5]
     assert "Include this day" in pressed and kept[key] == kept[other] == "in"
     assert "Trip: 2026-05-01 to 2026-05-04" in trips_[0]
-    assert "Aldmoor (1), 2026-05-01 to 2026-05-04: 3 good visit" in trips_[0]
-    assert "Berrow (2), 2026-05-06 to 2026-05-09: 3 good visit" in trips_[1]
+    assert "Aldmoor (1), 2026-05-01 to 2026-05-04: 3 – good visit" in trips_[0]
+    assert "Berrow (2), 2026-05-06 to 2026-05-09: 3 – good visit" in trips_[1]
     assert got[6] == 2 and got[8] == got[4]
     for text, want in ((got[7], {RJ: IN_R | {"a": "3"}, QJ: IN_Q | {"a": "3"}}),
                        (got[9], {RJ: {"a": "3"}, QJ: {"a": "3"}})):
@@ -3938,7 +4081,8 @@ def test_a_day_with_a_photo_that_is_nowhere_is_a_barrier():
 
 
 READ_PARTS = """
-  return open().runs().map((r) => r.all((e) => e.tag === "details").map((d) => [
+  return open().runs().map((r) => r.all((e) => e.tag === "details" && e.className !== "more")
+    .map((d) => [
     d.open, d.all((e) => e.tag === "summary")[0].textContent,
     d.all((e) => e.tag === "li").map((e) => [e.textContent, e.getAttribute("dir")])]));
 """
@@ -3953,11 +4097,11 @@ def test_the_visits_of_a_region_are_lines_in_a_closed_box_with_no_ids(tmp_path):
     (first, second) = run(tmp_path, m, READ_PARTS)
     ((is_open, title, lines),) = first
     assert is_open is False and title == "27 visits of this region on your profile"
-    want = [f"{2000 + n}-03-01 to {2000 + n}-03-02, 3 good visit, in a trip" for n in range(25)]
-    want[14:14] = ["2014, 1 transit"]
-    assert lines == [[t, "auto"] for t in [*want, "no dates, 3 good visit"]]
+    want = [f"{2000 + n}-03-01 to {2000 + n}-03-02, 3 – good visit, in a trip" for n in range(25)]
+    want[14:14] = ["2014, 1 – transit"]
+    assert lines == [[t, "auto"] for t in [*want, "no dates, 3 – good visit"]]
     assert second[0][1] == "1 visit of this region on your profile"
-    assert second[0][2] == [["no dates, 3 good visit", "auto"]]
+    assert second[0][2] == [["no dates, 3 – good visit", "auto"]]
     # No id in the box; the visit that a reason names is named there.
     texts = run(tmp_path, m, "return open().runs().map((r) => r.textContent);")
     assert "8003" not in texts[0] and "visit 6001" in texts[0]
@@ -4134,13 +4278,13 @@ def test_controls_are_taken_out_of_every_text_shown(tmp_path, code):
                sources=[PHOTOS | {"label": f"lib{bad}rary"}], created=f"to{bad}day")
     got = run(tmp_path, m, """
       const p = open();
-      p.press(p.run("Aldmoor"), "3 good visit");
+      p.press(p.run("Aldmoor"), "3 – good visit");
       p.type(p.run("Region 2"), "mine" + bad);
       return [p.order.filter((id) => id !== "data").map((id) => p.byId[id].textContent).join(""),
               p.runs().map((r) => r.cls("name")[0].textContent), data.runs[0].name];
     """, bad=bad)
     assert bad not in got[0] and "hills" in got[0] and "library" in got[0] and "today" in got[0]
-    assert got[1][0].startswith("Aldmoor (1), ") and got[1][1].startswith("Region 2, ")
+    assert got[1] == ["Aldmoor", "Region 2", "Cray Islands", "Dunvale", "Fenmark"]
     assert got[2] == f"Ald{bad}moor"  # what is hashed is as it was
 
 
@@ -4150,10 +4294,10 @@ def test_hostile_text_is_text_wherever_it_is_shown(tmp_path):
     got = run(tmp_path, hostile(), """
       const p = open();
       const box = p.runs()[1];
-      p.press(p.runs()[0], "3 good visit");
-      p.press(box, "2 minimal visit");
+      p.press(p.runs()[0], "3 – good visit");
+      p.press(box, "2 – minimal visit");
       p.type(box, words);
-      p.press(p.runs()[2], "Leave it out");
+      p.press(p.runs()[2], "Not a visit – leave it out");
       p.byId.show.click();
       return [p.runs()[0].cls("name")[0].textContent, p.runs()[0].textContent,
               p.byId.preview.textContent, p.byId.text.value];
@@ -4170,7 +4314,7 @@ def test_names_are_isolated_and_groups_of_buttons_are_named(tmp_path):
       const ids = p.runs().map((r) => r.cls("name")[0].getAttribute("id"));
       return [p.runs().map((r) => r.cls("name")[0].getAttribute("dir")), new Set(ids).size,
               p.runs().map((r, n) => r.all((e) => e.getAttribute("role") === "group")
-                .map((g) => g.getAttribute("aria-labelledby") === ids[n])),
+                .map((g) => g.getAttribute("aria-labelledby") === ids[n] + " when-" + n)),
               p.betweens().map((b) => b.all((e) => e.getAttribute("role") === "group")
                 .map((g) => Boolean(g.getAttribute("aria-label")))),
               p.field(p.run("Berrow")).getAttribute("dir")];
@@ -4194,8 +4338,8 @@ def test_the_counts_are_said_once_and_the_bar_hides_nothing(tmp_path):
       const p = open();
       const writes = () => [p.byId.counts.writes, p.byId.said.writes, p.byId.kept.writes];
       const out = [writes()];
-      p.press(p.run("Aldmoor"), "3 good visit"); out.push(writes());
-      p.press(p.run("Aldmoor"), "3 good visit"); out.push(writes());
+      p.press(p.run("Aldmoor"), "3 – good visit"); out.push(writes());
+      p.press(p.run("Aldmoor"), "3 – good visit"); out.push(writes());
       p.byId.download.click(); out.push(writes());
       p.tell("storage", {}); out.push(writes());
       const first = p.root.style.scrollPaddingBottom;

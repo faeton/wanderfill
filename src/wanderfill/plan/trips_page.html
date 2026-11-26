@@ -10,13 +10,13 @@
 :root {
   color-scheme: light dark;
   --back: #fafaf8; --card: #ffffff; --ink: #1c1c1a; --soft: #5b5b55; --line: #d5d5ce;
-  --accent: #0b5c8a; --on-accent: #ffffff;
+  --accent: #0b5c8a; --on-accent: #ffffff; --tint: #e8f1f7;
   --warn-back: #fff1d6; --warn-ink: #6b3d00; --stop-back: #a3180f; --stop-ink: #ffffff;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --back: #161614; --card: #21211e; --ink: #ecece6; --soft: #a8a89f; --line: #41413b;
-    --accent: #7cc3ee; --on-accent: #08222f;
+    --accent: #7cc3ee; --on-accent: #08222f; --tint: #1b2a33;
     --warn-back: #3b2c0c; --warn-ink: #ffd890; --stop-back: #ffb4ab; --stop-ink: #45070a;
   }
 }
@@ -24,18 +24,26 @@
 html { scroll-padding-bottom: 11rem; }
 body {
   margin: 0; padding: 0 1rem; background: var(--back); color: var(--ink);
-  font: 16px/1.5 system-ui, sans-serif; overflow-wrap: anywhere;
+  font: 17px/1.5 system-ui, sans-serif; overflow-wrap: anywhere;
 }
 main { max-width: 46rem; margin: 0 auto; }
-h1 { font-size: 1.5rem; margin: 1.25rem 0 0.5rem; }
-h2 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+h1 { font-size: 1.6rem; margin: 1.25rem 0 0.75rem; }
+h2 { font-size: 1.2rem; margin: 1.75rem 0 0.5rem; }
 h3 { font-size: 1rem; margin: 1rem 0 0.5rem; unicode-bidi: isolate; }
-p, ul, dl { margin: 0.5rem 0; }
-ul { padding-left: 1.25rem; }
+p, ul, ol, dl { margin: 0.5rem 0; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: 0.25rem 0; }
 .stop {
   margin: 0 -1rem; padding: 0.9rem 1rem; background: var(--stop-back); color: var(--stop-ink);
   font-weight: 600;
 }
+.todo {
+  background: var(--tint); border: 2px solid var(--accent); border-radius: 10px;
+  padding: 0.75rem 1rem; margin: 0.75rem 0 1rem;
+}
+.todo h2 { margin-top: 0.25rem; }
+.todo ol { font-size: 1.05rem; }
+.safe { font-weight: 600; }
 .note { border-left: 4px solid var(--accent); padding: 0.25rem 0 0.25rem 0.9rem; }
 .soft { color: var(--soft); }
 .wide { overflow-x: auto; }
@@ -44,30 +52,48 @@ th, td {
   text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; border-bottom: 1px solid var(--line);
   unicode-bidi: isolate;
 }
-button, textarea {
+button, textarea, input {
   font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line);
   border-radius: 6px; min-height: 2.75rem; padding: 0.4rem 0.75rem;
 }
-button { cursor: pointer; }
+button { cursor: pointer; text-align: left; }
 button[aria-pressed="true"] {
   background: var(--accent); color: var(--on-accent); border-color: var(--accent);
-  text-decoration: underline;
+  font-weight: 600; text-decoration: underline;
 }
 button.clear { background: none; border-color: transparent; color: var(--soft); text-decoration: underline; }
-:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-summary { cursor: pointer; padding: 0.5rem 0; }
-.run {
-  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem;
-  margin: 0.6rem 0; content-visibility: auto; contain-intrinsic-size: auto 16rem;
+button.primary {
+  background: var(--accent); color: var(--on-accent); border-color: var(--accent);
+  font-weight: 700; font-size: 1.1rem; padding: 0.5rem 1.25rem;
 }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+summary { cursor: pointer; padding: 0.5rem 0; min-height: 2.75rem; }
+.find { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.75rem 0; }
+.find label { font-weight: 600; }
+.find input { flex: 1 1 14rem; }
+.run {
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem 1rem;
+  margin: 0.75rem 0; content-visibility: auto; contain-intrinsic-size: auto 16rem;
+}
+.run.held { border-left: 6px solid var(--warn-ink); }
 .grey { background: none; border-style: dashed; color: var(--soft); }
+.fold { border: 1px dashed var(--line); border-radius: 8px; padding: 0 0.75rem; margin: 0.75rem 0; }
+.fold > summary { color: var(--soft); }
+.fold-open { margin-left: 0.5rem; }
 .between { border-left: 3px solid var(--line); margin: 0.6rem 0 0.6rem 1rem; padding: 0.1rem 0.9rem; }
+.between .ask { font-weight: 600; }
 .trip, .not-made { border-left: 4px solid var(--accent); padding: 0.1rem 0.9rem; margin: 0.75rem 0; }
 .not-made { border-left-color: var(--line); color: var(--soft); }
-.name { font-weight: 600; margin: 0; unicode-bidi: isolate; }
+.name { font-weight: 700; margin: 0; unicode-bidi: isolate; }
+.run .name { font-size: 1.3rem; }
+.when { margin: 0.1rem 0 0.4rem; font-weight: 500; }
+.ask { margin: 0.6rem 0 0.25rem; font-weight: 600; }
+.hold { background: var(--warn-back); color: var(--warn-ink); border-radius: 6px; padding: 0.4rem 0.75rem; }
+.hold p, .hold ul { margin: 0.25rem 0; }
 .facts { margin: 0.25rem 0; color: var(--soft); font-size: 0.92rem; }
 .visits, .over { color: var(--soft); font-size: 0.92rem; }
-.flight { margin: 0.4rem 0; font-size: 0.92rem; }
+.more { margin-top: 0.5rem; font-size: 0.95rem; }
+.flight { margin: 0.4rem 0; font-size: 0.95rem; }
 .flight p { margin: 0.25rem 0; }
 .facts div, li { unicode-bidi: isolate; }
 .flags { list-style: none; padding: 0; margin: 0.4rem 0; }
@@ -75,16 +101,20 @@ summary { cursor: pointer; padding: 0.5rem 0; }
 .flags li, .warn {
   background: var(--warn-back); color: var(--warn-ink); border-radius: 4px; padding: 0.2rem 0.5rem;
 }
-.buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+.buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.quals { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.5rem; width: 100%; }
+.choice { display: flex; flex-direction: column; }
 .choice .soft { font-size: 0.85rem; }
-.why, .run label { display: block; margin: 0.5rem 0 0.25rem; font-size: 0.92rem; }
+.why, .run label { display: block; margin: 0.6rem 0 0.25rem; }
+.run label { font-weight: 600; }
+.legend { font-size: 0.95rem; }
 .bar {
   position: sticky; bottom: 0; z-index: 1; max-height: 50vh; overflow-y: auto;
   margin: 1.5rem -1rem 0; padding: 0.6rem 1rem;
-  background: var(--card); border-top: 1px solid var(--line);
+  background: var(--card); border-top: 2px solid var(--accent);
 }
 .bar-in { max-width: 46rem; margin: 0 auto; }
-.bar p { margin: 0.25rem 0; font-size: 0.92rem; }
+.bar p { margin: 0.25rem 0; font-size: 0.95rem; }
 textarea { width: 100%; }
 #text { height: 8rem; font-family: ui-monospace, monospace; font-size: 0.85rem; }
 [hidden] { display: none; }
@@ -96,11 +126,25 @@ textarea { width: 100%; }
 <p id="start">This page has not started, and nothing has been answered. It needs JavaScript, which
 runs only inside this file. If it stays like this, the file is damaged: run the command again.</p>
 <h1>Which of these were visits?</h1>
-<div class="note">
-<p>Each stretch below is days on which you have photos inside one region. Answer from what you
-remember yourself.</p>
+
+<section class="todo" aria-labelledby="todo-title">
+<h2 id="todo-title">What to do</h2>
+<ol>
+<li>Look at each stretch below. A stretch is some days when your photos are in one region.</li>
+<li>If you remember it, press the answer that is true. Answer only from your own memory.</li>
+<li>If you are not sure, leave it blank. That is fine.</li>
+<li>When you stop, press <strong>Download answers</strong> at the bottom. Then tell the person
+who runs the tool that the file trips-answers.json is saved.</li>
+</ol>
+<p class="safe">This page sends nothing anywhere. Nothing changes on your profile from this page.
+A plan is made from your file later, and you read it first.</p>
+</section>
+
+<h2>What the answers mean</h2>
+<ul id="meanings" class="legend"></ul>
+<details>
+<summary>Good to know</summary>
 <ul>
-<li>Leaving a question blank is fine. It holds the trip that it is in, and that trip is not made.</li>
 <li>A photo does not prove a visit. A stretch begins and ends on a day with a photo, and the days
 with no photo in it are named.</li>
 <li>The first or the last day of a stretch can be a flight day: photos in the region were taken
@@ -109,20 +153,35 @@ phone can still say the old place, so it can be a day too many.</li>
 <li>A day beside a stretch can have photos in the region beside an impossible jump, and none at
 speed. Those say the old place as often as not, so it is out unless you include it.</li>
 <li>Times are by the photo's own clock.</li>
-<li>Your answers change nothing by themselves. This page sends nothing anywhere: you save the
-answers as a file, and a plan is made from it for you to read first.</li>
+<li>Stretches that are on your profile already, or cannot go into a trip, are folded away in
+their place. Open a fold to see them. They are there so that the order is true.</li>
 </ul>
-<p><strong>1 to 6</strong>: the stretch goes into its trip, as a visit of that quality.<br>
-<strong>Leave it out</strong>: it goes into no trip. It never removes anything from your profile.<br>
-<strong>I don't remember</strong>: a final answer. The whole trip that the stretch is in is not made.</p>
-<p>Some stretches are grey. They are here so that the order is true, and cannot go into a trip.</p>
-</div>
+</details>
 
-<h2>What was looked at</h2>
+<h2>Your stretches</h2>
+<p id="howmany"></p>
+<p id="legend" class="legend soft"></p>
+<div class="find">
+<label for="search">Search by region name</label>
+<input type="search" id="search" autocomplete="off" spellcheck="false" aria-describedby="found">
+<button type="button" id="search-clear" hidden>Show every stretch again</button>
+</div>
+<p id="found" aria-live="polite"></p>
+<div class="buttons"><button type="button" id="unfold" hidden>Open the folded stretches</button></div>
+<p id="unused" class="warn" hidden></p>
+<div id="list"></div>
+
+<h2>The trips your answers make</h2>
+<p class="soft">Nothing is made by this page. This is what the plan would have in it.</p>
+<div id="preview"></div>
+
+<details id="looked">
+<summary>What was looked at, and what was left out</summary>
+<h3>What was looked at</h3>
 <ul id="about"></ul>
 <h3>Sources</h3>
 <ul id="sources"></ul>
-<h2>What was left out, and why</h2>
+<h3>What was left out, and why</h3>
 <ul id="left-out"></ul>
 <details>
 <summary>The same photos at other gaps</summary>
@@ -132,14 +191,7 @@ the gap. This is how many there would be at other gaps.</p>
 <table id="gaps"></table>
 </div>
 </details>
-
-<h2>Your list</h2>
-<p id="unused" class="warn" hidden></p>
-<div id="list"></div>
-
-<h2>The trips your answers make</h2>
-<p class="soft">Nothing is made by this page. This is what the plan would have in it.</p>
-<div id="preview"></div>
+</details>
 </main>
 <div class="bar" id="bar">
 <div class="bar-in">
@@ -149,10 +201,12 @@ the gap. This is how many there would be at other gaps.</p>
 <p id="kept" class="soft"></p>
 </div>
 <div class="buttons">
-<button type="button" id="download">Download answers</button>
+<button type="button" id="download" class="primary">Download answers</button>
 <button type="button" id="copy">Copy answers</button>
 <button type="button" id="show">Show the text</button>
 </div>
+<p class="soft">It saves a file named trips-answers.json. Then tell the person who runs the tool
+that it is saved.</p>
 <textarea id="text" readonly spellcheck="false" aria-label="Your answers, as text" hidden></textarea>
 </div>
 </div>
@@ -165,7 +219,7 @@ const Trips = (() => {
   "use strict";
 
   const FILE = "trips-answers.json";
-  const NO = "Leave it out";
+  const NO = "Not a visit – leave it out";
   const ASK = "I don't remember";
   const LEAVE_DAY = "Leave this day out";
   const INCLUDE_DAY = "Include this day";
@@ -221,7 +275,7 @@ const Trips = (() => {
   function answerWord(data, value) {
     if (value === "no") return NO;
     if (value === "?") return ASK;
-    return value + " " + data.page.quality[value];
+    return value + " – " + data.page.quality[value];
   }
 
   const marksNothing = (data, value) => Number(value) < data.page.marks_from;
@@ -507,16 +561,170 @@ const Trips = (() => {
 
   function wordsLabel(run) {
     const kinds = [...new Set(run.reasons.map(kindOf))];
-    return "Your own words. Without them this stretch goes into no trip. They release: " +
+    return "Needed: your own words. Write only what you remember yourself. Without them this " +
+      "stretch goes into no trip. They are needed because " +
       kinds.map((k) => RELEASES[k]).join("; ") + ".";
   }
 
   const WHY_NOT = {
-    held: "Held: it goes into a trip only with words of yours.",
-    fixed: "It cannot go into a trip.",
-    there: "Nothing to answer.",
+    held: "This stretch needs your own words, as well as an answer.",
+    fixed: "This stretch cannot go into a trip.",
+    there: "This stretch is on your profile already. Nothing to answer.",
     offered: "",
   };
+
+  /* -- how the list is laid out: what is shown, and what is folded away in its place */
+
+  /* A run that takes a quality has a card of its own. The rest is folded. */
+  const answerable = (run) => ["offered", "held"].includes(run.status);
+
+  /* The list in its order: runs and edges, with every row of runs that take no quality, and the
+     edges between them, in one fold. An edge beside a fold is in it only where it is forced, for
+     only then is there nothing to answer in it. Flattened, it is run, edge, run, ... as before. */
+  function layout(data) {
+    const items = [];
+    let fold = null;
+    data.runs.forEach((run, n) => {
+      const here = { run: n };
+      if (n) {
+        const edge = { edge: n - 1 };
+        const forced = data.boundaries[n - 1].forced;
+        const was = !answerable(data.runs[n - 1]);
+        if (was && !answerable(run)) {
+          fold.items.push(edge);
+        } else if (was) {
+          if (forced) fold.items.push(edge);
+          else items.push(edge);
+          fold = null;
+        } else if (!answerable(run)) {
+          fold = { items: [] };
+          if (forced) fold.items.push(edge);
+          else items.push(edge);
+          items.push(fold);
+        } else {
+          items.push(edge);
+        }
+      } else if (!answerable(run)) {
+        fold = { items: [] };
+        items.push(fold);
+      }
+      (answerable(run) ? items : fold.items).push(here);
+    });
+    return items;
+  }
+
+  const flat = (items) => items.flatMap((item) => (item.items ? flat(item.items) : [item]));
+
+  function foldText(data, fold) {
+    const runs = fold.items.filter((i) => "run" in i).map((i) => data.runs[i.run]);
+    const there = runs.filter((r) => r.status === "there").length;
+    const parts = [];
+    if (there) parts.push(there + " on your profile already");
+    if (runs.length - there) parts.push(runs.length - there + " that cannot go into a trip");
+    return "Folded here: " + plural(runs.length, "more stretch", "more stretches") + " (" +
+      parts.join(", ") + "). ";
+  }
+
+  /* How many questions in a fold are not answered: they hold the trip they are in, as anywhere. */
+  function openIn(data, store, fold) {
+    return fold.items.filter((i) => ("run" in i
+      ? takes(data, data.runs[i.run]).length && !store.get("run:" + idOf(data.runs[i.run]))
+      : !data.boundaries[i.edge].forced && data.boundaries[i.edge].suggestions.length &&
+        !store.get("cut:" + cutOf(data.boundaries[i.edge])))).length;
+  }
+
+  const openText = (n) => (n ? plural(n, "question") + " in here " + (n === 1 ? "has" : "have") +
+    " no answer yet." : "");
+
+  /* -- finding a region by its name */
+
+  const plainCase = (text) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+  function matches(data, run, query) {
+    const q = plainCase(query);
+    return !q || plainCase(shown(data, run.name)).includes(q) || String(run.region) === q;
+  }
+
+  const foundText = (n) => (n ? plural(n, "stretch", "stretches") + " found."
+    : "No stretch has that in its region name. Check the spelling, or type fewer letters.");
+
+  /* -- a card, in plain words */
+
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+    "Dec"];
+
+  function dateOf(day) {
+    const [y, m, d] = day.split("-").map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(y, m - 1, d);
+    return date;
+  }
+
+  function longDay(day, year = true) {
+    const date = dateOf(day);
+    return DAYS[date.getUTCDay()] + " " + date.getUTCDate() + " " + MONTHS[date.getUTCMonth()] +
+      (year ? " " + date.getUTCFullYear() : "");
+  }
+
+  function longSpan(first, last) {
+    if (first === last) return longDay(first);
+    return longDay(first, first.slice(0, 4) !== last.slice(0, 4)) + " to " + longDay(last);
+  }
+
+  const dayCount = (first, last) => Math.round((dateOf(last) - dateOf(first)) / 86400000) + 1;
+
+  function whenText(run) {
+    const silent = run.silent.length ? " (" + run.silent.length + " with no photo)" : "";
+    return longSpan(run.first, run.last) + " · " + plural(dayCount(run.first, run.last), "day") +
+      silent + " · " + plural(run.photos, "photo");
+  }
+
+  const regionName = (data, run) => shown(data, run.name, "Region " + run.region);
+
+  const ASK_RUN = "Was this a visit? Press one answer.";
+  const ASK_FIXED = "It takes one answer only:";
+
+  function edgeQuestion(data, prior, after) {
+    return "From " + regionName(data, prior) + " to " + regionName(data, after) +
+      ": one trip, or does a new trip start here?";
+  }
+
+  const STANDING = 'Nothing here suggests a new trip, so it stands at "' + CUT_WORDS.same +
+    '". You can change it.';
+
+  /* What the answers mean, with the site's own words for each quality. */
+  function meanings(data) {
+    const q = qualities(data);
+    const marking = q.filter((v) => !marksNothing(data, v));
+    const not = q.filter((v) => marksNothing(data, v));
+    return [
+      '"' + answerWord(data, marking[0]) + '" to "' + answerWord(data, marking[marking.length - 1]) +
+        '": the stretch goes into its trip, as a visit of that kind.',
+      ...not.map((v) => '"' + answerWord(data, v) + '": ' + MARKS_NOTHING + " on NomadMania."),
+      '"' + NO + '": it goes into no trip. It never removes anything from your profile.',
+      '"' + ASK + '": a final answer. The whole trip that the stretch is in is not made.',
+      "Leaving a question blank is fine. Then the trip that it is in is not made.",
+    ];
+  }
+
+  function legend(data) {
+    const not = qualities(data).filter((v) => marksNothing(data, v));
+    return not.map((v) => '"' + answerWord(data, v) + '" does not mark the region on ' +
+      "NomadMania. ").join("") + "A blank is fine: it holds the trip it is in, and that trip " +
+      "is not made.";
+  }
+
+  function howMany(data) {
+    const ask = data.runs.filter(answerable);
+    const held = ask.filter((r) => r.status === "held").length;
+    const rest = data.runs.length - ask.length;
+    return plural(ask.length, "stretch", "stretches") + " can go into a trip" +
+      (held ? ", and " + held + " of them " + (held === 1 ? "needs" : "need") +
+        " your own words as well" : "") + "." +
+      (rest ? " " + plural(rest, "other stretch", "other stretches") + " are folded away in " +
+        "their place: they are on your profile already, or cannot go into a trip." : "");
+  }
 
   /* Days that follow one another are written as one span. */
   function dayList(days) {
@@ -555,7 +763,7 @@ const Trips = (() => {
       : (row.date_from || "no date") + " to " + (row.date_to || "no date"));
 
   function visitText(data, v) {
-    const word = qualities(data).includes(String(v.quality)) ? v.quality + " " + data.page.quality[v.quality]
+    const word = qualities(data).includes(String(v.quality)) ? answerWord(data, String(v.quality))
       : v.quality === 0 ? data.page.no_visit : "quality " + v.quality;
     return ends(v) + ", " + word + (v.trip_id === null ? "" : ", in a trip");
   }
@@ -770,6 +978,8 @@ const Trips = (() => {
     idOf, inOf, incomplete, joinable, jumpText, keptNote, leavable, leftOut, marksNothing, openStore,
     outOf, plainText, preview, problemOf, problems, refusal, runTitle, says, sources, takes,
     tripLines, tripsTitle, unusedNote, visitLines, visitsTitle, wordsLabel, wordsProblem,
+    ASK_FIXED, ASK_RUN, STANDING, answerable, edgeQuestion, flat, foldText, foundText, howMany,
+    layout, legend, longDay, longSpan, matches, meanings, openIn, openText, regionName, whenText,
   };
 })();
 </script>
@@ -784,6 +994,9 @@ const Trips = (() => {
   const store = Trips.openStore(() => window.localStorage, data);
   const before = store.size();
   const redraw = []; /* of every run and every boundary */
+  const cards = []; /* [box, run], for the search */
+  const edges = []; /* [box, edge, prior, after] */
+  const folds = []; /* [box, the fold, whether it was open before a search] */
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -829,7 +1042,8 @@ const Trips = (() => {
     put("said", ""); /* it was about a file without this answer */
   }
 
-  /* One button for each value, and what is pressed when nothing is answered, or "". */
+  /* One button for each value, and what is pressed when nothing is answered, or "". The
+     qualities are in a grid of their own. */
   function choices(row, key, values, word, standing) {
     const buttons = values.map((v) => [v, button("", word(v), () => {
       if (v === standing) {
@@ -845,13 +1059,15 @@ const Trips = (() => {
       const now = store.get(key) || standing;
       for (const [v, b] of buttons) b.setAttribute("aria-pressed", String(v === now));
     });
+    const quals = el("div", "quals");
+    if (values.some((v) => /^\d$/.test(v))) row.append(quals);
     for (const [v, b] of buttons) {
       const box = el("span", /^\d$/.test(v) ? "choice" : "");
       box.append(b);
       if (/^\d$/.test(v) && Trips.marksNothing(data, v)) {
         box.append(el("span", "soft", " " + Trips.MARKS_NOTHING));
       }
-      row.append(box);
+      (/^\d$/.test(v) ? quals : row).append(box);
     }
     if (!standing) row.append(button("clear", "Clear this answer", () => answered(key, "")));
   }
@@ -859,47 +1075,65 @@ const Trips = (() => {
   function drawRun(run, n) {
     const id = Trips.idOf(run);
     const values = Trips.takes(data, run);
-    const grey = run.status === "fixed" || run.status === "there";
-    const box = el("div", grey ? "run grey" : "run");
-    const name = el("p", "name", Trips.runTitle(data, run));
+    const grey = !Trips.answerable(run);
+    const box = el("div", grey ? "run grey" : run.status === "held" ? "run held" : "run");
+    const name = el("h3", "name", Trips.regionName(data, run));
     name.setAttribute("id", "name-" + n);
     name.setAttribute("dir", "auto");
+    const when = el("p", "when", Trips.whenText(run));
+    when.setAttribute("id", "when-" + n);
+    box.append(name, when);
+
+    /* Why it is held, or cannot go into a trip, before anything is asked. */
+    if (Trips.WHY_NOT[run.status] || run.reasons.length) {
+      const why = el("div", run.status === "held" ? "hold" : "");
+      if (Trips.WHY_NOT[run.status]) why.append(el("p", "why", Trips.WHY_NOT[run.status]));
+      if (run.reasons.length) {
+        why.append(listOf("reasons", run.reasons.map((r) => Trips.plainText(data, r))));
+      }
+      box.append(why);
+    }
+    run.flight.forEach((day, i) => drawDay(box, "flight-" + n + "-" + i, Trips.flightText(run, i),
+      Trips.leavable(run).includes(day) && [Trips.outOf(run, day), "out", Trips.LEAVE_DAY]));
+    run.jump.forEach((day, i) => drawDay(box, "jump-" + n + "-" + i, Trips.jumpText(run, i),
+      Trips.joinable(run).includes(day) && [Trips.inOf(run, day), "in", Trips.INCLUDE_DAY]));
+
+    const row = el("div", "buttons");
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-labelledby", "name-" + n + " when-" + n);
+    if (values.length) {
+      const ask = el("p", "ask", Trips.answerable(run) ? Trips.ASK_RUN : Trips.ASK_FIXED);
+      box.append(ask);
+      choices(row, "run:" + id, values, (v) => Trips.answerWord(data, v), "");
+    }
+    box.append(row);
+    if (run.status === "held") drawWords(box, run, n);
+
+    /* The rest of what is known of it, closed. */
+    const more = el("details", "more");
+    more.append(el("summary", "", "More about this stretch"));
     const said = el("div", "facts");
     said.append(...Trips.facts(data, run).map((f) => {
       const line = el("div", "", f);
       line.setAttribute("dir", "auto");
       return line;
     }));
-    box.append(name, said);
-    run.flight.forEach((day, i) => drawDay(box, "flight-" + n + "-" + i, Trips.flightText(run, i),
-      Trips.leavable(run).includes(day) && [Trips.outOf(run, day), "out", Trips.LEAVE_DAY]));
-    run.jump.forEach((day, i) => drawDay(box, "jump-" + n + "-" + i, Trips.jumpText(run, i),
-      Trips.joinable(run).includes(day) && [Trips.inOf(run, day), "in", Trips.INCLUDE_DAY]));
+    more.append(said);
+    if (run.flags.length) {
+      more.append(listOf("flags", run.flags.map((f) => Trips.plainText(data, f))));
+    }
     const visits = Trips.visitLines(data, run);
-    if (visits.length) box.append(boxOf("visits", Trips.visitsTitle(visits.length), visits));
+    if (visits.length) more.append(boxOf("visits", Trips.visitsTitle(visits.length), visits));
     const trips = Trips.tripLines(data, run);
     if (trips.length > 3) {
-      box.append(boxOf("over", Trips.tripsTitle(trips.length), trips));
+      more.append(boxOf("over", Trips.tripsTitle(trips.length), trips));
     } else if (trips.length) {
       const few = el("div", "over");
       few.append(el("div", "", Trips.tripsTitle(trips.length)), listOf("", trips));
-      box.append(few);
+      more.append(few);
     }
-    if (run.flags.length) {
-      box.append(listOf("flags", run.flags.map((f) => Trips.plainText(data, f))));
-    }
-    if (Trips.WHY_NOT[run.status]) box.append(el("p", "why", Trips.WHY_NOT[run.status]));
-    if (run.reasons.length) {
-      box.append(listOf("reasons", run.reasons.map((r) => Trips.plainText(data, r))));
-    }
-    const row = el("div", "buttons");
-    row.setAttribute("role", "group");
-    row.setAttribute("aria-labelledby", "name-" + n);
-    if (values.length) {
-      choices(row, "run:" + id, values, (v) => Trips.answerWord(data, v), "");
-    }
-    box.append(row);
-    if (run.status === "held") drawWords(box, run, n);
+    box.append(more);
+    cards.push([box, run]);
     return box;
   }
 
@@ -946,8 +1180,10 @@ const Trips = (() => {
 
   function drawEdge(edge, prior, after) {
     const box = el("div", "between");
+    if (!edge.forced) box.append(el("p", "ask", Trips.edgeQuestion(data, prior, after)));
     const notes = Trips.edgeNotes(data, edge, after);
     if (notes.length) box.append(listOf("", notes));
+    else if (!edge.forced) box.append(el("p", "soft", Trips.STANDING));
     const row = el("div", "buttons");
     row.setAttribute("role", "group");
     row.setAttribute("aria-label", "Between " + Trips.runTitle(data, prior) + " and " +
@@ -957,7 +1193,50 @@ const Trips = (() => {
         (v) => Trips.CUT_WORDS[v], edge.suggestions.length ? "" : "same");
     }
     box.append(row);
+    edges.push([box, edge, prior, after]);
     return box;
+  }
+
+  function drawItem(item) {
+    if ("run" in item) return drawRun(data.runs[item.run], item.run);
+    if ("edge" in item) {
+      return drawEdge(data.boundaries[item.edge], data.runs[item.edge], data.runs[item.edge + 1]);
+    }
+    const box = el("details", "fold");
+    const head = el("summary");
+    const open = el("span", "fold-open warn");
+    head.append(el("span", "", Trips.foldText(data, item)), open);
+    box.append(head, ...item.items.map(drawItem));
+    redraw.push(() => {
+      const text = Trips.openText(Trips.openIn(data, store, item));
+      if (open.textContent !== text) open.textContent = text;
+      open.hidden = !text;
+    });
+    folds.push([box, item, false]);
+    return box;
+  }
+
+  /* Only the names are looked in. A fold with a stretch found in it is opened while the search
+     lasts, and is as it was after it. */
+  let searching = false;
+  function search() {
+    const query = $("search").value;
+    const on = Boolean(query.trim());
+    if (on && !searching) folds.forEach((f) => { f[2] = f[0].open; });
+    const found = new Set(data.runs.filter((run) => Trips.matches(data, run, query)));
+    for (const [box, run] of cards) box.hidden = on && !found.has(run);
+    for (const [box, edge, prior, after] of edges) {
+      box.hidden = on && (edge.forced || !(found.has(prior) || found.has(after)));
+    }
+    for (const f of folds) {
+      const inside = Trips.flat(f[1].items).some((i) => "run" in i && found.has(data.runs[i.run]));
+      f[0].hidden = on && !inside;
+      if (on) f[0].open = inside;
+      else if (searching) f[0].open = f[2];
+    }
+    searching = on;
+    $("search-clear").hidden = !on;
+    put("found", on ? Trips.foundText(found.size) : "");
   }
 
   function drawPreview() {
@@ -1060,6 +1339,9 @@ const Trips = (() => {
   const stop = Trips.incomplete(data);
   $("incomplete").textContent = stop;
   $("incomplete").hidden = !stop;
+  $("meanings").replaceChildren(...lines(Trips.meanings(data)));
+  $("legend").textContent = Trips.legend(data);
+  $("howmany").textContent = Trips.howMany(data);
   $("about").replaceChildren(...lines(Trips.about(data)));
   $("sources").replaceChildren(...lines(Trips.sources(data)));
   $("left-out").replaceChildren(...lines(Trips.leftOut(data)));
@@ -1073,20 +1355,35 @@ const Trips = (() => {
     return row;
   }));
 
-  const nodes = [];
-  data.runs.forEach((run, n) => {
-    if (n) nodes.push(drawEdge(data.boundaries[n - 1], data.runs[n - 1], run));
-    nodes.push(drawRun(run, n));
-  });
+  const nodes = Trips.layout(data).map(drawItem);
   $("list").replaceChildren(...nodes);
   if (!nodes.length) $("list").append(el("p", "soft", "Nothing is on this list."));
 
+  /* Every fold opens at once, and closes again. Nothing is answered by it. */
+  const SHUT = "Open the folded stretches", OPENED = "Close the folded stretches";
+  $("unfold").hidden = !folds.length;
+  $("unfold").addEventListener("click", () => {
+    const open = $("unfold").textContent !== OPENED;
+    folds.forEach((f) => { f[0].open = open; });
+    $("unfold").textContent = open ? OPENED : SHUT;
+  });
+  $("unfold").textContent = SHUT;
+
+  $("search").addEventListener("input", search);
+  $("search-clear").addEventListener("click", () => {
+    $("search").value = "";
+    search();
+    $("search").focus();
+  });
   $("download").addEventListener("click", download);
   $("copy").addEventListener("click", copy);
   $("show").addEventListener("click", showText);
   window.addEventListener("storage", refresh);
   /* A page the browser kept has seen no event. */
-  window.addEventListener("pageshow", refresh);
+  window.addEventListener("pageshow", () => {
+    refresh();
+    search(); /* a kept page can have kept what was typed in the search */
+  });
   /* Focus scrolls clear of the bar, however tall it is now. */
   if (window.ResizeObserver) {
     new window.ResizeObserver(() => {
@@ -1095,6 +1392,7 @@ const Trips = (() => {
   }
 
   drawAll();
+  search();
   $("start").hidden = true;
 })();
 </script>
